@@ -419,3 +419,58 @@ class TestLegacyHistoryMigration:
         assert entries[0]["timestamp"] == "2026-04-01 10:00"
         assert "Broken" in entries[0]["content"]
         assert "migration." in entries[0]["content"]
+
+
+class TestMemoryStoreRAG:
+    """RAG (vector retrieval) related tests for MemoryStore."""
+
+    def test_get_memory_context_without_rag_returns_full_memory(self, tmp_path):
+        store = MemoryStore(tmp_path)
+        store.write_memory("important fact\n\n## Section\nMore content")
+        ctx = store.get_memory_context()
+        assert "Long-term Memory" in ctx
+        assert "important fact" in ctx
+        assert "More content" in ctx
+
+    def test_get_memory_context_without_query_returns_full_memory(self, tmp_path):
+        store = MemoryStore(tmp_path)
+        store.write_memory("fact")
+        # Even if RAG were configured, passing no query falls back
+        ctx = store.get_memory_context(query=None)
+        assert "fact" in ctx
+
+    def test_get_memory_context_with_query_but_no_rag_falls_back(self, tmp_path):
+        store = MemoryStore(tmp_path)
+        store.write_memory("full memory content")
+        ctx = store.get_memory_context(query="some query")
+        # No RAG configured, so should return full content
+        assert "full memory content" in ctx
+
+    def test_needs_reindex_returns_false_when_no_store(self, tmp_path):
+        store = MemoryStore(tmp_path)
+        assert store.needs_reindex() is False
+
+    def test_full_memory_context_returns_empty_when_missing(self, tmp_path):
+        store = MemoryStore(tmp_path)
+        assert store._full_memory_context() == ""
+
+    def test_full_memory_context_includes_heading(self, tmp_path):
+        store = MemoryStore(tmp_path)
+        store.write_memory("test")
+        ctx = store._full_memory_context()
+        assert ctx == "## Long-term Memory\ntest"
+
+    def test_setup_rag_stores_references(self, tmp_path):
+        store = MemoryStore(tmp_path)
+        vs = object()
+        embedder = object()
+        cfg = object()
+        store.setup_rag(vs, embedder, cfg)
+        assert store._rag_store is vs
+        assert store._rag_embedder is embedder
+        assert store._rag_config is cfg
+
+    def test_get_memory_context_empty_memory(self, tmp_path):
+        store = MemoryStore(tmp_path)
+        assert store.get_memory_context() == ""
+        assert store.get_memory_context(query="something") == ""

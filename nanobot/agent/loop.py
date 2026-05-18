@@ -34,7 +34,7 @@ from nanobot.agent.tools.self import MyTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
-from nanobot.config.schema import AgentDefaults
+from nanobot.config.schema import AgentDefaults, MemoryConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.providers.factory import ProviderSnapshot
 from nanobot.session.manager import Session, SessionManager
@@ -300,6 +300,7 @@ class AgentLoop:
         image_generation_provider_configs: dict[str, ProviderConfig] | None = None,
         provider_snapshot_loader: Callable[[], ProviderSnapshot] | None = None,
         provider_signature: tuple[object, ...] | None = None,
+        memory_config: MemoryConfig | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -310,6 +311,7 @@ class AgentLoop:
         self.provider = provider
         self._provider_snapshot_loader = provider_snapshot_loader
         self._provider_signature = provider_signature
+        self._memory_config = memory_config or MemoryConfig()
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = (
@@ -404,11 +406,47 @@ class AgentLoop:
             provider=provider,
             model=self.model,
         )
+        self._init_rag()
         self._register_default_tools()
         self._runtime_vars: dict[str, Any] = {}
         self._current_iteration: int = 0
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
+
+    def _init_rag(self) -> None:
+        """Initialize RAG backend if enabled in config."""
+        if not self._memory_config.rag_enabled:
+            return
+
+        api_key = getattr(self.provider, "_api_key", None) or getattr(
+            self.provider, "api_key", None
+        )
+        if not api_key:
+            logger.warning("RAG enabled but no API key available on provider; skipping RAG")
+            return
+
+        from nanobot.memory.embedding import EmbeddingProvider
+        from nanobot.memory.vector_store import VectorStore
+
+        persist_path = self.workspace / "memory" / (
+            self._memory_config.vector_store_path or "chroma_db"
+        )
+        vector_store = VectorStore(persist_path)
+        embedder = EmbeddingProvider(
+            api_key=api_key,
+            api_base=getattr(self.provider, "_api_base", None)
+            or getattr(self.provider, "api_base", None),
+            model=self._memory_config.embedding_model,
+        )
+        self.context.memory.setup_rag(
+            vector_store, embedder, self._memory_config
+        )
+        logger.info(
+            "RAG: enabled model={} top_k={} chunk_size={}",
+            self._memory_config.embedding_model,
+            self._memory_config.top_k,
+            self._memory_config.chunk_size,
+        )
 
     @classmethod
     def from_config(
@@ -452,6 +490,7 @@ class AgentLoop:
             consolidation_ratio=defaults.consolidation_ratio,
             max_messages=defaults.max_messages,
             tools_config=config.tools,
+            memory_config=defaults.memory,
             **extra,
         )
 

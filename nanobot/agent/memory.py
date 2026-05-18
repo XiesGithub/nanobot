@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import time as _time
 import weakref
 from contextlib import suppress
 from datetime import datetime
@@ -64,6 +65,10 @@ class MemoryStore:
         self._git = GitStore(workspace, tracked_files=[
             "SOUL.md", "USER.md", "memory/MEMORY.md", "memory/.dream_cursor",
         ])
+        # RAG backend (lazy-initialized via setup_rag)
+        self._rag_store: Any = None
+        self._rag_embedder: Any = None
+        self._rag_config: Any = None
         self._maybe_migrate_legacy_history()
 
     @property
@@ -226,9 +231,104 @@ class MemoryStore:
 
     # -- context injection (used by context.py) ------------------------------
 
-    def get_memory_context(self) -> str:
+    def get_memory_context(self, query: str | None = None) -> str:
+        """Return memory context for the system prompt.
+
+        If *query* is provided and RAG is configured, embed the query and
+        retrieve only the top-K relevant chunks. Otherwise return the full
+        MEMORY.md content (existing behaviour).
+        """
+        if query and self._rag_store and self._rag_embedder and self._rag_config:
+            try:
+                if self.needs_reindex():
+                    self._sync_reindex()
+                return self._rag_retrieve(query)
+            except Exception:
+                logger.warning("RAG retrieval failed, falling back to full MEMORY.md")
+        return self._full_memory_context()
+
+    def _full_memory_context(self) -> str:
         long_term = self.read_memory()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
+
+    # -- RAG ------------------------------------------------------------------
+
+    def setup_rag(self, vector_store: Any, embedder: Any, config: Any) -> None:
+        """Configure the RAG backend. Called once during AgentLoop startup."""
+        self._rag_store = vector_store
+        self._rag_embedder = embedder
+        self._rag_config = config
+
+    def needs_reindex(self) -> bool:
+        """Check whether MEMORY.md has been modified since the last index."""
+        if not self._rag_store:
+            return False
+        last_indexed = self._rag_store.get_index_mtime()
+        if last_indexed is None:
+            return True
+        try:
+            return self.memory_file.stat().st_mtime > last_indexed
+        except FileNotFoundError:
+            return True
+
+    def _sync_reindex(self) -> None:
+        """Re-index MEMORY.md synchronously (called during context building)."""
+        if not (self._rag_store and self._rag_embedder and self._rag_config):
+            return
+        content = self.read_memory()
+        if not content.strip():
+            self._rag_store.clear()
+            self._rag_store.set_index_mtime(_time.time())
+            return
+        from nanobot.memory.indexer import chunk_memory
+
+        chunks = chunk_memory(
+            content,
+            self._rag_config.chunk_size,
+            self._rag_config.chunk_overlap,
+        )
+        texts = [c.text for c in chunks]
+        embeddings = self._rag_embedder.embed_sync(texts)
+        self._rag_store.clear()
+        self._rag_store.add(
+            ids=[c.chunk_id for c in chunks],
+            documents=texts,
+            embeddings=embeddings,
+            metadatas=[{"heading": c.heading, "position": c.position} for c in chunks],
+        )
+        self._rag_store.set_index_mtime(self.memory_file.stat().st_mtime)
+        logger.info("RAG: indexed {} chunks from MEMORY.md", len(chunks))
+
+    async def reindex_memory(self) -> bool:
+        """Re-index MEMORY.md asynchronously. Returns True if indexed."""
+        if not (self._rag_store and self._rag_embedder and self._rag_config):
+            return False
+        content = self.read_memory()
+        if not content.strip():
+            self._rag_store.clear()
+            self._rag_store.set_index_mtime(_time.time())
+            return True
+        from nanobot.memory.indexer import index_memory
+
+        n = await index_memory(
+            content,
+            self._rag_embedder,
+            self._rag_store,
+            self._rag_config.chunk_size,
+            self._rag_config.chunk_overlap,
+        )
+        self._rag_store.set_index_mtime(self.memory_file.stat().st_mtime)
+        logger.info("RAG: indexed {} chunks from MEMORY.md", n)
+        return True
+
+    def _rag_retrieve(self, query: str) -> str:
+        """Embed *query*, retrieve top-K chunks, and format as context."""
+        embedding = self._rag_embedder.embed_query_sync(query)
+        results = self._rag_store.query(embedding, top_k=self._rag_config.top_k)
+        if not results:
+            return self._full_memory_context()
+        chunks_text = "\n\n".join(r["document"] for r in results)
+        return f"## Long-term Memory (relevant excerpts)\n{chunks_text}"
 
     # -- history.jsonl — append-only, JSONL format ---------------------------
 
@@ -1082,5 +1182,12 @@ class Dream:
             sha = self.store.git.auto_commit(commit_msg)
             if sha:
                 logger.info("Dream commit: {}", sha)
+
+        # Re-index MEMORY.md for RAG if content changed
+        if changelog:
+            try:
+                await self.store.reindex_memory()
+            except Exception:
+                logger.exception("Dream: RAG re-index failed (non-fatal)")
 
         return True

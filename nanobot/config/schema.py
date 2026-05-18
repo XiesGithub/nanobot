@@ -73,6 +73,17 @@ class DreamConfig(Base):
         return f"every {hours}h"
 
 
+class MemoryConfig(Base):
+    """Memory configuration including RAG (vector retrieval) settings."""
+
+    rag_enabled: bool = False
+    embedding_model: str = "text-embedding-3-small"
+    top_k: int = Field(default=5, ge=1, le=20)
+    vector_store_path: str | None = None
+    chunk_size: int = Field(default=500, ge=100, le=2000)
+    chunk_overlap: int = Field(default=50, ge=0, le=500)
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -120,6 +131,7 @@ class AgentDefaults(Base):
         serialization_alias="consolidationRatio",
     )  # Consolidation target ratio (0.5 = 50% of budget retained after compression)
     dream: DreamConfig = Field(default_factory=DreamConfig)
+    memory: MemoryConfig = Field(default_factory=lambda: MemoryConfig())
 
 
 class AgentsConfig(Base):

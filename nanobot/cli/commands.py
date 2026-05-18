@@ -940,6 +940,12 @@ def _run_gateway(
         payload=CronPayload(kind="system_event"),
     ))
     console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()}")
+    memory_cfg = config.agents.defaults.memory
+    if memory_cfg.rag_enabled:
+        console.print(
+            f"[green]✓[/green] RAG: enabled "
+            f"(model={memory_cfg.embedding_model}, top_k={memory_cfg.top_k})"
+        )
 
     async def _open_browser_when_ready() -> None:
         """Wait for the gateway to bind, then point the user's browser at the webui."""
