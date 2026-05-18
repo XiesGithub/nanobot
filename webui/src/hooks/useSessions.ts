@@ -149,6 +149,7 @@ export function useSessionHistory(key: string | null): {
               role: m.role,
               content: m.content,
               createdAt: m.timestamp ? Date.parse(m.timestamp) : Date.now(),
+              ...(m.usage ? { usage: m.usage } : {}),
               ...(images ? { images } : {}),
               ...(media ? { media } : {}),
             },

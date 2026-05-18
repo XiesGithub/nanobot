@@ -126,6 +126,14 @@ class _LoopHook(AgentHook):
                 )
                 if thought:
                     await self._on_progress(thought)
+                elif (
+                    context.response
+                    and (
+                        context.response.reasoning_content
+                        or context.response.thinking_blocks
+                    )
+                ):
+                    await self._on_progress("Reasoning completed; preparing tool call.")
             tool_hint = self._loop._strip_think(self._loop._tool_hint(context.tool_calls))
             tool_events = [build_tool_event_start_payload(tc) for tc in context.tool_calls]
             await invoke_on_progress(
@@ -208,6 +216,7 @@ class TurnContext:
     all_messages: list[dict[str, Any]] = field(default_factory=list)
     stop_reason: str = ""
     had_injections: bool = False
+    usage: dict[str, Any] = field(default_factory=dict)
 
     user_persisted_early: bool = False
     save_skip: int = 0
@@ -1288,6 +1297,7 @@ class AgentLoop:
         had_injections: bool,
         generated_media: list[str],
         on_stream: Callable[[str], Awaitable[None]] | None,
+        usage: dict[str, Any] | None = None,
     ) -> OutboundMessage | None:
         """Assemble the final outbound message from turn results."""
         # MessageTool suppression
@@ -1306,6 +1316,9 @@ class AgentLoop:
         )
         if on_stream is not None and stop_reason not in {"ask_user", "error", "tool_error"}:
             meta["_streamed"] = True
+        usage_payload = self._usage_payload(usage or {}, self.model)
+        if usage_payload is not None:
+            meta["_usage"] = usage_payload
 
         return OutboundMessage(
             channel=msg.channel,
@@ -1416,6 +1429,7 @@ class AgentLoop:
         ctx.all_messages = all_msgs
         ctx.stop_reason = stop_reason
         ctx.had_injections = had_injections
+        ctx.usage = dict(self._last_usage)
         return "ok"
 
     async def _state_save(self, ctx: TurnContext) -> str:
@@ -1431,6 +1445,7 @@ class AgentLoop:
             media = existing_media if isinstance(existing_media, list) else []
             last_msg["media"] = list(dict.fromkeys([*media, *ctx.generated_media]))
 
+        self._attach_usage_to_final_assistant(ctx.all_messages, ctx.usage, self.model)
         self._save_turn(ctx.session, ctx.all_messages, ctx.save_skip)
         ctx.session.enforce_file_cap(on_archive=self.context.memory.raw_archive)
         self._clear_pending_user_turn(ctx.session)
@@ -1453,8 +1468,70 @@ class AgentLoop:
             ctx.had_injections,
             ctx.generated_media,
             ctx.on_stream,
+            ctx.usage,
         )
         return "ok"
+
+    @staticmethod
+    def _usage_payload(usage: dict[str, Any], model: str | None = None) -> dict[str, Any] | None:
+        """Normalize provider token usage for UI display.
+
+        Providers reliably return token counts, but this project does not carry
+        a current pricing table for every supported model/provider pair. Cost
+        is therefore explicit but nullable instead of inventing stale numbers.
+        """
+        if not usage:
+            return None
+
+        def _int_value(*keys: str) -> int:
+            for key in keys:
+                value = usage.get(key)
+                try:
+                    parsed = int(value or 0)
+                except (TypeError, ValueError):
+                    continue
+                if parsed:
+                    return parsed
+            return 0
+
+        prompt = _int_value("prompt_tokens", "input_tokens")
+        completion = _int_value("completion_tokens", "output_tokens")
+        total = _int_value("total_tokens") or (prompt + completion)
+        cached = _int_value("cached_tokens", "cache_read_input_tokens")
+        if prompt <= 0 and completion <= 0 and total <= 0 and cached <= 0:
+            return None
+        payload: dict[str, Any] = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": total,
+            "estimated_cost_usd": None,
+            "cost_source": "unavailable",
+        }
+        if cached:
+            payload["cached_tokens"] = cached
+        if model:
+            payload["model"] = model
+        return payload
+
+    def _attach_usage_to_final_assistant(
+        self,
+        messages: list[dict[str, Any]],
+        usage: dict[str, Any],
+        model: str | None,
+    ) -> None:
+        payload = self._usage_payload(usage, model)
+        if payload is None:
+            return
+        for message in reversed(messages):
+            if message.get("role") != "assistant":
+                continue
+            if message.get("tool_calls"):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and not content.strip():
+                continue
+            message["usage"] = payload
+            return
 
     def _sanitize_persisted_blocks(
         self,

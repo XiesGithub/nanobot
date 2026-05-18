@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  appendMemoryDocument,
+  deleteMemoryDocument,
   deleteSession,
+  fetchMemoryDocuments,
   fetchSessionMessages,
+  fetchSubagentTasks,
   listSessions,
   listSlashCommands,
+  updateMemoryDocument,
   updateProviderSettings,
   updateSettings,
   updateWebSearchSettings,
@@ -83,6 +88,81 @@ describe("webui API helpers", () => {
       expect.objectContaining({
         headers: { Authorization: "Bearer tok" },
       }),
+    );
+  });
+
+  it("fetches and mutates memory documents through query routes", async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        documents: [
+          {
+            id: "memory",
+            label: "Long-term Memory",
+            description: "durable facts",
+            path: "memory/MEMORY.md",
+            content: "Remember this",
+          },
+        ],
+        document: {
+          id: "memory",
+          label: "Long-term Memory",
+          description: "durable facts",
+          path: "memory/MEMORY.md",
+          content: "Remember this",
+        },
+      }),
+    } as Response);
+
+    await fetchMemoryDocuments("tok");
+    await updateMemoryDocument("tok", "memory", "A&B");
+    await appendMemoryDocument("tok", "profile", "new note");
+    await deleteMemoryDocument("tok", "profile");
+
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/memory",
+      expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/memory/update?doc=memory&content=A%26B",
+      expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/memory/append?doc=profile&content=new+note",
+      expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      4,
+      "/api/memory/delete?doc=profile",
+      expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
+    );
+  });
+
+  it("fetches subagent task status", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        count: 1,
+        tasks: [
+          {
+            task_id: "sub-1",
+            label: "analysis",
+            task_description: "analyze data",
+            phase: "awaiting_tools",
+            iteration: 1,
+            elapsed_seconds: 4,
+          },
+        ],
+      }),
+    } as Response);
+
+    await expect(fetchSubagentTasks("tok")).resolves.toHaveLength(1);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/subagents",
+      expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
     );
   });
 

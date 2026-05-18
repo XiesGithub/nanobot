@@ -17,6 +17,7 @@ from nanobot.config.schema import Config
 from nanobot.utils.restart import consume_restart_notice_from_env, format_restart_completed_message
 
 if TYPE_CHECKING:
+    from nanobot.agent.loop import AgentLoop
     from nanobot.session.manager import SessionManager
 
 
@@ -54,10 +55,12 @@ class ChannelManager:
         bus: MessageBus,
         *,
         session_manager: "SessionManager | None" = None,
+        agent_loop: "AgentLoop | None" = None,
     ):
         self.config = config
         self.bus = bus
         self._session_manager = session_manager
+        self._agent_loop = agent_loop
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
         self._origin_reply_fingerprints: dict[tuple[str, str, str], str] = {}
@@ -90,6 +93,9 @@ class ChannelManager:
                 # surface; other channels stay oblivious to these knobs.
                 if cls.name == "websocket" and self._session_manager is not None:
                     kwargs["session_manager"] = self._session_manager
+                if cls.name == "websocket" and self._agent_loop is not None:
+                    kwargs["agent_loop"] = self._agent_loop
+                if cls.name == "websocket":
                     static_path = _default_webui_dist()
                     if static_path is not None:
                         kwargs["static_dist_path"] = static_path
@@ -280,14 +286,19 @@ class ChannelManager:
                     )
 
                 if msg.metadata.get("_progress"):
-                    if msg.metadata.get("_tool_hint") and not self._should_send_progress(
-                        msg.channel, tool_hint=True,
-                    ):
-                        continue
-                    if not msg.metadata.get("_tool_hint") and not self._should_send_progress(
-                        msg.channel, tool_hint=False,
-                    ):
-                        continue
+                    webui_progress = (
+                        msg.channel == "websocket"
+                        and msg.metadata.get("webui") is True
+                    )
+                    if not webui_progress:
+                        if msg.metadata.get("_tool_hint") and not self._should_send_progress(
+                            msg.channel, tool_hint=True,
+                        ):
+                            continue
+                        if not msg.metadata.get("_tool_hint") and not self._should_send_progress(
+                            msg.channel, tool_hint=False,
+                        ):
+                            continue
 
                 if msg.metadata.get("_retry_wait"):
                     continue

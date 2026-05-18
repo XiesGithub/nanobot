@@ -198,6 +198,10 @@ export function useNanobotStream(
               const merged: UIMessage = {
                 ...last,
                 traces: [...(last.traces ?? [last.content]), line],
+                traceEvents: [
+                  ...(last.traceEvents ?? []),
+                  ...(ev.tool_events ?? []),
+                ],
                 content: line,
               };
               return [...prev.slice(0, -1), merged];
@@ -210,6 +214,7 @@ export function useNanobotStream(
                 kind: "trace",
                 content: line,
                 traces: [line],
+                ...(ev.tool_events ? { traceEvents: ev.tool_events } : {}),
                 createdAt: Date.now(),
               },
             ];
@@ -238,6 +243,7 @@ export function useNanobotStream(
               role: "assistant",
               content,
               createdAt: Date.now(),
+              ...(ev.usage ? { usage: ev.usage } : {}),
               ...(ev.buttons && ev.buttons.length > 0 ? { buttons: ev.buttons } : {}),
               ...(hasMedia ? { media } : {}),
             },

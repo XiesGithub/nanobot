@@ -42,6 +42,7 @@ from nanobot.utils.media_decode import (
 )
 
 if TYPE_CHECKING:
+    from nanobot.agent.loop import AgentLoop
     from nanobot.session.manager import SessionManager
 
 
@@ -425,6 +426,7 @@ class WebSocketChannel(BaseChannel):
         bus: MessageBus,
         *,
         session_manager: "SessionManager | None" = None,
+        agent_loop: "AgentLoop | None" = None,
         static_dist_path: Path | None = None,
     ):
         if isinstance(config, dict):
@@ -444,6 +446,7 @@ class WebSocketChannel(BaseChannel):
         self._stop_event: asyncio.Event | None = None
         self._server_task: asyncio.Task[None] | None = None
         self._session_manager = session_manager
+        self._agent_loop = agent_loop
         self._static_dist_path: Path | None = (
             static_dist_path.resolve() if static_dist_path is not None else None
         )
@@ -578,6 +581,21 @@ class WebSocketChannel(BaseChannel):
 
         if got == "/api/commands":
             return self._handle_commands(request)
+
+        if got == "/api/memory":
+            return self._handle_memory(request)
+
+        if got == "/api/memory/update":
+            return self._handle_memory_update(request)
+
+        if got == "/api/memory/append":
+            return self._handle_memory_append(request)
+
+        if got == "/api/memory/delete" or got == "/api/memory/clear":
+            return self._handle_memory_delete(request)
+
+        if got == "/api/subagents":
+            return self._handle_subagents(request)
 
         if got == "/api/settings/update":
             return self._handle_settings_update(request)
@@ -766,6 +784,120 @@ class WebSocketChannel(BaseChannel):
         if not self._check_api_token(request):
             return _http_error(401, "Unauthorized")
         return _http_json_response({"commands": builtin_command_palette()})
+
+    _MEMORY_DOCS: dict[str, dict[str, str]] = {
+        "memory": {
+            "id": "memory",
+            "label": "Long-term Memory",
+            "description": "Durable facts, preferences, and working context the agent may reuse.",
+            "path": "memory/MEMORY.md",
+            "read": "read_memory",
+            "write": "write_memory",
+        },
+        "profile": {
+            "id": "profile",
+            "label": "User Profile",
+            "description": "User-facing profile data and preference notes.",
+            "path": "USER.md",
+            "read": "read_user",
+            "write": "write_user",
+        },
+    }
+
+    def _memory_store(self) -> Any | None:
+        context = getattr(self._agent_loop, "context", None)
+        return getattr(context, "memory", None)
+
+    def _memory_doc_payload(self, doc_id: str) -> dict[str, Any] | None:
+        store = self._memory_store()
+        spec = self._MEMORY_DOCS.get(doc_id)
+        if store is None or spec is None:
+            return None
+        reader = getattr(store, spec["read"], None)
+        if not callable(reader):
+            return None
+        return {
+            "id": spec["id"],
+            "label": spec["label"],
+            "description": spec["description"],
+            "path": spec["path"],
+            "content": reader(),
+        }
+
+    def _selected_memory_doc(self, request: WsRequest) -> tuple[str | None, dict[str, str] | None]:
+        query = _parse_query(request.path)
+        doc_id = (_query_first(query, "doc") or _query_first(query, "id") or "").strip()
+        if not doc_id:
+            doc_id = "memory"
+        return doc_id, self._MEMORY_DOCS.get(doc_id)
+
+    def _handle_memory(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        if self._memory_store() is None:
+            return _http_error(503, "memory store unavailable")
+        docs = [
+            payload
+            for doc_id in self._MEMORY_DOCS
+            if (payload := self._memory_doc_payload(doc_id)) is not None
+        ]
+        return _http_json_response({"documents": docs})
+
+    def _write_memory_doc(self, request: WsRequest, content: str) -> Response:
+        if not self._check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        store = self._memory_store()
+        if store is None:
+            return _http_error(503, "memory store unavailable")
+        doc_id, spec = self._selected_memory_doc(request)
+        if spec is None or doc_id is None:
+            return _http_error(400, "unknown memory document")
+        writer = getattr(store, spec["write"], None)
+        if not callable(writer):
+            return _http_error(503, "memory document unavailable")
+        writer(content)
+        payload = self._memory_doc_payload(doc_id) or {}
+        return _http_json_response({"document": payload})
+
+    def _handle_memory_update(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        query = _parse_query(request.path)
+        content = _query_first(query, "content")
+        if content is None:
+            return _http_error(400, "content is required")
+        return self._write_memory_doc(request, content)
+
+    def _handle_memory_append(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        query = _parse_query(request.path)
+        addition = (_query_first(query, "content") or "").strip()
+        if not addition:
+            return _http_error(400, "content is required")
+        doc_id, spec = self._selected_memory_doc(request)
+        if spec is None or doc_id is None:
+            return _http_error(400, "unknown memory document")
+        current = self._memory_doc_payload(doc_id)
+        if current is None:
+            return _http_error(503, "memory document unavailable")
+        existing = str(current.get("content") or "").rstrip()
+        content = f"{existing}\n\n{addition}\n" if existing else f"{addition}\n"
+        return self._write_memory_doc(request, content)
+
+    def _handle_memory_delete(self, request: WsRequest) -> Response:
+        return self._write_memory_doc(request, "")
+
+    def _handle_subagents(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        manager = getattr(self._agent_loop, "subagents", None)
+        if manager is None or not hasattr(manager, "list_statuses"):
+            return _http_error(503, "subagent manager unavailable")
+        query = _parse_query(request.path)
+        session_key = _query_first(query, "session_key") or _query_first(query, "sessionKey")
+        tasks = manager.list_statuses(session_key=session_key)
+        return _http_json_response({"count": len(tasks), "tasks": tasks})
 
     def _handle_settings_update(self, request: WsRequest) -> Response:
         if not self._check_api_token(request):
@@ -1464,6 +1596,8 @@ class WebSocketChannel(BaseChannel):
                 payload["media_urls"] = urls
         if msg.reply_to:
             payload["reply_to"] = msg.reply_to
+        if msg.metadata.get("_usage") is not None:
+            payload["usage"] = msg.metadata["_usage"]
         # Mark intermediate agent breadcrumbs (tool-call hints, generic
         # progress strings) so WS clients can render them as subordinate
         # trace rows rather than conversational replies.
@@ -1471,6 +1605,8 @@ class WebSocketChannel(BaseChannel):
             payload["kind"] = "tool_hint"
         elif msg.metadata.get("_progress"):
             payload["kind"] = "progress"
+        if msg.metadata.get("_tool_events") is not None:
+            payload["tool_events"] = msg.metadata["_tool_events"]
         raw = json.dumps(payload, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" ")

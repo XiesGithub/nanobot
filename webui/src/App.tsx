@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DeleteConfirm } from "@/components/DeleteConfirm";
+import { BackgroundTasksIndicator } from "@/components/BackgroundTasksIndicator";
+import { MemoryView } from "@/components/memory/MemoryView";
 import { Sidebar } from "@/components/Sidebar";
 import { SettingsView } from "@/components/settings/SettingsView";
 import { ThreadShell } from "@/components/thread/ThreadShell";
@@ -36,7 +38,7 @@ type BootState =
 const SIDEBAR_STORAGE_KEY = "nanobot-webui.sidebar";
 const RESTART_STARTED_KEY = "nanobot-webui.restartStartedAt";
 const SIDEBAR_WIDTH = 272;
-type ShellView = "chat" | "settings";
+type ShellView = "chat" | "settings" | "memory";
 
 function AuthForm({
   failed,
@@ -331,6 +333,11 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
     setMobileSidebarOpen(false);
   }, []);
 
+  const onOpenMemory = useCallback(() => {
+    setView("memory");
+    setMobileSidebarOpen(false);
+  }, []);
+
   const onBackToChat = useCallback(() => {
     setView("chat");
     setMobileSidebarOpen(false);
@@ -416,6 +423,12 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
       });
       return;
     }
+    if (view === "memory") {
+      document.title = t("app.documentTitle.chat", {
+        title: t("memory.title", { defaultValue: "Knowledge / Memory" }),
+      });
+      return;
+    }
     document.title = activeSession
       ? t("app.documentTitle.chat", { title: headerTitle })
       : t("app.documentTitle.base");
@@ -430,8 +443,9 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
     onRequestDelete: (key: string, label: string) =>
       setPendingDelete({ key, label }),
     onOpenSettings,
+    onOpenMemory,
   };
-  const showMainSidebar = view !== "settings";
+  const showMainSidebar = view !== "settings" && view !== "memory";
 
   return (
     <div className="relative flex h-full w-full overflow-hidden">
@@ -484,6 +498,8 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
             onRestart={onRestart}
             isRestarting={isRestarting}
           />
+        ) : view === "memory" ? (
+          <MemoryView onBackToChat={onBackToChat} />
         ) : (
           <ThreadShell
             session={activeSession}
@@ -498,6 +514,8 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
           />
         )}
       </main>
+
+      <BackgroundTasksIndicator />
 
       <DeleteConfirm
         open={!!pendingDelete}

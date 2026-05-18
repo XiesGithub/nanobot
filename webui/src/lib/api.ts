@@ -1,9 +1,11 @@
 import type {
   ChatSummary,
+  MemoryDocument,
   ProviderSettingsUpdate,
   SettingsPayload,
   SettingsUpdate,
   SlashCommand,
+  SubagentTask,
   WebSearchSettingsUpdate,
 } from "./types";
 
@@ -94,6 +96,15 @@ export async function fetchSessionMessages(
     /** Present on ``user`` turns that attached images. Paths have already
      * been stripped server-side; only the signed fetch URLs survive. */
     media_urls?: SessionMediaUrl[];
+    usage?: {
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+      cached_tokens?: number;
+      estimated_cost_usd?: number | null;
+      cost_source?: string;
+      model?: string;
+    };
   }>;
 }> {
   return request(
@@ -112,6 +123,74 @@ export async function deleteSession(
     token,
   );
   return body.deleted;
+}
+
+export async function fetchMemoryDocuments(
+  token: string,
+  base: string = "",
+): Promise<MemoryDocument[]> {
+  const body = await request<{ documents: MemoryDocument[] }>(
+    `${base}/api/memory`,
+    token,
+  );
+  return body.documents;
+}
+
+export async function updateMemoryDocument(
+  token: string,
+  doc: string,
+  content: string,
+  base: string = "",
+): Promise<MemoryDocument> {
+  const query = new URLSearchParams();
+  query.set("doc", doc);
+  query.set("content", content);
+  const body = await request<{ document: MemoryDocument }>(
+    `${base}/api/memory/update?${query}`,
+    token,
+  );
+  return body.document;
+}
+
+export async function appendMemoryDocument(
+  token: string,
+  doc: string,
+  content: string,
+  base: string = "",
+): Promise<MemoryDocument> {
+  const query = new URLSearchParams();
+  query.set("doc", doc);
+  query.set("content", content);
+  const body = await request<{ document: MemoryDocument }>(
+    `${base}/api/memory/append?${query}`,
+    token,
+  );
+  return body.document;
+}
+
+export async function deleteMemoryDocument(
+  token: string,
+  doc: string,
+  base: string = "",
+): Promise<MemoryDocument> {
+  const query = new URLSearchParams();
+  query.set("doc", doc);
+  const body = await request<{ document: MemoryDocument }>(
+    `${base}/api/memory/delete?${query}`,
+    token,
+  );
+  return body.document;
+}
+
+export async function fetchSubagentTasks(
+  token: string,
+  base: string = "",
+): Promise<SubagentTask[]> {
+  const body = await request<{ count: number; tasks: SubagentTask[] }>(
+    `${base}/api/subagents`,
+    token,
+  );
+  return body.tasks;
 }
 
 export async function fetchSettings(

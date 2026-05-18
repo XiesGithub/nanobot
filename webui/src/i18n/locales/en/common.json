@@ -51,11 +51,42 @@
     "noSearchResults": "No matching chats.",
     "recent": "Recent",
     "refreshSessions": "Refresh sessions",
+    "memory": "Knowledge / Memory",
     "settings": "Settings",
     "language": {
       "label": "Language",
       "ariaLabel": "Change language"
     }
+  },
+  "memory": {
+    "title": "Knowledge / Memory",
+    "subtitle": "Review and edit durable profile notes used by the agent.",
+    "backToChat": "Back to chat",
+    "docs": {
+      "memory": "Long-term Memory",
+      "profile": "User Profile"
+    },
+    "actions": {
+      "refresh": "Refresh",
+      "save": "Save",
+      "saving": "Saving",
+      "clear": "Clear",
+      "add": "Add note"
+    },
+    "status": {
+      "loading": "Loading memory...",
+      "saved": "Saved.",
+      "added": "Added.",
+      "cleared": "Cleared.",
+      "empty": "No memory documents available."
+    },
+    "newEntry": {
+      "label": "Add a new note",
+      "placeholder": "Write a preference, profile detail, or durable fact..."
+    }
+  },
+  "backgroundTasks": {
+    "running": "{{count}} background task(s) running..."
   },
   "settings": {
     "backToChat": "Back to chat",
@@ -334,7 +365,11 @@
     "toolMany": "Used {{count}} tools",
     "imageAttachment": "Image attachment",
     "copyReply": "Copy reply",
-    "copiedReply": "Copied reply"
+    "copiedReply": "Copied reply",
+    "usage": {
+      "summary": "Input {{input}} / Output {{output}} tokens · {{cost}}",
+      "costUnavailable": "cost n/a"
+    }
   },
   "lightbox": {
     "title": "Image preview",

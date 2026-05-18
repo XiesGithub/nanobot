@@ -360,6 +360,48 @@ async def test_send_session_updated_emits_session_updated_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_includes_usage_and_tool_events_metadata() -> None:
+    bus = MagicMock()
+    channel = WebSocketChannel({"enabled": True, "allowFrom": ["*"]}, bus)
+    mock_ws = AsyncMock()
+    channel._attach(mock_ws, "chat-1")
+
+    await channel.send(OutboundMessage(
+        channel="websocket",
+        chat_id="chat-1",
+        content='exec("ls")',
+        metadata={
+            "_progress": True,
+            "_tool_hint": True,
+            "_usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14,
+                "estimated_cost_usd": None,
+            },
+            "_tool_events": [
+                {
+                    "version": 1,
+                    "phase": "start",
+                    "call_id": "call-1",
+                    "name": "exec",
+                    "arguments": {"command": "ls"},
+                    "result": None,
+                    "error": None,
+                    "files": [],
+                    "embeds": [],
+                }
+            ],
+        },
+    ))
+
+    body = json.loads(mock_ws.send.await_args.args[0])
+    assert body["kind"] == "tool_hint"
+    assert body["usage"]["prompt_tokens"] == 10
+    assert body["tool_events"][0]["name"] == "exec"
+
+
+@pytest.mark.asyncio
 async def test_send_non_connection_closed_exception_is_raised() -> None:
     bus = MagicMock()
     channel = WebSocketChannel({"enabled": True, "allowFrom": ["*"]}, bus)

@@ -31,12 +31,29 @@ class SubagentStatus:
     label: str
     task_description: str
     started_at: float          # time.monotonic()
+    session_key: str | None = None
     phase: str = "initializing"  # initializing | awaiting_tools | tools_completed | final_response | done | error
     iteration: int = 0
     tool_events: list = field(default_factory=list)   # [{name, status, detail}, ...]
     usage: dict = field(default_factory=dict)          # token usage
     stop_reason: str | None = None
     error: str | None = None
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a JSON-safe status payload for WebUI/API consumers."""
+        return {
+            "task_id": self.task_id,
+            "label": self.label,
+            "task_description": self.task_description,
+            "session_key": self.session_key,
+            "phase": self.phase,
+            "iteration": self.iteration,
+            "elapsed_seconds": max(0.0, time.monotonic() - self.started_at),
+            "tool_events": list(self.tool_events),
+            "usage": dict(self.usage),
+            "stop_reason": self.stop_reason,
+            "error": self.error,
+        }
 
 
 class _SubagentHook(AgentHook):
@@ -143,6 +160,7 @@ class SubagentManager:
             label=display_label,
             task_description=task,
             started_at=time.monotonic(),
+            session_key=session_key,
         )
         self._task_statuses[task_id] = status
 
@@ -333,3 +351,23 @@ class SubagentManager:
             1 for tid in tids
             if tid in self._running_tasks and not self._running_tasks[tid].done()
         )
+
+    def list_statuses(self, session_key: str | None = None) -> list[dict[str, Any]]:
+        """Return snapshots for currently running subagents.
+
+        Finished tasks are intentionally omitted because completion is already
+        reported back into the conversation through the existing message bus.
+        """
+        task_ids: set[str]
+        if session_key:
+            task_ids = set(self._session_tasks.get(session_key, set()))
+        else:
+            task_ids = set(self._task_statuses)
+        rows: list[dict[str, Any]] = []
+        for task_id in sorted(task_ids):
+            task = self._running_tasks.get(task_id)
+            status = self._task_statuses.get(task_id)
+            if task is None or status is None or task.done():
+                continue
+            rows.append(status.snapshot())
+        return rows

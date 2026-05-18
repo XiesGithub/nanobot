@@ -30,6 +30,28 @@ export interface UIMediaAttachment {
   name?: string;
 }
 
+export interface ToolTraceEvent {
+  version?: number;
+  phase: "start" | "end" | "error" | string;
+  call_id?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+  result?: unknown;
+  error?: string | null;
+  files?: unknown[];
+  embeds?: unknown[];
+}
+
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cached_tokens?: number;
+  estimated_cost_usd?: number | null;
+  cost_source?: string;
+  model?: string;
+}
+
 export interface UIMessage {
   id: string;
   role: Role;
@@ -40,12 +62,14 @@ export interface UIMessage {
   /** For trace rows: each individual hint line, so consecutive hints can
    * render as a single collapsible group. */
   traces?: string[];
+  traceEvents?: ToolTraceEvent[];
   /** User turn: optimistic blob URLs for preview. Replay: placeholder chips. */
   images?: UIImage[];
   /** Signed or local UI-renderable media attachments. */
   media?: UIMediaAttachment[];
   /** Optional answer choices for a pending ask_user question. */
   buttons?: string[][];
+  usage?: TokenUsage;
 }
 
 export interface ChatSummary {
@@ -123,6 +147,28 @@ export interface SlashCommand {
   argHint?: string;
 }
 
+export interface MemoryDocument {
+  id: "memory" | "profile" | string;
+  label: string;
+  description: string;
+  path: string;
+  content: string;
+}
+
+export interface SubagentTask {
+  task_id: string;
+  label: string;
+  task_description: string;
+  session_key?: string | null;
+  phase: string;
+  iteration: number;
+  elapsed_seconds: number;
+  tool_events?: Array<Record<string, unknown>>;
+  usage?: Record<string, number>;
+  stop_reason?: string | null;
+  error?: string | null;
+}
+
 export type ConnectionStatus =
   | "idle"
   | "connecting"
@@ -147,6 +193,8 @@ export type InboundEvent =
       /** Present when the frame is an agent breadcrumb (e.g. tool hint,
        * generic progress line) rather than a conversational reply. */
       kind?: "tool_hint" | "progress";
+      tool_events?: ToolTraceEvent[];
+      usage?: TokenUsage;
     }
   | {
       event: "delta";

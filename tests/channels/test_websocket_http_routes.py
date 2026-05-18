@@ -4,6 +4,7 @@ import asyncio
 import functools
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ def _ch(
     bus: Any,
     *,
     session_manager: SessionManager | None = None,
+    agent_loop: Any | None = None,
     static_dist_path: Path | None = None,
     port: int = _PORT,
     **extra: Any,
@@ -37,6 +39,7 @@ def _ch(
         cfg,
         bus,
         session_manager=session_manager,
+        agent_loop=agent_loop,
         static_dist_path=static_dist_path,
     )
 
@@ -454,6 +457,87 @@ def test_localhost_without_auth_is_valid(bus: MagicMock) -> None:
     channel = _ch(bus, host="127.0.0.1")
     resp = channel._handle_webui_bootstrap(_LOCAL, _NO_HEADERS)
     assert resp.status_code == 200
+
+
+def test_memory_routes_read_update_append_and_clear(bus: MagicMock) -> None:
+    class Store:
+        memory = "Initial memory"
+        user = "Initial profile"
+
+        def read_memory(self) -> str:
+            return self.memory
+
+        def write_memory(self, content: str) -> None:
+            self.memory = content
+
+        def read_user(self) -> str:
+            return self.user
+
+        def write_user(self, content: str) -> None:
+            self.user = content
+
+    store = Store()
+    agent_loop = SimpleNamespace(context=SimpleNamespace(memory=store), subagents=None)
+    channel = _ch(bus, agent_loop=agent_loop)
+    channel._api_tokens["live"] = 9999999999.0
+    headers = {"Authorization": "Bearer live"}
+
+    list_resp = channel._handle_memory(SimpleNamespace(path="/api/memory", headers=headers))
+    assert list_resp.status_code == 200
+    docs = json.loads(list_resp.body)["documents"]
+    assert {doc["id"] for doc in docs} == {"memory", "profile"}
+
+    update_resp = channel._handle_memory_update(
+        SimpleNamespace(
+            path="/api/memory/update?doc=profile&content=Likes+concise+answers",
+            headers=headers,
+        )
+    )
+    assert update_resp.status_code == 200
+    assert store.user == "Likes concise answers"
+
+    append_resp = channel._handle_memory_append(
+        SimpleNamespace(
+            path="/api/memory/append?doc=profile&content=Prefers+tables",
+            headers=headers,
+        )
+    )
+    assert append_resp.status_code == 200
+    assert "Prefers tables" in store.user
+
+    clear_resp = channel._handle_memory_delete(
+        SimpleNamespace(path="/api/memory/delete?doc=profile", headers=headers)
+    )
+    assert clear_resp.status_code == 200
+    assert store.user == ""
+
+
+def test_subagents_route_returns_running_statuses(bus: MagicMock) -> None:
+    manager = SimpleNamespace(
+        list_statuses=MagicMock(return_value=[
+            {
+                "task_id": "sub-1",
+                "label": "analyze data",
+                "phase": "awaiting_tools",
+                "elapsed_seconds": 3.5,
+            }
+        ])
+    )
+    agent_loop = SimpleNamespace(context=None, subagents=manager)
+    channel = _ch(bus, agent_loop=agent_loop)
+    channel._api_tokens["live"] = 9999999999.0
+    req = SimpleNamespace(
+        path="/api/subagents?sessionKey=websocket:chat-1",
+        headers={"Authorization": "Bearer live"},
+    )
+
+    resp = channel._handle_subagents(req)
+
+    assert resp.status_code == 200
+    body = json.loads(resp.body)
+    assert body["count"] == 1
+    assert body["tasks"][0]["task_id"] == "sub-1"
+    manager.list_statuses.assert_called_once_with(session_key="websocket:chat-1")
 
 
 def test_bootstrap_rejects_wrong_secret(bus: MagicMock) -> None:

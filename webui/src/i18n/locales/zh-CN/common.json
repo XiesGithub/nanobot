@@ -39,11 +39,42 @@
     "noSearchResults": "没有匹配的会话。",
     "recent": "最近对话",
     "refreshSessions": "刷新会话",
+    "memory": "知识库 / 记忆",
     "settings": "设置",
     "language": {
       "label": "语言",
       "ariaLabel": "切换语言"
     }
+  },
+  "memory": {
+    "title": "知识库 / 记忆",
+    "subtitle": "查看并编辑 Agent 会长期使用的画像与偏好记录。",
+    "backToChat": "返回对话",
+    "docs": {
+      "memory": "长期记忆",
+      "profile": "用户画像"
+    },
+    "actions": {
+      "refresh": "刷新",
+      "save": "保存",
+      "saving": "保存中",
+      "clear": "清空",
+      "add": "添加记录"
+    },
+    "status": {
+      "loading": "正在加载记忆...",
+      "saved": "已保存。",
+      "added": "已添加。",
+      "cleared": "已清空。",
+      "empty": "暂无可用的记忆文档。"
+    },
+    "newEntry": {
+      "label": "添加新记录",
+      "placeholder": "写入一条偏好、画像细节或长期事实..."
+    }
+  },
+  "backgroundTasks": {
+    "running": "{{count}} 个后台任务正在分析..."
   },
   "settings": {
     "backToChat": "返回对话",
@@ -322,7 +353,11 @@
     "toolMany": "已使用 {{count}} 个工具",
     "imageAttachment": "图片附件",
     "copyReply": "复制回复",
-    "copiedReply": "已复制回复"
+    "copiedReply": "已复制回复",
+    "usage": {
+      "summary": "输入 {{input}} / 输出 {{output}} tokens · {{cost}}",
+      "costUnavailable": "成本不可估"
+    }
   },
   "lightbox": {
     "title": "图片预览",

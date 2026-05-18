@@ -5,7 +5,13 @@ import { useTranslation } from "react-i18next";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { MarkdownText } from "@/components/MarkdownText";
 import { cn } from "@/lib/utils";
-import type { UIImage, UIMediaAttachment, UIMessage } from "@/lib/types";
+import type {
+  TokenUsage,
+  ToolTraceEvent,
+  UIImage,
+  UIMediaAttachment,
+  UIMessage,
+} from "@/lib/types";
 
 interface MessageBubbleProps {
   message: UIMessage;
@@ -95,6 +101,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           <MarkdownText>{message.content}</MarkdownText>
           {message.isStreaming && <StreamCursor />}
           {media.length > 0 ? <MessageMedia media={media} align="left" /> : null}
+          {message.usage ? <UsageTail usage={message.usage} /> : null}
           {showAssistantActions ? (
             <div className="mt-2 flex items-center gap-1 text-muted-foreground">
               <button
@@ -373,6 +380,24 @@ function Dot({ delay }: { delay: string }) {
   );
 }
 
+function UsageTail({ usage }: { usage: TokenUsage }) {
+  const { t } = useTranslation();
+  const cost =
+    typeof usage.estimated_cost_usd === "number"
+      ? `$${usage.estimated_cost_usd.toFixed(6)}`
+      : t("message.usage.costUnavailable", { defaultValue: "cost n/a" });
+  return (
+    <div className="mt-2 text-[10.5px] leading-tight text-muted-foreground/45">
+      {t("message.usage.summary", {
+        defaultValue: "Input {{input}} / Output {{output}} tokens · {{cost}}",
+        input: usage.prompt_tokens ?? 0,
+        output: usage.completion_tokens ?? 0,
+        cost,
+      })}
+    </div>
+  );
+}
+
 interface TraceGroupProps {
   message: UIMessage;
   animClass: string;
@@ -386,6 +411,7 @@ interface TraceGroupProps {
 function TraceGroup({ message, animClass }: TraceGroupProps) {
   const { t } = useTranslation();
   const lines = message.traces ?? [message.content];
+  const events = message.traceEvents ?? [];
   const count = lines.length;
   const [open, setOpen] = useState(true);
   return (
@@ -414,22 +440,92 @@ function TraceGroup({ message, animClass }: TraceGroupProps) {
         />
       </button>
       {open && (
-        <ul
+        <div
           className={cn(
-            "mt-1 space-y-0.5 border-l border-muted-foreground/20 pl-3",
+            "mt-1 space-y-1.5 border-l border-muted-foreground/20 pl-3",
             "animate-in fade-in-0 slide-in-from-top-1 duration-200",
           )}
         >
-          {lines.map((line, i) => (
-            <li
-              key={i}
-              className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-muted-foreground/90"
-            >
-              {line}
-            </li>
-          ))}
-        </ul>
+          {events.length > 0 ? <ToolTraceEvents events={events} /> : null}
+          {lines
+            .filter((line) => line.trim().length > 0)
+            .map((line, i) => (
+              <div
+                key={i}
+                className="rounded-md bg-muted/35 px-2 py-1.5 text-[11.5px] text-muted-foreground/90"
+              >
+                <MarkdownText className="text-muted-foreground/90 prose-p:my-0 prose-ul:my-0 prose-li:my-0 prose-pre:my-0">
+                  {line}
+                </MarkdownText>
+              </div>
+            ))}
+        </div>
       )}
     </div>
   );
+}
+
+function ToolTraceEvents({ events }: { events: ToolTraceEvent[] }) {
+  return (
+    <div className="space-y-1">
+      {events.map((event, index) => (
+        <div
+          key={`${event.call_id ?? event.name ?? "tool"}-${event.phase}-${index}`}
+          className="rounded-md bg-muted/35 px-2 py-1.5 text-[11px] text-muted-foreground/90"
+        >
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "h-1.5 w-1.5 rounded-full",
+                event.phase === "error"
+                  ? "bg-destructive/70"
+                  : event.phase === "end"
+                    ? "bg-emerald-500/70"
+                    : "bg-muted-foreground/55 animate-pulse",
+              )}
+              aria-hidden
+            />
+            <span className="font-medium text-foreground/60">
+              {event.name || "tool"}
+            </span>
+            <span className="ml-auto uppercase tracking-wide text-muted-foreground/55">
+              {event.phase}
+            </span>
+          </div>
+          <TracePayload event={event} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TracePayload({ event }: { event: ToolTraceEvent }) {
+  const args = compactJson(event.arguments);
+  const result = compactJson(event.result);
+  const error = event.error ? truncateText(String(event.error), 220) : "";
+  if (!args && !result && !error) return null;
+  return (
+    <div className="mt-1 space-y-0.5 font-mono text-[10.5px] leading-relaxed text-muted-foreground/75">
+      {args ? <div className="break-words">args: {args}</div> : null}
+      {result ? <div className="break-words">result: {result}</div> : null}
+      {error ? <div className="break-words text-destructive/75">error: {error}</div> : null}
+    </div>
+  );
+}
+
+function compactJson(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "";
+  try {
+    return truncateText(
+      typeof value === "string" ? value : JSON.stringify(value),
+      220,
+    );
+  } catch {
+    return truncateText(String(value), 220);
+  }
+}
+
+function truncateText(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  return `${value.slice(0, Math.max(0, limit - 1))}…`;
 }

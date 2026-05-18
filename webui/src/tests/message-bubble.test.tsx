@@ -79,6 +79,50 @@ describe("MessageBubble", () => {
     expect(screen.queryByText('weather("get")')).not.toBeInTheDocument();
   });
 
+  it("renders structured tool events and usage metadata", () => {
+    render(
+      <MessageBubble
+        message={{
+          id: "trace-usage",
+          role: "tool",
+          kind: "trace",
+          content: 'exec("ls")',
+          traces: ['exec("ls")'],
+          traceEvents: [
+            {
+              phase: "start",
+              call_id: "call-1",
+              name: "exec",
+              arguments: { command: "ls" },
+            },
+          ],
+          createdAt: Date.now(),
+        }}
+      />,
+    );
+    expect(screen.getByText("exec")).toBeInTheDocument();
+    expect(screen.getByText(/args:.*ls/)).toBeInTheDocument();
+
+    render(
+      <MessageBubble
+        message={{
+          id: "usage",
+          role: "assistant",
+          content: "done",
+          createdAt: Date.now(),
+          usage: {
+            prompt_tokens: 12,
+            completion_tokens: 7,
+            total_tokens: 19,
+            estimated_cost_usd: null,
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/Input 12 \/ Output 7 tokens/)).toBeInTheDocument();
+  });
+
   it("renders video media as an inline player", () => {
     const message: UIMessage = {
       id: "a1",
