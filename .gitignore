@@ -90,6 +90,8 @@ nano.*.save
 # Environment & secrets (keep examples tracked if needed)
 .env.*
 !.env.example
+api.txt
+config备份.txt
 
 # Logs & temp
 *.log
