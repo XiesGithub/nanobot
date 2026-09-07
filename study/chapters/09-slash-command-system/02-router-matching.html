@@ -1,0 +1,53 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>07.02 · Router 与四级匹配 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="slash-command-system" data-page="router-matching">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-command-router-py-15" data-original-href="../../../nanobot/command/router.py" data-source-label="router.py" title="阅读 nanobot/command/router.py:15–55 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Commands · router</p><h1>CommandRouter：四级匹配与参数提取</h1><p class="lead">Router 是纯内存路由表，不依赖 Provider、SessionManager 或 Channel。它把“需要抢占”的命令与普通命令分开，并用最长前缀优先避免参数型命令互相遮蔽。</p><div class="meta-row"><span class="chip">dict lookup</span><span class="chip">longest prefix</span><span class="chip">case-insensitive</span><span class="chip">fallback interceptor</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">四个容器</h2><div class="code-block"><div class="code-head"><span>command/router.py:38–55</span><span>注册 API</span></div><pre><code>self._priority: dict[str, Handler] = {}
+self._exact: dict[str, Handler] = {}
+self._prefix: list[tuple[str, Handler]] = []
+self._interceptors: list[Handler] = []
+
+def prefix(self, pfx, handler):
+    self._prefix.append((pfx, handler))
+    self._prefix.sort(key=lambda p: len(p[0]), reverse=True)</code></pre></div>
+
+<h2 id="reading-section-02">匹配顺序</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>outside dispatch</small><b>priority</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>1</small><b>exact</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>prefix</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>interceptor</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>fallback</small><b>None</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>priority 不在普通 dispatch 内</h3><p><code>AgentLoop.run()</code> 先调用 <code>is_priority</code>，匹配后使用 <code>dispatch_priority</code>。这样它不必等待 session lock。</p></div>
+  <div data-step-panel><h3>exact 做完整字符串匹配</h3><p><code>/new</code> 可匹配，<code>/new now</code> 不匹配。字典查找简单确定，不会把额外文本误当参数。</p></div>
+  <div data-step-panel><h3>prefix 提取尾部参数</h3><p><code>/history 5</code> 命中 <code>"/history "</code>，然后执行 <code>ctx.args = ctx.raw[len(pfx):]</code>；参数的原始大小写不被破坏。</p></div>
+  <div data-step-panel><h3>interceptor 是动态兜底接口</h3><p>每个 interceptor 可检查上下文并返回响应，None 表示继续。当前默认命令没有注册 interceptor，它是 Router 已预留但尚未使用的能力。</p></div>
+  <div data-step-panel><h3>None 意味着交还 Agent</h3><p>Router 不会因为文本以 <code>/</code> 开头就报“未知命令”。未匹配时 Turn 转入 BUILD，所以 <code>/foo</code> 会成为普通用户消息。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">为什么每个带参数命令通常注册两次</h2><div class="code-block"><div class="code-head"><span>command/builtin.py:480–486</span><span>空参数 + 有参数</span></div><pre><code>router.exact("/history", cmd_history)
+router.prefix("/history ", cmd_history)
+
+router.exact("/dream-log", cmd_dream_log)
+router.prefix("/dream-log ", cmd_dream_log)
+
+router.exact("/dream-restore", cmd_dream_restore)
+router.prefix("/dream-restore ", cmd_dream_restore)</code></pre></div>
+<p>若只注册 prefix，裸命令没有尾随空格便不会命中；若只注册 exact，则无法携带 count 或 sha。二者指向同一个 Handler，由 Handler 判断 args 是否为空。</p>
+
+<h2 id="reading-section-04"><code>is_dispatchable_command()</code> 的真实用途</h2><div class="compare-grid"><div class="card"><h3>它不是完整识别器</h3><p>只检查 exact 与 prefix，明确不检查 priority 或 interceptor。因此 <code>/stop</code> 返回 false 并不是不可执行，而是应该走另一条更早的路径。</p></div><div class="card"><h3>它是“忙碌期是否直派”的保证</h3><p>当会话已有 pending queue，返回 true 表示随后调用 <code>dispatch()</code> 一定能命中，命令无需被塞进模型的 follow-up 注入队列。</p></div></div>
+
+<h2 id="reading-section-05">大小写与空白语义</h2><table class="source-table"><thead><tr><th>输入</th><th>识别结果</th><th>原因</th></tr></thead><tbody>
+  <tr><td><code>  /NEW  </code></td><td>在 AgentLoop 中命中 /new</td><td><code>run()</code> 先做 strip，Router 再 lower</td></tr>
+  <tr><td><code>/history 05</code></td><td>args 为 <code>05</code></td><td>Router 只切字符串，数字解释属于 Handler</td></tr>
+  <tr><td><code>/DREAM-LOG AbCd</code></td><td>命中，args 保留 <code>AbCd</code></td><td>匹配使用 lower 后副本，切片使用 raw</td></tr>
+  <tr><td><code>/historyx</code></td><td>不命中</td><td>注册前缀含尾随空格，避免错误吞掉相似名称</td></tr>
+  <tr><td><code>/unknown</code></td><td>交给 Agent</td><td>没有通用 slash 拒绝规则</td></tr>
+</tbody></table>
+
+<div class="callout"><strong>设计取舍：</strong>Router 不做通用参数 Schema，也不抛未知命令错误。代码极小、响应确定，但每个 Handler 必须自己解析与校验 args；如果命令数量大幅增长，执行表与展示表分离会成为主要维护成本。</div>
+
+<h2 id="reading-section-06">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-command-router-py-15" data-original-href="../../../nanobot/command/router.py" data-source-label="router.py:27" title="阅读 nanobot/command/router.py:15–55 的代表性摘录与讲解">router.py · 站内摘录</a></td><td>四级路由表</td></tr><tr><td><a href="workshop.html#guide-nanobot-command-router-py-57" data-original-href="../../../nanobot/command/router.py" data-source-label="router.py:57" title="阅读 nanobot/command/router.py:57–98 的代表性摘录与讲解">router.py · 站内摘录</a></td><td>priority / dispatchable 判定</td></tr><tr><td><a href="workshop.html#guide-nanobot-command-router-py-57" data-original-href="../../../nanobot/command/router.py" data-source-label="router.py:74" title="阅读 nanobot/command/router.py:57–98 的代表性摘录与讲解">router.py · 站内摘录</a></td><td>两种 dispatch</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/command/test_router_dispatchable.py" data-source-label="test_router_dispatchable.py" title="tests/command/test_router_dispatchable.py 的所属模块讲解；该文件未单独逐行收录">test_router_dispatchable.py · 模块讲解</a></td><td>匹配和忙碌期调用测试</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">为什么 prefix 列表要按长度降序？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>两个前缀可能包含关系，例如更具体的 <code>/cmd sub </code> 与 <code>/cmd </code>。长度降序保证先命中最具体规则，否则宽前缀会抢走请求并产生错误 args。</p></div></details></li><li><span class="review-question">为什么 <code>/stop</code> 不属于 is_dispatchable_command？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>/stop</code> 注册在 priority tier，而该方法按契约只检查 exact 和 prefix。这样 run 循环能把 priority 放到 session lock 之前处理，不与普通可直派命令混淆。</p></div></details></li><li><span class="review-question">未知 slash 文本最终会走到哪里？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Router 的 exact/prefix/interceptor 都不处理时返回 None；空闲时消息继续作为普通 user Turn 进入 BUILD/Runner，所以未知 slash 可由模型理解，忙碌时则进入 pending queue 作为追问注入。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">09.02 · Router 与四级匹配</footer></div></main></div></body></html>

@@ -1,0 +1,72 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>02.07 · Gateway 装配与运行时热更新 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head>
+<body data-study-root="../.." data-chapter="llm-provider-gateway" data-page="gateway-assembly"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="Gateway 源码" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">模块指南</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Gateway · composition root</p><h1>Gateway 装配与运行时热更新</h1><p class="lead">Gateway 不实现模型协议，但它拥有组装权：确定配置路径、创建一次 ProviderSnapshot，把依赖注入 AgentLoop，并提供后续重新加载函数。AgentLoop 则在 Turn 边界安全传播新的 Provider。</p><div class="meta-row"><span class="chip">composition root</span><span class="chip">dependency injection</span><span class="chip">signature compare</span><span class="chip">turn-boundary swap</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">启动装配链</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>resolved Config</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>build Snapshot</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>创建共享服务</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>AgentLoop.from_config</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>注入 reload 能力</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>6</small><b>启动异步服务</b></button>
+</div><div class="step-panels">
+  <div data-step-panel><h3>CLI 先加载并解析环境变量</h3><p>自定义 config path 会先记录，保证启动和后续 snapshot reload 指向同一文件。此时 Gateway 端口、workspace 和 Provider 参数都已类型化。</p></div>
+  <div data-step-panel><h3>Provider 配置错误在启动期失败</h3><p><code>build_provider_snapshot(config)</code> 内部调用 Factory；ValueError 被 Gateway 转成清晰启动错误，而不是等第一条用户消息到来才失败。</p></div>
+  <div data-step-panel><h3>先建立共享基础设施</h3><p>Gateway 创建 MessageBus、SessionManager 与 workspace CronService；这些对象与 Provider 一起进入 AgentLoop，避免核心类自己读取全局配置。</p></div>
+  <div data-step-panel><h3>from_config 负责参数映射</h3><p>它把 AgentDefaults 与 ToolsConfig 映射成构造参数；Gateway 显式传入已经创建的 provider、model、context window 和共享服务。</p></div>
+  <div data-step-panel><h3>Loader 与旧 signature 一并注入</h3><p><code>provider_snapshot_loader=load_provider_snapshot</code> 让 Loop 能重新读取；初始 signature 用于快速判断配置是否真的影响 Provider。</p></div>
+  <div data-step-panel><h3>Provider 已准备好后才启动事件循环</h3><p>Cron、Heartbeat、Agent 和 Channels 随后启动。Provider 创建失败不会留下一个接受消息但无法完成 Turn 的半启动 Gateway。</p></div>
+</div></section>
+
+<div class="code-block"><div class="code-head"><span>cli/commands.py · Provider 注入</span><span>核心源码</span></div><pre><code>provider_snapshot = build_provider_snapshot(config)
+
+agent = AgentLoop.from_config(
+    config, bus,
+    provider=provider_snapshot.provider,
+    model=provider_snapshot.model,
+    context_window_tokens=provider_snapshot.context_window_tokens,
+    session_manager=session_manager,
+    provider_snapshot_loader=load_provider_snapshot,
+    provider_signature=provider_snapshot.signature,
+)</code></pre></div>
+
+<h2 id="reading-section-02">每个 Turn 开始前的热更新</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">边界</div><div class="arch-items"><span class="arch-item">_process_message()</span><span>首先调用 <code>_refresh_provider_snapshot()</code></span></div></div>
+  <div class="arch-layer"><div class="arch-label">重载失败</div><div class="arch-items"><span class="arch-item">记录 exception</span><span>保留当前 Provider，继续处理消息</span></div></div>
+  <div class="arch-layer"><div class="arch-label">签名相同</div><div class="arch-items"><span class="arch-item">return</span><span>新建的临时 snapshot 不进入运行时</span></div></div>
+  <div class="arch-layer"><div class="arch-label">签名变化</div><div class="arch-items"><span class="arch-item">_apply_provider_snapshot()</span><span>整体替换下一 Turn 使用的模型依赖</span></div></div>
+</div>
+
+<h2 id="reading-section-03">切换需要同步哪些对象</h2><table class="source-table"><thead><tr><th>对象</th><th>更新内容</th><th>为什么</th></tr></thead><tbody>
+  <tr><td><code>AgentLoop</code></td><td>provider、model、context_window_tokens</td><td>后续 Context 预算与主运行参数</td></tr>
+  <tr><td><code>AgentRunner</code></td><td>provider</td><td>下一次模型调用必须走新客户端</td></tr>
+  <tr><td><code>SubagentManager</code></td><td>provider、model</td><td>之后 spawn 的任务不能继续使用旧模型</td></tr>
+  <tr><td><code>Consolidator</code></td><td>provider、model、context window</td><td>压缩调用和预算与主模型保持一致</td></tr>
+  <tr><td><code>Dream</code></td><td>provider、model</td><td>未配置专用 override 时跟随主 Provider</td></tr>
+</tbody></table>
+
+<div class="code-block"><div class="code-head"><span>agent/loop.py · 原子式传播</span><span>核心源码</span></div><pre><code>self.provider = provider
+self.model = model
+self.context_window_tokens = context_window_tokens
+self.runner.provider = provider
+self.subagents.set_provider(provider, model)
+self.consolidator.set_provider(provider, model, context_window_tokens)
+self.dream.set_provider(provider, model)
+self._provider_signature = snapshot.signature</code></pre></div>
+
+<h2 id="reading-section-04">为什么放在 Turn 边界</h2><p>Provider 是有状态对象，持有 HTTP client、OAuth token 或 circuit breaker。若在一次 AgentRunner 工具循环中途替换，前半段 assistant/tool 历史可能由旧协议产生，后半段却交给新协议，且并发中的 Subagent 也会出现竞态。当前设计只在新消息进入时检查，因此一个已经开始的 Turn 使用稳定 Provider；切换面向未来 Turn。</p>
+
+<div class="callout warning"><strong>热更新不是完整 Config 热加载：</strong>signature 只覆盖主 Provider 相关字段。<code>providerRetryMode</code>、Gateway host/port、工具与 MCP 配置等不在这条传播链上；修改这些配置通常需要重启。图像生成 Provider 配置也有独立生命周期。</div>
+
+<div class="callout warning"><strong>当前实现的资源边界：</strong><code>load_provider_snapshot()</code> 会先构造 Provider，再由 Loop 比较 signature；因此配置未变化时也会短暂创建一个随后丢弃的客户端。真正切换时旧 Provider 也没有统一的 <code>close()</code> 契约。这不改变选择结果，但属于后续可优化的客户端生命周期问题。</div>
+
+<h2 id="reading-section-05">Gateway 与 SDK 的差异</h2><div class="compare-grid">
+  <div class="card flat"><h3>Gateway</h3><p>显式构造 Snapshot 并注入 loader/signature，因此支持逐 Turn 检查；同时装配 Bus、Channels、Sessions、Cron 和 Heartbeat。</p></div>
+  <div class="card flat"><h3><code>Nanobot.from_config()</code></h3><p>直接由 <code>AgentLoop.from_config()</code> 创建 Provider，适合进程内调用；当前没有注入 snapshot loader，因此实例不会自动读取文件变化。</p></div>
+</div>
+
+<h2 id="reading-section-06">源码与测试入口</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="cli/commands.py:_gateway_run" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">cli/commands.py:_gateway_run · 模块讲解</a></td><td>Gateway 组合根、错误处理和依赖注入</td></tr>
+  <tr><td><a href="workshop.html#source-8" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py" title="阅读 nanobot/agent/loop.py:453–481 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td><code>from_config</code>、refresh 与 apply</td></tr>
+  <tr><td><a href="workshop.html#source-3" data-original-href="../../../nanobot/providers/factory.py" data-source-label="providers/factory.py" title="阅读 nanobot/providers/factory.py:21–62 的代表性摘录与讲解">providers/factory.py · 站内摘录</a></td><td>snapshot loader 与 signature</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/nanobot.py" data-source-label="nanobot.py" title="nanobot/nanobot.py 的所属模块讲解；该文件未单独逐行收录">nanobot.py · 模块讲解</a></td><td>SDK facade 的非热加载装配路径</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/test_runtime_refresh.py" data-source-label="tests/agent/test_runtime_refresh.py" title="tests/agent/test_runtime_refresh.py 的所属模块讲解；该文件未单独逐行收录">tests/agent/test_runtime_refresh.py · 模块讲解</a></td><td>Provider 切换向依赖对象传播的测试</td></tr>
+</tbody></table>
+<h2 id="reading-section-07">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 Gateway 要同时注入 snapshot loader 和初始 signature？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>初始 signature 告诉 AgentLoop 当前已装配的配置版本，loader 提供后续重新读取 snapshot 的能力。两者同时存在，Turn 开始时才能比较而不是无条件重建 Provider。</p></div></details></li><li><span class="review-question">配置重载失败时为什么继续使用旧 Provider？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>_refresh_provider_snapshot()</code> 捕获加载/构造异常并保留现有对象。旧 Provider 已可工作，因一次写到一半或无效配置就替换它会让所有新 Turn 立即失效。</p></div></details></li><li><span class="review-question">Provider 切换为什么必须同步 Consolidator 和 Dream？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Consolidator 和 Dream 都会直接调用模型，并依赖模型名、context window 和 Provider。只更新主 Runner 会让后台记忆任务继续使用旧端点或错误预算。</p></div></details></li><li><span class="review-question">为什么 SDK facade 默认没有配置文件热更新？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>SDK facade 直接用构造时提供的 snapshot 创建 AgentLoop，没有 Gateway 长驻配置文件监听/loader 的装配场景；若调用者需要切换，应显式重建或注入对应能力。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02.07 · Gateway 装配与运行时热更新</footer></div></main></div></body></html>

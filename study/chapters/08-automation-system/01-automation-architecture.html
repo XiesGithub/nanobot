@@ -1,0 +1,58 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08 · 自动化体系全景 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="automation-system" data-page="automation-architecture">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="Gateway 装配源码" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">模块指南</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Automation · architecture</p><h1>自动化体系全景</h1><p class="lead">自动化不是 AgentLoop 自己不断轮询时间。Gateway 创建两个长期服务：CronService 管理精确 Job，HeartbeatService 管理周期性任务判断；Dream 被注册到前者。</p><div class="meta-row"><span class="chip">Gateway composition root</span><span class="chip">callback inversion</span><span class="chip">background services</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">运行时装配顺序</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>创建 Cron</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>注入 Agent</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>绑定回调</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>注册 Dream</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>启动服务</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>Workspace 级任务仓库</h3><p>Gateway 先用 <code>workspace/cron/jobs.json</code> 创建 <code>CronService</code>，不同 workspace 的任务彼此隔离。</p></div>
+  <div data-step-panel><h3>让 Agent 获得 cron 工具</h3><p><code>AgentLoop.from_config(..., cron_service=cron)</code> 将服务传给工具加载器；只有服务存在时 <code>CronTool.enabled()</code> 才成立。</p></div>
+  <div data-step-panel><h3>控制反转</h3><p>服务本身不知道 Agent 和渠道细节。Gateway 定义 <code>on_cron_job</code>、Heartbeat 的 <code>on_execute/on_notify</code>，再赋给服务。</p></div>
+  <div data-step-panel><h3>系统任务进入同一调度器</h3><p>创建 id 固定为 <code>dream</code>、payload kind 为 <code>system_event</code> 的 Job；重启注册时按 id 替换，保持幂等。</p></div>
+  <div data-step-panel><h3>并行启动，逆序关闭</h3><p><code>cron.start()</code> 和 <code>heartbeat.start()</code> 先启动，再 gather Agent、Channels 和健康服务；关闭时停止 Heartbeat、Cron、Agent 并 flush Sessions。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="code-block"><div class="code-head"><span>cli/commands.py:650 · Composition root</span><span>概念摘录</span></div><pre><code>cron = CronService(workspace / "cron" / "jobs.json")
+agent = AgentLoop.from_config(config, bus, cron_service=cron)
+
+cron.on_job = on_cron_job
+heartbeat = HeartbeatService(
+    workspace=workspace,
+    on_execute=on_heartbeat_execute,
+    on_notify=on_heartbeat_notify,
+)
+
+cron.register_system_job(CronJob(id="dream", ...))</code></pre></div>
+
+<h2 id="reading-section-02">三者的责任边界</h2><table class="source-table"><thead><tr><th>机制</th><th>触发源</th><th>任务来源</th><th>执行方式</th><th>持久状态</th></tr></thead><tbody>
+  <tr><td>用户 Cron</td><td>at / every / cron</td><td>用户通过 Agent 调用 CronTool</td><td>进入独立的完整 Agent turn</td><td><code>cron/jobs.json</code></td></tr>
+  <tr><td>Heartbeat</td><td>固定 sleep interval</td><td><code>HEARTBEAT.md</code></td><td>先 LLM 判断，再进入 heartbeat Session</td><td>任务文本在 Markdown，短期历史在 Session</td></tr>
+  <tr><td>Dream</td><td>DreamConfig 构造的 CronSchedule</td><td>Gateway 启动时注册</td><td>直接调用 <code>agent.dream.run()</code></td><td>作为 system Job 存在 jobs.json</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-03">为什么 Cron 与 Heartbeat 不是一个服务</h2><div class="compare-grid">
+  <div class="card flat"><h3>Cron：确定性时间</h3><p>创建 Job 时已经知道下一次运行时间和明确 message。调度器只负责等到 due，再执行。</p></div>
+  <div class="card flat"><h3>Heartbeat：语义性判断</h3><p>每个 tick 都要重新读取任务清单，由模型结合当前时间判断是 <code>skip</code> 还是 <code>run</code>；“该不该做”不是纯时间计算。</p></div>
+</div>
+
+<h2 id="reading-section-04">两种回到 Agent 的路径</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">Cron agent_turn</div><div class="arch-items"><span class="arch-item">on_cron_job(job)</span><span>→ reminder preamble →</span><span class="arch-item">process_direct</span><span>session=<code>cron:{job.id}</code></span></div></div>
+  <div class="arch-layer"><div class="arch-label">Heartbeat run</div><div class="arch-items"><span class="arch-item">on_heartbeat_execute(tasks)</span><span>→ heartbeat preamble →</span><span class="arch-item">process_direct</span><span>session=<code>heartbeat</code></span></div></div>
+  <div class="arch-layer"><div class="arch-label">Dream system_event</div><div class="arch-items"><span class="arch-item">on_cron_job(job)</span><span>→ name == dream →</span><span class="arch-item">agent.dream.run()</span><span>不进入普通聊天 turn</span></div></div>
+</div>
+
+<h2 id="reading-section-05">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="cli/commands.py:650" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">cli/commands.py · 模块讲解</a></td><td>CronService 与 AgentLoop 的创建关系</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="cli/commands.py:716" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">cli/commands.py · 模块讲解</a></td><td><code>on_cron_job</code> 如何分流 Dream 与普通任务</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="cli/commands.py:817" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">cli/commands.py · 模块讲解</a></td><td>Heartbeat 如何进入完整 Agent Loop</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="cli/commands.py:923" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">cli/commands.py · 模块讲解</a></td><td>Dream 系统 Job 注册</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="cli/commands.py:962" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">cli/commands.py · 模块讲解</a></td><td>启动与关闭生命周期</td></tr>
+</tbody></table>
+<div class="callout warning"><strong>不要混淆：</strong>Heartbeat 自己维护 asyncio sleep loop，并不是 Cron Job；Dream 才是挂在 CronService 中的系统任务。</div>
+<h2 id="reading-section-06">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么把 on_job 回调放在 Gateway，而不是写死在 CronService？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>CronService 只负责时间、存储和 Job 状态，不应依赖 AgentLoop、Channel 或 Dream。Gateway 已拥有这些运行时对象，通过 <code>on_job</code> 注入执行策略，调度器也因此可独立测试。</p></div></details></li><li><span class="review-question">普通 Cron、Heartbeat 和 Dream 分别使用什么 Session？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>普通 Cron 在独立的 <code>cron:{job.id}</code> Session 执行，并把投递结果记录回 payload 的原 Session；Heartbeat 使用固定 <code>heartbeat</code> Session；Dream 直接调用 <code>agent.dream.run()</code>，不创建聊天 Session。</p></div></details></li><li><span class="review-question">Gateway 重启时 Dream 为什么不会重复累积多个 Job？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Gateway 用固定 ID 构造 Dream Job并走 upsert/add-or-update 语义；重启时更新同一记录的 schedule/payload，而不是追加随机 ID 的新 Job。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">08.01 · 自动化体系全景</footer></div></main></div></body></html>

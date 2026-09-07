@@ -1,0 +1,62 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="nanobot Agent 聊天斜杠命令系统源码学习章节"><title>09 · Agent 聊天斜杠命令系统 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="slash-command-system" data-page="overview">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-command-router-py-15" data-original-href="../../../nanobot/command/router.py" data-source-label="核心源码" title="阅读 nanobot/command/router.py:15–55 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Chapter 09 · slash commands</p><h1>Agent 聊天斜杠命令：绕过 LLM 的控制平面</h1><p class="lead">当用户发送 <code>/status</code>、<code>/stop</code> 或 <code>/dream-log</code> 时，nanobot 不需要模型理解意图。它把同一条 <code>InboundMessage</code> 交给一个确定性的 Router，执行后直接产生 <code>OutboundMessage</code>。</p><div class="meta-row"><span class="chip">8 个学习页面</span><span class="chip">CommandRouter</span><span class="chip">priority dispatch</span><span class="chip">AgentLoop shortcut</span><span class="chip">channel palette</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<div class="callout"><strong>核心心智模型：</strong>斜杠命令是 Agent 的“控制平面”，负责取消、重启、会话管理、状态查询与 Memory 运维；普通消息进入“推理平面”，才构建 Context、调用 LLM 并执行 Tool。两者共享 MessageBus 和 OutboundMessage，却拥有不同的决策路径。</div>
+
+<h2 id="reading-section-01">以 <code>/status</code> 为例：完整数据流</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>channel</small><b>接收文本</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>bus</small><b>InboundMessage</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>AgentLoop</small><b>优先识别</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>handler</small><b>读取状态</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>bus</small><b>OutboundMessage</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>渠道只负责保留命令文本</h3><p>WebSocket 把输入原样变成消息；Telegram 会先移除 <code>@botname</code>，再把下划线别名规范化为 nanobot 的连字符命令。</p></div>
+  <div data-step-panel><h3>仍然使用统一消息总线</h3><p>命令不是独立 HTTP RPC。它和普通对话一样进入 <code>MessageBus.inbound</code>，因此复用 channel、chat_id、metadata 和 session key。</p></div>
+  <div data-step-panel><h3><code>/status</code> 可走 priority 快速路径</h3><p><code>run()</code> 在创建普通处理任务前检查优先命令，直接调用 Handler；它无需等待同一会话正在运行的模型任务。</p></div>
+  <div data-step-panel><h3>Handler 直接读运行时对象</h3><p><code>cmd_status</code> 通过 <code>CommandContext.loop</code> 读取模型、usage、会话、Context 估算与活动任务，不产生模型请求。</p></div>
+  <div data-step-panel><h3>响应回到原渠道</h3><p>Handler 返回带原 channel/chat_id 的 <code>OutboundMessage</code>，AgentLoop 发布到 outbound bus，由 ChannelManager 路由给用户。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">命令系统的五层结构</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">展示层</div><div class="arch-items"><span class="arch-item">WebUI palette</span><span class="arch-item">Telegram BotCommand</span><span>帮助用户发现命令</span></div></div>
+  <div class="arch-layer"><div class="arch-label">输入层</div><div class="arch-items"><span class="arch-item">BaseChannel</span><span class="arch-item">InboundMessage</span><span class="arch-item">MessageBus</span></div></div>
+  <div class="arch-layer"><div class="arch-label">分流层</div><div class="arch-items"><span class="arch-item">AgentLoop.run</span><span class="arch-item">TurnState.COMMAND</span><span>忙碌/空闲双入口</span></div></div>
+  <div class="arch-layer"><div class="arch-label">路由层</div><div class="arch-items"><span class="arch-item">priority</span><span class="arch-item">exact</span><span class="arch-item">prefix</span><span class="arch-item">interceptor</span></div></div>
+  <div class="arch-layer"><div class="arch-label">执行层</div><div class="arch-items"><span class="arch-item">cmd_stop/new</span><span class="arch-item">cmd_status/history</span><span class="arch-item">cmd_dream*</span></div></div>
+</div>
+
+<h2 id="reading-section-03">内置命令一览</h2><table class="source-table"><thead><tr><th>命令</th><th>路由级别</th><th>主要副作用</th></tr></thead><tbody>
+  <tr><td><code>/stop</code></td><td>priority</td><td>取消当前会话的 Agent tasks 与 subagents</td></tr>
+  <tr><td><code>/restart</code></td><td>priority</td><td>记录通知目标，随后用 <code>os.execv</code> 替换进程</td></tr>
+  <tr><td><code>/status</code></td><td>priority + exact</td><td>只读运行状态；空闲和忙碌场景都可达</td></tr>
+  <tr><td><code>/new</code></td><td>exact</td><td>取消任务、清空 Session、后台归档未整理消息</td></tr>
+  <tr><td><code>/history [n]</code></td><td>exact + prefix</td><td>读取并裁剪当前会话历史</td></tr>
+  <tr><td><code>/dream</code></td><td>exact</td><td>后台启动 Dream，立即返回接受确认</td></tr>
+  <tr><td><code>/dream-log [sha]</code></td><td>exact + prefix</td><td>读取 Dream Git 版本及 diff</td></tr>
+  <tr><td><code>/dream-restore [sha]</code></td><td>exact + prefix</td><td>列出或 revert 一个记忆版本</td></tr>
+  <tr><td><code>/help</code></td><td>exact</td><td>从命令元数据生成帮助文本</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-04">本章路线</h2><div class="topic-grid">
+  <a class="topic-card" href="01-command-contract.html"><b>01 · 命令契约与元数据</b><span>CommandContext、Handler、BuiltinCommandSpec</span></a>
+  <a class="topic-card" href="02-router-matching.html"><b>02 · Router 与四级匹配</b><span>priority、exact、prefix、interceptor</span></a>
+  <a class="topic-card" href="03-loop-dispatch.html"><b>03 · AgentLoop 分流</b><span>空闲、忙碌、消息注入与未知命令</span></a>
+  <a class="topic-card" href="04-lifecycle-commands.html"><b>04 · 生命周期命令</b><span>/stop、/restart、/new</span></a>
+  <a class="topic-card" href="05-query-commands.html"><b>05 · 查询命令</b><span>/status、/history、/help</span></a>
+  <a class="topic-card" href="06-memory-commands.html"><b>06 · Memory 命令</b><span>/dream、日志、恢复</span></a>
+  <a class="topic-card" href="07-channels-extension.html"><b>07 · 渠道呈现与扩展</b><span>WebUI、Telegram、新增命令与测试</span></a>
+</div>
+
+<h2 id="reading-section-05">核心源码学习地图（站内阅读）</h2><table class="source-table"><thead><tr><th>文件</th><th>职责</th><th>关键入口</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#guide-nanobot-command-router-py-15" data-original-href="../../../nanobot/command/router.py" data-source-label="command/router.py" title="阅读 nanobot/command/router.py:15–55 的代表性摘录与讲解">command/router.py · 站内摘录</a></td><td>命令上下文、四级路由表与参数提取</td><td><code>CommandRouter.dispatch</code></td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="command/builtin.py" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">command/builtin.py · 站内摘录</a></td><td>命令元数据、Handler 与默认注册</td><td><code>register_builtin_commands</code></td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-677" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py" title="阅读 nanobot/agent/loop.py:677–703 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td>外层快速分流、Turn COMMAND 状态与结果发布</td><td><code>run</code>、<code>_state_command</code></td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/channels/websocket.py" data-source-label="channels/websocket.py" title="nanobot/channels/websocket.py 的所属模块讲解；该文件未单独逐行收录">channels/websocket.py · 模块讲解</a></td><td>命令元数据 API</td><td><code>_handle_commands</code></td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/channels/telegram.py" data-source-label="channels/telegram.py" title="nanobot/channels/telegram.py 的所属模块讲解；该文件未单独逐行收录">channels/telegram.py · 模块讲解</a></td><td>原生命令菜单、别名规范化与总线转发</td><td><code>_forward_command</code></td></tr>
+</tbody></table>
+
+<div class="callout warning"><strong>边界：</strong><code>nanobot agent</code> 属于 Typer CLI；<code>exec</code> 属于模型可调用 Tool；本章只讲聊天内容中的斜杠命令。斜杠命令由程序确定性执行，不由模型决定是否调用。</div>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">07 · Agent 聊天斜杠命令系统 · 章节总览</footer></div></main></div></body></html>

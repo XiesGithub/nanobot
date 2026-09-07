@@ -1,0 +1,70 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>05 · Hooks、流式输出与可观测性 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="agent-loop" data-page="hooks-streaming">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/hook.py" data-source-label="hook.py" title="nanobot/agent/hook.py 的所属模块讲解；该文件未单独逐行收录">模块指南</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Agent Loop · observability</p><h1>Hooks、流式输出与可观测性</h1><p class="lead">Runner 保持渠道无关，所有“运行时旁观者”都通过 Hook 和 callback 接入：流式文字、工具进度、日志、usage、SDK 捕获与自定义审计无需改写核心推理分支。</p><div class="meta-row"><span class="chip">AgentHook</span><span class="chip">CompositeHook</span><span class="chip">stream segments</span><span class="chip">state trace</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">Hook 生命周期</h2><table class="source-table"><thead><tr><th>回调</th><th>触发位置</th><th>典型用途</th></tr></thead><tbody>
+  <tr><td><code>wants_streaming()</code></td><td>请求模型前</td><td>决定 Provider 走 streaming 还是普通 chat</td></tr>
+  <tr><td><code>before_iteration(ctx)</code></td><td>每次 Provider 请求前</td><td>iteration 日志、运行状态</td></tr>
+  <tr><td><code>on_stream(ctx, delta)</code></td><td>每个内容增量</td><td>过滤 think 后向渠道增量投递</td></tr>
+  <tr><td><code>on_stream_end(ctx, resuming)</code></td><td>一个流片段结束</td><td>结束当前 segment；工具后续时显示继续中</td></tr>
+  <tr><td><code>before_execute_tools(ctx)</code></td><td>工具执行前</td><td>工具开始事件、参数日志、绑定请求上下文</td></tr>
+  <tr><td><code>after_iteration(ctx)</code></td><td>iteration 任一出口</td><td>工具结束事件、usage、SDK 消息快照</td></tr>
+  <tr><td><code>finalize_content(ctx, content)</code></td><td>解释最终文本时</td><td>同步清理/变换内容，例如移除 think</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-02">Context 是 Hook 之间的共享观察面</h2><div class="code-block"><div class="code-head"><span>agent/hook.py:14</span><span>每次 iteration 更新</span></div><pre><code>@dataclass(slots=True)
+class AgentHookContext:
+    iteration: int
+    messages: list[dict[str, Any]]
+    response: LLMResponse | None = None
+    usage: dict[str, int] = field(default_factory=dict)
+    tool_calls: list[ToolCallRequest] = field(default_factory=list)
+    tool_results: list[Any] = field(default_factory=list)
+    tool_events: list[dict[str, str]] = field(default_factory=list)
+    streamed_content: bool = False
+    final_content: str | None = None
+    stop_reason: str | None = None</code></pre></div>
+<p>它不是 Session 或 TurnContext：生命周期仅覆盖 Runner 的一次 iteration，字段由 Runner 随执行推进写入，Hook 读取同一份状态以生成进度、日志或捕获结果。</p>
+
+<h2 id="reading-section-03">LoopHook 把 Runner 事件翻译成渠道能力</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>stream</small><b>过滤增量</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>tools</small><b>进度事件</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>context</small><b>绑定工具路由</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>finish</small><b>usage 与清理</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>跨 chunk 过滤 think</h3><p><code>_stream_buf</code> 累计原始 delta，每次比较清理前后的长度，只发送新增可见部分，避免 <code>&lt;think&gt;</code> 跨 chunk 时泄漏。</p></div>
+  <div data-step-panel><h3>结构化工具事件</h3><p>工具执行前发送 start payload，之后发送 success/error/waiting payload；老式 progress callback 仍可只接收文本 hint。</p></div>
+  <div data-step-panel><h3>共享 ToolRegistry，隔离请求上下文</h3><p>LoopHook 在执行前写入 channel、chat、message、metadata、session_key；ContextAware 工具据此正确投递消息或创建子任务。</p></div>
+  <div data-step-panel><h3>每 iteration 记录 usage</h3><p>Hook 打印单次原始 usage；Runner 另外累计整次运行的 prompt/completion tokens，最终交回 AgentLoop。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-04">CompositeHook 的错误隔离策略</h2><div class="code-block"><div class="code-head"><span>agent/hook.py:58</span><span>核心 Hook + 扩展 Hook</span></div><pre><code>hook = CompositeHook([loop_hook] + self._extra_hooks)
+
+for hook in self._hooks:
+    if hook._reraise:
+        await hook.method(...)
+    else:
+        try:
+            await hook.method(...)
+        except Exception:
+            logger.exception(...)
+
+# finalize_content 是有顺序的同步 pipeline
+for hook in self._hooks:
+    content = hook.finalize_content(context, content)</code></pre></div>
+<p>自定义 Hook 的异步副作用失败不会拖垮 Agent；核心 <code>_LoopHook</code> 使用 <code>reraise=True</code>，因为渠道流式投递和工具上下文绑定属于主路径。内容变换则不吞异常，避免悄悄返回错误文本。</p>
+
+<h2 id="reading-section-05">流式输出为什么有 segment</h2><div class="message-stack"><div class="message assistant"><span class="role">STREAM SEGMENT 0</span>我先检查项目结构…… <code>_stream_end: true, _resuming: true</code></div><div class="message tool"><span class="role">TOOL</span>list_dir → 返回文件列表</div><div class="message assistant"><span class="role">STREAM SEGMENT 1</span>根据目录结构，核心入口是…… <code>_stream_end: true, _resuming: false</code></div></div>
+<p><code>_dispatch()</code> 为每个片段生成 <code>stream_base_id:segment</code>。模型发出工具调用时，Runner 用 <code>resuming=True</code> 结束当前片段，渠道可以结束当前渲染但继续显示加载；最终答案用 <code>resuming=False</code> 真正收尾。</p>
+
+<h2 id="reading-section-06">三个观测层级</h2><div class="summary-grid"><div class="card"><div class="metric">Turn</div><div class="metric-label">turn_id + StateTraceEntry：定位 RESTORE/BUILD/RUN/SAVE 哪一段慢</div></div><div class="card"><div class="metric">Iteration</div><div class="metric-label">HookContext：模型响应、工具调用、工具事件与单轮 usage</div></div><div class="card"><div class="metric">Run</div><div class="metric-label">AgentRunResult：累计 usage、tools_used、stop_reason、error</div></div></div>
+
+<h2 id="reading-section-07">SDKCaptureHook 展示了最小扩展模式</h2><p><code>SDKCaptureHook</code> 只在 <code>after_iteration</code> 中收集工具名，并刷新 messages 快照。它不需要让 Runner 增加 “if SDK” 分支，说明 Hook 边界可以承载额外消费者，同时保持核心循环小而稳定。</p>
+
+<div class="callout warning"><strong>Hook 不是修改控制流的状态机：</strong>它适合观察、转换内容和侧向通知；是否继续 iteration、如何执行工具、怎样停止仍由 Runner 掌握。把关键控制流藏进 Hook 会使恢复和测试语义难以追踪。</div>
+
+<h2 id="reading-section-08">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/hook.py" data-source-label="hook.py:14" title="nanobot/agent/hook.py 的所属模块讲解；该文件未单独逐行收录">hook.py · 模块讲解</a></td><td>AgentHookContext 字段</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/hook.py" data-source-label="hook.py:30" title="nanobot/agent/hook.py 的所属模块讲解；该文件未单独逐行收录">hook.py · 模块讲解</a></td><td>生命周期接口</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/hook.py" data-source-label="hook.py:58" title="nanobot/agent/hook.py 的所属模块讲解；该文件未单独逐行收录">hook.py · 模块讲解</a></td><td>CompositeHook fan-out 与错误隔离</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:67" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>主 LoopHook 的渠道适配</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:958" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>stream id 与分段元数据</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-316" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:591" title="阅读 nanobot/agent/runner.py:316–378 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>Hook 能力决定 Provider 调用方式</td></tr></tbody></table>
+<h2 id="reading-section-09">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 LoopHook 而不是 Runner 负责过滤并投递 stream delta？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Runner 只产生 delta 事件；是否支持流式、如何标记 thread、过滤内部/重复文本以及发布到 MessageBus 都属于渠道语义。<code>LoopHook</code> 持有消息 origin，最适合完成这层适配。</p></div></details></li><li><span class="review-question"><code>resuming=True</code> 对渠道 UI 表示什么？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它告诉渠道这段流是在已有消息/中断上下文之后恢复，而非一条全新响应。支持该 metadata 的 UI 可继续原流或采用不同状态提示。</p></div></details></li><li><span class="review-question">自定义 Hook 抛异常时，哪些异常被隔离，哪些会暴露？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Hook 汇聚器对普通观察型回调异常做日志隔离，避免监控拖垮 Agent；代表用户取消的 <code>CancelledError</code> 和核心 checkpoint/执行路径要求保留的控制异常不会被伪装成成功。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">05.06 · Hooks、流式输出与可观测性</footer></div></main></div></body></html>

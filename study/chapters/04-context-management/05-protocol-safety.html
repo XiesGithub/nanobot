@@ -1,0 +1,75 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>04 · 消息协议合法性 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="context-management" data-page="protocol-safety">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-6" data-original-href="../../../nanobot/agent/runner.py" data-source-label="Runner 源码" title="阅读 nanobot/agent/runner.py:997–1020 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Context · protocol invariants</p><h1>消息协议合法性：裁剪后仍必须是一段可解释的对话</h1><p class="lead">Token 数量合适不代表请求合法。tool_call/result 必须配对，角色序列必须被 Provider 接受，同角色输入要合并，丢失结果要显式补位。</p><div class="meta-row"><span class="chip">orphan drop</span><span class="chip">missing backfill</span><span class="chip">role alignment</span><span class="chip">provider-safe</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">两类相反的工具协议损坏</h2><div class="compare-grid">
+  <div class="card flat"><h3>孤立结果：有 result，没有 call</h3><p>常由历史从中间切开造成。Runner 扫描此前 assistant 声明过的 id，未声明的 tool result 被删除。</p></div>
+  <div class="card flat"><h3>缺失结果：有 call，没有 result</h3><p>常由中断、检查点丢失或裁剪造成。Runner 在对应 assistant 后插入 synthetic tool message，内容说明结果不可用。</p></div>
+</div>
+
+<div class="code-block"><div class="code-head"><span>agent/runner.py:997–1061</span><span>两个互补修复</span></div><pre><code># orphan: tool_call_id 从未被 assistant 声明
+if role == "tool" and tool_call_id not in declared:
+    drop(message)
+
+# missing: assistant 声明了 call_id，但没有任何 tool result
+insert({
+    "role": "tool",
+    "tool_call_id": call_id,
+    "content": "[Tool result unavailable — call was interrupted or lost]",
+})</code></pre></div>
+
+<h2 id="reading-section-02">Runner 每轮治理顺序</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>Drop orphan</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>Backfill missing</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>Microcompact</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>Tool budget</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>Snip + 再修复</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>先删除无法解释的结果</h3><p>避免 Provider 收到一个没有来源的 tool role。</p></div>
+  <div data-step-panel><h3>再补全未完成的调用</h3><p>保留 assistant 曾调用工具的事实，同时让协议链闭合；模型可据此决定重试或换方案。</p></div>
+  <div data-step-panel><h3>压缩不破坏结构</h3><p>Microcompact 只替换 tool content，不删除 tool message，所以 call/result 仍配对。</p></div>
+  <div data-step-panel><h3>统一规范工具内容</h3><p>空结果变成非空占位，巨大结果外置或截断，防止无效 content 和体积失控。</p></div>
+  <div data-step-panel><h3>Snip 后必须重做 1–2</h3><p>即使裁剪前结构合法，切掉前缀也可能制造新的 orphan 或 missing；因此两项 repair 再执行一次。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">同角色消息如何处理</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">ContextBuilder</div><div class="arch-items"><span class="arch-item">history[-1].role == current_role</span><span>→ 复制最后一条并 merge content，不追加新行</span></div></div>
+  <div class="arch-layer"><div class="arch-label">字符串 + 字符串</div><div class="arch-items"><span class="arch-item">left + blank line + right</span></div></div>
+  <div class="arch-layer"><div class="arch-label">含多模态</div><div class="arch-items"><span class="arch-item">转换为 content blocks</span><span>→ 拼接 block list</span></div></div>
+  <div class="arch-layer"><div class="arch-label">Provider 最终防线</div><div class="arch-items"><span class="arch-item">_enforce_role_alternation</span><span>处理模型特定的角色序列要求</span></div></div>
+</div>
+<p>典型场景是 subagent 完成消息以 assistant role 注入，而 replay 尾部也是 assistant。直接追加会形成连续 assistant；ContextBuilder 合并它们，测试专门覆盖该回归。</p>
+
+<h2 id="reading-section-04">协议修复为什么只作用于副本</h2><div class="code-block"><div class="code-head"><span>agent/runner.py:251 · 每次 iteration</span><span>核心源码</span></div><pre><code>messages = list(spec.initial_messages)       # 真实会话演进
+messages_for_model = repair(messages)       # 临时治理副本
+messages_for_model = compact_and_snip(messages_for_model)
+response = await request_model(messages_for_model)
+
+# 新 response/tool result 仍追加到 messages，供调用方保存
+</code></pre></div><p>若把 synthetic backfill 或 snip 后的数组覆盖真实 messages，保存边界可能错位，旧历史也会被永久改写。当前设计让“Provider 兼容视图”和“持久会话事实”分离。</p>
+
+<h2 id="reading-section-05">治理本身失败怎么办</h2><div class="data-box"><div class="label">正常路径</div><div>执行全部 orphan/backfill/microcompact/tool budget/snip，再二次 repair。</div></div><div class="data-box"><div class="label">治理异常</div><div>记录异常，只尝试最小 orphan drop + missing backfill。</div></div><div class="data-box"><div class="label">最小修复也失败</div><div>使用原始 messages 继续请求。Context 优化故障不会直接让整个 Agent turn 崩溃。</div></div>
+
+<h2 id="reading-section-06">跨层协议防线</h2><table class="source-table"><thead><tr><th>阶段</th><th>防线</th><th>解决的问题</th></tr></thead><tbody>
+  <tr><td>Session replay</td><td><code>find_legal_message_start</code></td><td>历史窗口从孤立 tool result 开始</td></tr>
+  <tr><td>ContextBuilder</td><td>same-role merge</td><td>连续 user/assistant 角色</td></tr>
+  <tr><td>Runner preflight</td><td>drop + backfill</td><td>任意来源的 call/result 不一致</td></tr>
+  <tr><td>Runner post-snip</td><td>drop + backfill again</td><td>最终预算裁剪新制造的不一致</td></tr>
+  <tr><td>Provider base</td><td>role alternation normalization</td><td>GLM 等 Provider 的严格角色约束</td></tr>
+  <tr><td>Session save</td><td>跳过无 content/无 tool_call assistant</td><td>空 assistant 污染后续 replay</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-07">源码与测试地图</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:105" title="阅读 nanobot/agent/context.py:140–172 的代表性摘录与讲解">context.py · 站内摘录</a></td><td>字符串与 block 内容合并</td></tr>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:140" title="阅读 nanobot/agent/context.py:140–172 的代表性摘录与讲解">context.py · 站内摘录</a></td><td>当前角色与历史尾部合并</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/helpers.py" data-source-label="helpers.py:153" title="nanobot/utils/helpers.py 的所属模块讲解；该文件未单独逐行收录">helpers.py · 模块讲解</a></td><td>Session/Runner 共用的合法起点</td></tr>
+  <tr><td><a href="workshop.html#source-6" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:251" title="阅读 nanobot/agent/runner.py:997–1020 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>完整治理顺序与降级路径</td></tr>
+  <tr><td><a href="workshop.html#source-6" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:997" title="阅读 nanobot/agent/runner.py:997–1020 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>孤立结果删除</td></tr>
+  <tr><td><a href="workshop.html#source-7" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:1023" title="阅读 nanobot/agent/runner.py:1023–1061 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>缺失结果回填</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/test_runner.py" data-source-label="tests/agent/test_runner.py" title="tests/agent/test_runner.py 的所属模块讲解；该文件未单独逐行收录">tests/agent/test_runner.py · 模块讲解</a></td><td>snip、orphan、missing 与 user-role 回归</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/test_context_prompt_cache.py" data-source-label="test_context_prompt_cache.py" title="tests/agent/test_context_prompt_cache.py 的所属模块讲解；该文件未单独逐行收录">test_context_prompt_cache.py · 模块讲解</a></td><td>同角色合并与 system prompt 稳定性</td></tr>
+</tbody></table>
+<div class="callout"><strong>最重要的设计原则：</strong>上下文治理不是“删到能发”为止，而是“在预算内生成一个仍符合对话因果关系和 Provider 协议的视图”。</div>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">孤立 tool result 与缺失 tool result 分别怎样修复？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>没有前置 assistant tool call 的 tool result 会被删除；assistant 声明了调用但缺对应结果时，会按缺失的 <code>tool_call_id</code> 插入 synthetic tool result，使协议闭合。</p></div></details></li><li><span class="review-question">为什么 repair 要在 snip 前后各执行一次？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>原历史本身可能已因取消而不完整，所以 snip 前先修；snip 又可能切开一个原本完整的调用组，所以裁剪后必须再次修复最终数组。</p></div></details></li><li><span class="review-question">为什么 synthetic backfill 不应永久写回 Session？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它只是假定的“未得到结果/已中断”协议占位，不是真实工具观察。若写回 Session，会把恢复手段伪装成事实，并可能覆盖之后取得的真实结果。</p></div></details></li><li><span class="review-question">subagent assistant 消息与 assistant 尾部相邻时怎样处理？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>修复器避免形成不被 Provider 接受的连续 assistant 边界：subagent 注入的 assistant 结果会与尾部 assistant 内容按规则合并或通过合成 user continuation 分隔，再保持合法角色序列。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">04.05 · 消息协议合法性</footer></div></main></div></body></html>

@@ -1,0 +1,70 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>06 · ToolLoader、插件与运行时上下文 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="tools-mcp-extensions" data-page="loader-context">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-tools-loader-py-86" data-original-href="../../../nanobot/agent/tools/loader.py" data-source-label="loader.py" title="阅读 nanobot/agent/tools/loader.py:86–116 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Tools · discovery</p><h1>ToolLoader、插件与运行时上下文</h1><p class="lead"><code>ToolLoader</code> 把“修改核心列表才能加工具”改成发现式架构：内置模块自动扫描，外部包通过 Python entry point 接入；Tool 类再用 scope、enabled 和 create 决定是否以及怎样实例化。</p><div class="meta-row"><span class="chip">pkgutil</span><span class="chip">entry_points</span><span class="chip">scope</span><span class="chip">ToolContext</span><span class="chip">RequestContext</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">内置工具发现</h2><div class="code-block"><div class="code-head"><span>agent/tools/loader.py:30</span><span>包扫描过滤链</span></div><pre><code>for _, module_name, _ in pkgutil.iter_modules(package.__path__):
+    if module_name.startswith("_") or module_name in _SKIP_MODULES:
+        continue
+    module = importlib.import_module(f".{module_name}", package.__name__)
+    for attr in vars(module).values():
+        if (isinstance(attr, type) and issubclass(attr, Tool)
+                and not abstract and attr._plugin_discoverable):
+            results.append(attr)
+results.sort(key=lambda cls: cls.__name__)</code></pre></div>
+<p><code>base/schema/registry/context/loader/mcp</code> 等基础模块被跳过；私有类、抽象类和 <code>_plugin_discoverable=False</code> 的特殊 wrapper 也不会误注册。模块导入失败只记录日志并继续扫描其他模块。</p>
+
+<h2 id="reading-section-02">第三方插件发现</h2><div class="code-block"><div class="code-head"><span>agent/tools/loader.py:62</span><span>Python packaging entry point</span></div><pre><code># 第三方 pyproject.toml
+[project.entry-points."nanobot.tools"]
+my_plugin = "my_package.plugins:MyTool"
+
+# nanobot 运行时
+eps = entry_points(group="nanobot.tools")
+for ep in eps:
+    cls = ep.load()
+    if issubclass(cls, Tool) and concrete and discoverable:
+        plugins[ep.name] = cls</code></pre></div>
+<p>entry point 只负责定位一个 Tool 类。它不会绕过 Tool 契约：插件仍要经过 scope、enabled/create、名称冲突处理、Registry 参数校验和 Runner 执行策略。</p>
+
+<h2 id="reading-section-03">加载阶段的决策顺序</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>来源</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>scope</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>enabled</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>create</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>冲突与注册</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>先内置，后插件</h3><p>Loader 保留 <code>builtin_names</code>，用于保护核心工具名称；发现结果在 Loader 实例中缓存。</p></div>
+  <div data-step-panel><h3><code>_scopes</code> 控制运行环境</h3><p>默认只属于 core；文件读取可同时供 core/subagent/memory，Shell/Web 可供 core/subagent，避免子 Agent 或 Dream 获得不必要能力。</p></div>
+  <div data-step-panel><h3><code>enabled(ctx)</code></h3><p>根据配置与依赖决定是否出现。例如 CronService 不存在时 CronTool 不注册，exec/web/image generation 可由配置关闭。</p></div>
+  <div data-step-panel><h3><code>create(ctx)</code></h3><p>通过 ToolContext 注入 workspace、bus、subagent manager、cron service、Provider 配置和 timezone；每个 Registry 得到独立实例。</p></div>
+  <div data-step-panel><h3>内置名称优先</h3><p>插件与内置同名时插件被跳过；其他同名碰撞会告警并由后注册实例覆盖。随后 Registry 缓存失效。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-04">构造期与请求期是两种 Context</h2><div class="compare-grid">
+  <div class="card"><h3>ToolContext：构造依赖</h3><p>AgentLoop 启动注册时传入 config、workspace、bus、subagent manager、cron service、Provider loader、image provider configs 与 timezone。Tool 的 <code>create()</code> 用它建立长期实例。</p></div>
+  <div class="card"><h3>RequestContext：本轮路由</h3><p>每条消息进入 BUILD 和工具执行前，Loop 注入 channel、chat_id、message_id、session_key 与 metadata。只有实现 <code>ContextAware</code> Protocol 的工具接收它。</p></div>
+</div>
+<div class="code-block"><div class="code-head"><span>agent/loop.py:532</span><span>为共享 Registry 写入当前请求上下文</span></div><pre><code>request_ctx = RequestContext(
+    channel=channel,
+    chat_id=chat_id,
+    message_id=message_id,
+    session_key=effective_key,
+    metadata=dict(metadata or {}),
+)
+for name in self.tools.tool_names:
+    tool = self.tools.get(name)
+    if isinstance(tool, ContextAware):
+        tool.set_context(request_ctx)</code></pre></div>
+<p>Message、Spawn、Cron 等工具必须知道结果发回哪里。它们使用 <code>ContextVar</code> 保存请求期值，使同一工具实例在并发 asyncio task 中保持上下文隔离；文件读写状态也通过独立的 context binding 按 Session 隔离。</p>
+
+<h2 id="reading-section-05">不同 Agent 使用不同 scope</h2><table class="source-table"><thead><tr><th>调用者</th><th>Registry 创建</th><th>scope</th><th>目的</th></tr></thead><tbody>
+  <tr><td>主 AgentLoop</td><td>启动时创建，共享于各 Turn</td><td><code>core</code></td><td>完整聊天工具集</td></tr>
+  <tr><td>SubagentManager</td><td>每个子 Agent 构建独立 Registry</td><td><code>subagent</code></td><td>隔离运行时状态，并限制编排能力</td></tr>
+  <tr><td>Dream</td><td>记忆整理阶段单独构建</td><td><code>memory</code></td><td>只保留读写记忆所需文件能力</td></tr>
+</tbody></table>
+
+<div class="callout warning"><strong>MyTool 是显式例外：</strong>它需要拿到 AgentLoop 自身的 RuntimeState 引用，因此设置 <code>_plugin_discoverable=False</code>，由 <code>_register_default_tools()</code> 在 Loader 之后手工构造。不是所有 Tool 都适合无参自动发现。</div>
+
+<h2 id="reading-section-06">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-tools-loader-py-86" data-original-href="../../../nanobot/agent/tools/loader.py" data-source-label="loader.py:14" title="阅读 nanobot/agent/tools/loader.py:86–116 的代表性摘录与讲解">loader.py · 站内摘录</a></td><td>跳过的基础模块</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-loader-py-86" data-original-href="../../../nanobot/agent/tools/loader.py" data-source-label="loader.py:30" title="阅读 nanobot/agent/tools/loader.py:86–116 的代表性摘录与讲解">loader.py · 站内摘录</a></td><td>内置扫描</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-loader-py-86" data-original-href="../../../nanobot/agent/tools/loader.py" data-source-label="loader.py:62" title="阅读 nanobot/agent/tools/loader.py:86–116 的代表性摘录与讲解">loader.py · 站内摘录</a></td><td>entry point 插件发现</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-loader-py-86" data-original-href="../../../nanobot/agent/tools/loader.py" data-source-label="loader.py:86" title="阅读 nanobot/agent/tools/loader.py:86–116 的代表性摘录与讲解">loader.py · 站内摘录</a></td><td>scope/enable/create/冲突顺序</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/tools/context.py" data-source-label="tools/context.py" title="nanobot/agent/tools/context.py 的所属模块讲解；该文件未单独逐行收录">tools/context.py · 模块讲解</a></td><td>两种 Context 数据结构</td></tr><tr><td><a href="../02-llm-provider-gateway/workshop.html#source-8" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:483" title="阅读 nanobot/agent/loop.py:453–481 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>主 Loop 注册与 MyTool 例外</td></tr><tr><td><a href="../07-subagent-system/workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py:111" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">subagent.py · 站内摘录</a></td><td>独立 subagent Registry</td></tr></tbody></table>
+<h2 id="reading-section-07">自测</h2><ul class="check-list review-list"><li><span class="review-question">第三方插件与内置 read_file 同名时会发生什么？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>ToolLoader</code> 先登记内置名称；加载 entry-point 插件时若发现它与内置 <code>read_file</code> 同名，会记录 warning 并直接跳过该插件，因此内置实现不会被覆盖。</p></div></details></li><li><span class="review-question">为什么 ToolContext 不能替代每轮 RequestContext？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>ToolContext</code> 是装配期共享依赖，如 workspace、配置和服务；每轮 <code>RequestContext</code> 还包含当前 channel/chat/sender/session。后者必须请求级隔离，不能固定在长期 Tool 实例上。</p></div></details></li><li><span class="review-question">scope 如何落实最小权限，而不只是一种分类标签？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Loader 读取 Tool 类的 <code>_scopes</code>，只在请求的 core/subagent/memory scope 包含时实例化注册。未进入 Registry 的工具不会出现在 schema，也不能被该 Runner 按名称执行。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">06.03 · ToolLoader、插件与运行时上下文</footer></div></main></div></body></html>

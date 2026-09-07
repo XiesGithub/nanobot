@@ -1,0 +1,91 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>01 · 转换成 Agent 消息 | nanobot Agent 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="request-lifecycle" data-page="agent-message">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>Agent 学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/bus/events.py" data-source-label="打开源码" title="nanobot/bus/events.py 的所属模块讲解；该文件未单独逐行收录">模块指南</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner">
+<select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select>
+<div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Normalization boundary</p><h1>外部输入怎样转换成 Agent 消息</h1><p class="lead">所有入口都要把自己的协议细节收敛成 <code>InboundMessage</code>。内部核心由此不需要理解 HTTP、Telegram 或 WebSocket。</p><div class="meta-row"><span class="chip">输入：Python 参数或 Channel 事件</span><span class="chip">统一类型：InboundMessage</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">两条进入核心的路径</h2>
+<div class="compare-grid">
+  <div class="card"><h3>直接调用路径</h3><p><code>HTTP API / Python SDK → process_direct() → InboundMessage → _process_message()</code></p><p>不经过 MessageBus，调用方直接等待返回值。</p></div>
+  <div class="card"><h3>渠道事件路径</h3><p><code>Channel → MessageBus.inbound → AgentLoop.run() → _dispatch() → _process_message()</code></p><p>适合长期运行的 Gateway 和多个聊天平台。</p></div>
+</div>
+<div class="callout"><strong>共同汇合点：</strong>两条路径最终都调用 <code>AgentLoop._process_message(msg)</code>，后续 Agent 逻辑完全一致。</div>
+
+<h2 id="reading-section-02"><code>InboundMessage</code> 的字段</h2>
+<table class="source-table"><thead><tr><th>字段</th><th>含义</th><th>核心层如何使用</th></tr></thead><tbody>
+  <tr><td><code>channel</code></td><td>来源，例如 api、cli、telegram</td><td>提示词运行上下文和最终响应路由</td></tr>
+  <tr><td><code>sender_id</code></td><td>发送者身份</td><td>审批身份、工具上下文、日志</td></tr>
+  <tr><td><code>chat_id</code></td><td>聊天或房间标识</td><td>默认 Session key 和响应目标</td></tr>
+  <tr><td><code>content</code></td><td>用户文本</td><td>构造成当前 user message</td></tr>
+  <tr><td><code>media</code></td><td>本地媒体路径列表</td><td>文档提取或图片编码</td></tr>
+  <tr><td><code>metadata</code></td><td>入口特有的附加信息</td><td>流式标记、线程、message_id 等</td></tr>
+  <tr><td><code>session_key_override</code></td><td>覆盖默认会话键</td><td>线程会话、统一会话等特殊路由</td></tr>
+</tbody></table>
+
+<div class="code-block"><div class="code-head"><span>nanobot/bus/events.py</span><span>核心结构</span></div><pre><code><span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="type">InboundMessage</span>:
+    channel: str
+    sender_id: str
+    chat_id: str
+    content: str
+    timestamp: datetime
+    media: list[str]
+    metadata: dict[str, Any]
+    session_key_override: str | <span class="type">None</span>
+
+    <span class="kw">@property</span>
+    <span class="kw">def</span> <span class="fn">session_key</span>(self) -> str:
+        <span class="kw">return</span> self.session_key_override <span class="kw">or</span> <span class="str">f"{self.channel}:{self.chat_id}"</span></code></pre></div>
+
+<h2 id="reading-section-03"><code>process_direct()</code> 的适配过程</h2>
+<section data-stepper>
+  <div class="flow"><button class="flow-node" data-step><small>1</small><b>接收普通参数</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>连接 MCP</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>创建消息对象</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>进入核心</b></button></div>
+  <div class="card flat step-detail">
+    <div data-step-panel><h3>边界友好的函数签名</h3><p>调用者只需提供 <code>content</code>、<code>session_key</code>、<code>channel</code>、<code>chat_id</code> 和可选媒体/回调。</p></div>
+    <div data-step-panel><h3>工具扩展准备</h3><p><code>await self._connect_mcp()</code> 在第一次直接调用时惰性连接 MCP；没有配置时立即返回。</p></div>
+    <div data-step-panel><h3>协议归一化</h3><p>把离散参数封装成统一 dataclass，直接调用场景将 <code>sender_id</code> 设为 <code>"user"</code>。</p></div>
+    <div data-step-panel><h3>交给单轮状态机</h3><p><code>_process_message(msg, session_key=...)</code> 接管。到此以后，上游是 HTTP 还是 SDK 已不再重要。</p></div>
+  </div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div>
+</section>
+
+<div class="code-block"><div class="code-head"><span>nanobot/agent/loop.py:1669</span><span>直接入口</span></div><pre><code><span class="kw">async def</span> <span class="fn">process_direct</span>(self, content, session_key, channel, chat_id, media, ...):
+    <span class="kw">await</span> self.<span class="fn">_connect_mcp</span>()
+    msg = <span class="type">InboundMessage</span>(
+        channel=channel,
+        sender_id=<span class="str">"user"</span>,
+        chat_id=chat_id,
+        content=content,
+        media=media <span class="kw">or</span> [],
+    )
+    <span class="kw">return await</span> self.<span class="fn">_process_message</span>(
+        msg, session_key=session_key, ...
+    )</code></pre></div>
+
+<h2 id="reading-section-04">消息总线在什么位置</h2>
+<div class="architecture">
+  <div class="arch-layer"><div class="arch-label">生产者</div><div class="arch-items"><span class="arch-item">Channel</span><span>调用 <code>bus.publish_inbound(msg)</code></span></div></div>
+  <div class="arch-layer"><div class="arch-label">队列</div><div class="arch-items"><span class="arch-item">asyncio.Queue[InboundMessage]</span><span class="arch-item">asyncio.Queue[OutboundMessage]</span></div></div>
+  <div class="arch-layer"><div class="arch-label">消费者</div><div class="arch-items"><span class="arch-item">AgentLoop.run()</span><span>调用 <code>bus.consume_inbound()</code></span></div></div>
+</div>
+<p>如果只研究内部 Agent，可以知道 MessageBus 的存在但跳过 Channel 实现；从 API/SDK 的 <code>process_direct()</code> 继续阅读最短。</p>
+
+<h2 id="reading-section-05">核心源码学习索引（站内阅读）</h2>
+<table class="source-table"><thead><tr><th>位置</th><th>对象</th><th>意义</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/bus/events.py" data-source-label="bus/events.py:9" title="nanobot/bus/events.py 的所属模块讲解；该文件未单独逐行收录">bus/events.py · 模块讲解</a></td><td><code>InboundMessage</code></td><td>核心入站数据契约</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/bus/events.py" data-source-label="bus/events.py:28" title="nanobot/bus/events.py 的所属模块讲解；该文件未单独逐行收录">bus/events.py · 模块讲解</a></td><td><code>OutboundMessage</code></td><td>核心出站数据契约</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/bus/queue.py" data-source-label="bus/queue.py:8" title="nanobot/bus/queue.py 的所属模块讲解；该文件未单独逐行收录">bus/queue.py · 模块讲解</a></td><td><code>MessageBus</code></td><td>Channel 与 Agent 的异步解耦</td></tr>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py:867" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td><code>AgentLoop.run</code></td><td>总线消费入口</td></tr>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py:942" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td><code>_dispatch</code></td><td>会话锁、并发门和流式回调</td></tr>
+  <tr><td><a href="workshop.html#source-3" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py:1669" title="阅读 nanobot/agent/loop.py:1669–1692 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td><code>process_direct</code></td><td>API/SDK 的最短入口</td></tr>
+</tbody></table>
+
+<div class="callout warning"><strong>不要混淆：</strong><code>session_key</code> 决定历史归属；<code>chat_id</code> 决定聊天目标。多数情况下二者相关，但线程会话、统一会话和 API 自定义 Session 中并不相同。</div>
+<h2 id="reading-section-06">你应该能回答</h2><ul class="check-list review-list"><li><span class="review-question">为什么核心只依赖 <code>InboundMessage</code>，而不直接依赖 HTTP Request？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>InboundMessage</code> 是渠道无关的数据契约；HTTP、Telegram 或 WebSocket 只在边界层做协议解析。核心因此只处理 <code>channel/chat_id/content/media/metadata</code>，无需导入任何传输层类型。</p></div></details></li><li><span class="review-question"><code>process_direct()</code> 与 <code>AgentLoop.run()</code> 的入口路径有什么不同？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>process_direct()</code> 由 API/SDK 直接构造 <code>InboundMessage</code> 并等待 <code>_process_message()</code>；<code>run()</code> 则长期消费 MessageBus，经 <code>_dispatch()</code> 建立并发与投递任务后进入同一核心函数。</p></div></details></li><li><span class="review-question"><code>session_key_override</code> 为什么有必要？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>默认键是 <code>channel:chat_id</code>，但线程会话、统一会话、API 自定义会话和后台结果可能需要把历史归到另一个键。覆盖字段让“消息投递目标”和“历史归属”可以分离。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02 · Normalization boundary</footer>
+</div></main></div></body></html>

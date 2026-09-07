@@ -1,0 +1,62 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08 · Cron 数据模型与时间语义 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="automation-system" data-page="cron-model">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-cron-types-py-7" data-original-href="../../../nanobot/cron/types.py" data-source-label="数据模型源码" title="阅读 nanobot/cron/types.py:7–64 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Automation · data model</p><h1>Cron 数据模型与时间语义</h1><p class="lead">一个 Job 不只有“时间 + 文本”。它还携带执行类型、投递地址、原 Session、运行状态与审计记录，让调度与 Agent/渠道解耦。</p><div class="meta-row"><span class="chip">CronJob</span><span class="chip">CronSchedule</span><span class="chip">CronPayload</span><span class="chip">CronJobState</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">对象组合</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">CronJob</div><div class="arch-items"><span class="arch-item">id / name / enabled</span><span class="arch-item">created_at / updated_at</span><span class="arch-item">delete_after_run</span></div></div>
+  <div class="arch-layer"><div class="arch-label">schedule</div><div class="arch-items"><span class="arch-item">kind</span><span class="arch-item">at_ms</span><span class="arch-item">every_ms</span><span class="arch-item">expr / tz</span></div></div>
+  <div class="arch-layer"><div class="arch-label">payload</div><div class="arch-items"><span class="arch-item">kind</span><span class="arch-item">message</span><span class="arch-item">deliver</span><span class="arch-item">channel / to</span><span class="arch-item">session_key</span></div></div>
+  <div class="arch-layer"><div class="arch-label">state</div><div class="arch-items"><span class="arch-item">next_run</span><span class="arch-item">last_run / status / error</span><span class="arch-item">run_history ≤ 20</span></div></div>
+</div>
+
+<div class="code-block"><div class="code-head"><span>cron/types.py · 核心关系</span><span>简化摘录</span></div><pre><code>@dataclass
+class CronJob:
+    id: str
+    name: str
+    enabled: bool
+    schedule: CronSchedule
+    payload: CronPayload
+    state: CronJobState
+    delete_after_run: bool = False</code></pre></div>
+
+<h2 id="reading-section-02">三种时间模式</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>at</small><b>绝对时刻</b></button><span class="flow-arrow">·</span><button class="flow-node" data-step><small>every</small><b>固定间隔</b></button><span class="flow-arrow">·</span><button class="flow-node" data-step><small>cron</small><b>日历规则</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3><code>kind="at"</code></h3><p><code>at_ms</code> 必须晚于当前时间，否则 next run 为 None。CronTool 创建时会设置 <code>delete_after_run=True</code>，成功或失败执行一次后都从 Store 删除。</p></div>
+  <div data-step-panel><h3><code>kind="every"</code></h3><p><code>next = now + every_ms</code>。服务启动和每次执行结束都会从“当前时间”重新计算，因此不会补跑停机期间错过的每个间隔，也不是固定相位时钟。</p></div>
+  <div data-step-panel><h3><code>kind="cron"</code></h3><p>使用 <code>croniter</code> 从指定 reference time 求下一时刻；有 <code>tz</code> 时使用 IANA ZoneInfo，否则采用服务器本地时区。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">时间计算源码</h2><div class="code-block"><div class="code-head"><span>cron/service.py:31</span><span>概念摘录</span></div><pre><code>if schedule.kind == "at":
+    return at_ms if at_ms &gt; now_ms else None
+
+if schedule.kind == "every":
+    return now_ms + every_ms
+
+if schedule.kind == "cron":
+    base_dt = datetime.fromtimestamp(now_ms / 1000, tz=tz)
+    return int(croniter(expr, base_dt).get_next(datetime).timestamp() * 1000)</code></pre></div>
+
+<h2 id="reading-section-04">Payload 为什么保存路由信息</h2><div class="data-box"><div class="label">执行指令</div><div><code>message</code> 是 Job 到期后重新交给 Agent 的自然语言任务，不是最终要原样发送的固定字符串。</div></div><div class="data-box"><div class="label">是否投递</div><div><code>deliver</code> 控制后台结果是否有资格发送；CronTool 默认 true，CronService 底层默认 false。</div></div><div class="data-box"><div class="label">目标渠道</div><div><code>channel</code>、<code>to</code> 和 <code>channel_meta</code> 保留创建任务时的聊天路由，例如 Slack thread metadata。</div></div><div class="data-box"><div class="label">上下文桥</div><div><code>session_key</code> 保存原对话 Session。真正投递时，结果会作为 assistant 消息写回这里，让用户的后续回复能接上。</div></div>
+
+<h2 id="reading-section-05">两种 Payload kind</h2><div class="compare-grid">
+  <div class="card flat"><h3><code>agent_turn</code></h3><p>用户创建的 Job。需要把 message 重新交给完整 Agent，允许模型思考、调用工具并生成用户可见结果。</p></div>
+  <div class="card flat"><h3><code>system_event</code></h3><p>内部任务。当前 Dream 使用该类型；它在列表中可见，但删除和更新 API 都会返回 protected。</p></div>
+</div>
+
+<h2 id="reading-section-06">示例：一句话如何成为 Job</h2><div class="data-box"><div class="label">用户意图</div><div>“每个工作日上午 9 点检查项目构建状态，有异常就告诉我。”</div></div><div class="data-box"><div class="label">Schedule</div><div><code>{kind:"cron", expr:"0 9 * * 1-5", tz:"Asia/Shanghai"}</code></div></div><div class="data-box"><div class="label">Payload</div><div><code>{kind:"agent_turn", message:"检查项目构建状态...", deliver:true, channel, to, sessionKey}</code></div></div><div class="data-box"><div class="label">State</div><div>创建时立即计算 <code>nextRunAtMs</code>；执行后记录 last status/duration/error 并计算下一次。</div></div>
+
+<h2 id="reading-section-07">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#guide-nanobot-cron-types-py-7" data-original-href="../../../nanobot/cron/types.py" data-source-label="cron/types.py:8" title="阅读 nanobot/cron/types.py:7–64 的代表性摘录与讲解">cron/types.py · 站内摘录</a></td><td>六个 dataclass 的组合关系</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-cron-service-py-31" data-original-href="../../../nanobot/cron/service.py" data-source-label="cron/service.py:31" title="阅读 nanobot/cron/service.py:31–57 的代表性摘录与讲解">cron/service.py · 站内摘录</a></td><td>三种 Schedule 的 next-run 语义</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-cron-service-py-31" data-original-href="../../../nanobot/cron/service.py" data-source-label="cron/service.py:60" title="阅读 nanobot/cron/service.py:31–57 的代表性摘录与讲解">cron/service.py · 站内摘录</a></td><td>时区与 Schedule 基本验证</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-agent-tools-cron-py-134" data-original-href="../../../nanobot/agent/tools/cron.py" data-source-label="agent/tools/cron.py:158" title="阅读 nanobot/agent/tools/cron.py:134–155 的代表性摘录与讲解">agent/tools/cron.py · 站内摘录</a></td><td>CronTool 如何把参数转换成 Schedule</td></tr>
+</tbody></table>
+<div class="callout warning"><strong>易错点：</strong><code>every</code> 表示“本次完成后再从当前时间推一个间隔”，并不保证永远在墙钟的固定秒点运行；需要日历对齐时应使用 cron expression。</div>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 Payload 同时需要 channel/to 和 session_key？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>channel/to</code> 决定消息实际发到哪里；<code>session_key</code> 决定把这次主动投递镜像到哪段原对话历史。统一会话或线程模式下二者不能由彼此可靠推导。</p></div></details></li><li><span class="review-question">服务停机两小时后，every Job 会补跑所有错过的周期吗？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>不会逐周期补跑。服务启动/执行后按当前时间重新计算下一次运行；every Job 只执行当前 due 的一次，然后从完成时刻计算下一次，避免停机期间形成任务风暴。</p></div></details></li><li><span class="review-question">为什么 Dream 使用 system_event，而不是 agent_turn？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Dream 不需要把 prompt 送进普通 Agent Turn；Gateway 识别固定 system job 后直接调用 Dream pipeline。<code>system_event</code> 表明它是内部生命周期事件，避免用户投递与普通 Cron Session 路径。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">08.02 · Cron 数据模型与时间语义</footer></div></main></div></body></html>

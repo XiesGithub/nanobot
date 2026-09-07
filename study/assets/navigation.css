@@ -1,0 +1,125 @@
+.nav-status {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .04em;
+}
+
+.sidebar .chapter-link {
+  grid-template-columns: 31px minmax(0, 1fr);
+  padding-block: 11px;
+}
+
+.sidebar .chapter-link .nav-num {
+  width: 27px;
+}
+
+.sidebar .page-link {
+  padding-left: 17px;
+}
+
+.chapter-catalog {
+  display: grid;
+  gap: 18px;
+}
+
+.chapter-entry {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr) auto;
+  gap: 20px;
+  align-items: center;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  transition: transform .18s ease, border-color .18s ease;
+}
+
+.chapter-entry:hover {
+  transform: translateY(-2px);
+  border-color: var(--primary);
+  text-decoration: none;
+}
+
+.chapter-entry .chapter-number {
+  color: var(--primary);
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: -.04em;
+}
+
+.chapter-entry h2 {
+  margin: 0 0 5px;
+  font-size: 22px;
+}
+
+.chapter-entry p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.chapter-entry .chapter-state {
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chapter-entry.ready .chapter-state {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.roadmap-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.roadmap-item {
+  padding: 17px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface);
+}
+
+.roadmap-item b { display: block; margin-bottom: 5px; }
+.roadmap-item span { color: var(--muted); font-size: 14px; }
+
+@media (max-width: 680px) {
+  .chapter-entry { grid-template-columns: 58px minmax(0, 1fr); }
+  .chapter-entry .chapter-state { grid-column: 2; justify-self: start; }
+  .roadmap-list { grid-template-columns: 1fr; }
+}
+
+/* Shared section navigation remains reachable while reading long lessons. */
+body.has-reading-dock { padding-bottom: 190px; }
+.reading-dock { position: fixed; z-index: 35; bottom: 12px; left: max(280px, calc((100vw - 1480px)/2 + 280px)); right: max(22px, calc((100vw - 1480px)/2 + 22px)); padding: 12px 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: 0 6px 32px rgba(20,35,70,.18); }
+.reader-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.reader-position { min-width: 0; }
+.reader-position small, .reader-controls small { display: block; font-size: 11px; color: var(--muted); }
+.reader-position strong { display: block; font-size: 14px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.reader-toc { flex: none; }
+.reader-toc summary { cursor: pointer; color: var(--primary); font-size: 13px; padding: 8px; }
+.reader-toc nav { position: absolute; bottom: calc(100% + 8px); right: 0; width: min(480px, 100%); max-height: min(55vh, 480px); overflow-y: auto; overscroll-behavior: contain; padding: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+.reader-toc nav a { display: block; padding: 10px 12px; border-radius: 8px; color: var(--text); font-size: 14px; }
+.reader-toc a[aria-current], .reader-toc a:hover { background: var(--primary-soft); color: var(--primary); }
+.reader-controls { display: grid; grid-template-columns: 1fr .8fr 1fr; gap: 8px; margin-top: 9px; }
+.reader-controls > * { min-width: 0; border-radius: 9px; padding: 7px 10px; border: 1px solid var(--line); color: var(--text); }
+.reader-controls span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.reader-controls .reader-overview { text-align: center; }
+.reader-controls .reader-next { text-align: right; background: var(--primary-soft); color: var(--primary); }
+.reader-source { display: block; margin-top: 5px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reading-dock a:focus-visible, .reading-dock summary:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
+.page-nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 900px) { .reading-dock { left: 10px; right: 10px; bottom: max(8px, env(safe-area-inset-bottom)); padding: 10px; } .reader-controls { gap: 5px; } .reader-controls > * { padding: 6px; } }
+@media print { .reading-dock { display: none; } body.has-reading-dock { padding-bottom: 0; } }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+.reader-toc nav a[hidden] { display: none; }
+@media (max-width: 680px) { .page-nav { grid-template-columns: 1fr; } }

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="nanobot LLM 配置、Provider 实现与 Gateway 装配源码学习章节">
+  <title>第 02 章 · LLM 配置、Provider 实现与 Gateway 装配 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css">
+  <script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="llm-provider-gateway" data-page="overview">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-3" data-original-href="../../../nanobot/providers/factory.py" data-source-label="核心源码" title="阅读 nanobot/providers/factory.py:21–62 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Chapter 02 · model infrastructure</p><h1>LLM 配置、Provider 实现与 Gateway 装配</h1><p class="lead">模型不是在 AgentRunner 中临时创建的。nanobot 先把文件和环境变量解析成强类型配置，再识别 Provider、选择协议实现、生成运行时快照，最后由 Gateway 把同一个 Provider 注入 Agent 及其 Memory、Subagent 等协作者。</p><div class="meta-row"><span class="chip">8 个学习页面</span><span class="chip">Config</span><span class="chip">Provider Registry</span><span class="chip">Factory</span><span class="chip">Runtime Refresh</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<div class="callout"><strong>本章主问题：</strong>配置中的 <code>model="anthropic/claude-..."</code> 最终怎样变成一次可重试、可流式、可调用工具的模型请求？答案横跨 Config、Registry、Factory、Provider 和 Gateway 五层。</div>
+
+<h2 id="reading-section-01">从配置到一次 Agent Turn</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>读取配置</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>2</small><b>匹配 Provider</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>3</small><b>选择 Backend</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>4</small><b>创建 Snapshot</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>5</small><b>装配 Agent</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>6</small><b>规范化调用</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>7</small><b>下轮热更新</b></button>
+</div><div class="step-panels">
+  <div data-step-panel><h3>Config 是输入边界</h3><p><code>load_config()</code> 读取 JSON、迁移旧字段并交给 Pydantic；<code>resolve_config_env_vars()</code> 再解析字符串中的 <code>${VAR}</code>。此时模型参数与连接凭证仍然只是数据。</p></div>
+  <div data-step-panel><h3>Config 决定“用谁”</h3><p><code>Config._match_provider()</code> 综合显式 provider、模型前缀、关键词、API key 和本地端点，返回一个配置对象及 Registry 名称。</p></div>
+  <div data-step-panel><h3>Registry 决定“怎么连”</h3><p><code>ProviderSpec.backend</code> 将数十个品牌收敛到少量实现类别，例如 <code>openai_compat</code>、<code>anthropic</code>、<code>bedrock</code>。</p></div>
+  <div data-step-panel><h3>Snapshot 固化一组相互一致的值</h3><p><code>ProviderSnapshot</code> 同时携带实例、model、context window 和 signature，避免 Gateway 分散地读取配置后得到不一致组合。</p></div>
+  <div data-step-panel><h3>Gateway 是组合根</h3><p><code>_gateway_run()</code> 创建 Bus、Provider、SessionManager、CronService 和 AgentLoop，并把重新加载 Snapshot 的函数也注入 Agent。</p></div>
+  <div data-step-panel><h3>Runner 只看统一契约</h3><p>具体实现把厂商消息、工具调用、thinking、usage 和错误转换成 <code>LLMResponse</code>；AgentRunner 不需要出现厂商分支。</p></div>
+  <div data-step-panel><h3>配置变化在 Turn 边界生效</h3><p>每条消息开始处理时比较 signature。变化时整体替换 Provider，并同步 Runner、Subagent、Consolidator 与 Dream，不干扰已经运行的 Turn。</p></div>
+</div></section>
+
+<h2 id="reading-section-02">五层职责地图</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">配置层</div><div class="arch-items"><span class="arch-item">config/schema.py</span><span class="arch-item">config/loader.py</span><span>强类型、默认值、迁移、环境变量引用</span></div></div>
+  <div class="arch-layer"><div class="arch-label">识别层</div><div class="arch-items"><span class="arch-item">providers/registry.py</span><span class="arch-item">Config._match_provider</span><span>名称、优先级、能力元数据</span></div></div>
+  <div class="arch-layer"><div class="arch-label">创建层</div><div class="arch-items"><span class="arch-item">providers/factory.py</span><span class="arch-item">ProviderSnapshot</span><span>验证并实例化 backend</span></div></div>
+  <div class="arch-layer"><div class="arch-label">协议层</div><div class="arch-items"><span class="arch-item">providers/base.py</span><span class="arch-item">openai_compat_provider.py</span><span>统一请求、响应、流式与重试</span></div></div>
+  <div class="arch-layer"><div class="arch-label">装配层</div><div class="arch-items"><span class="arch-item">cli/commands.py</span><span class="arch-item">agent/loop.py</span><span>依赖注入与运行时切换</span></div></div>
+</div>
+
+<h2 id="reading-section-03">章节路线</h2><div class="roadmap">
+  <a class="roadmap-item" href="01-config-model.html"><b>01 · LLM 配置模型与加载</b><span>默认参数、Provider 凭证、camelCase、环境变量与配置迁移</span></a>
+  <a class="roadmap-item" href="02-provider-matching.html"><b>02 · Provider 匹配算法</b><span>显式选择、模型前缀、关键词、本地服务与 fallback</span></a>
+  <a class="roadmap-item" href="03-registry-factory.html"><b>03 · Registry、Factory 与 Snapshot</b><span>元数据如何变成具体 Provider 实例</span></a>
+  <a class="roadmap-item" href="04-provider-contract.html"><b>04 · Provider 统一契约</b><span>LLMProvider、LLMResponse、ToolCallRequest 与 Runner 边界</span></a>
+  <a class="roadmap-item" href="05-provider-implementations.html"><b>05 · Provider 实现分类</b><span>兼容协议、原生协议、云端与 OAuth 后端</span></a>
+  <a class="roadmap-item" href="06-request-reliability.html"><b>06 · 请求适配与可靠性</b><span>Responses API、流式输出、错误规范化与重试</span></a>
+  <a class="roadmap-item" href="07-gateway-assembly.html"><b>07 · Gateway 装配与热更新</b><span>组合根、Snapshot signature 与依赖传播</span></a>
+</div>
+
+<h2 id="reading-section-04">核心源码学习地图（站内阅读）</h2><table class="source-table"><thead><tr><th>文件</th><th>职责</th><th>优先阅读</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-2" data-original-href="../../../nanobot/config/schema.py" data-source-label="config/schema.py" title="阅读 nanobot/config/schema.py:263–326 的代表性摘录与讲解">config/schema.py · 站内摘录</a></td><td>配置模型与匹配算法</td><td><code>AgentDefaults</code>、<code>ProvidersConfig</code>、<code>_match_provider()</code></td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/registry.py" data-source-label="providers/registry.py" title="nanobot/providers/registry.py 的所属模块讲解；该文件未单独逐行收录">providers/registry.py · 模块讲解</a></td><td>Provider 元数据单一事实源</td><td><code>ProviderSpec</code>、顺序与 backend</td></tr>
+  <tr><td><a href="workshop.html#source-3" data-original-href="../../../nanobot/providers/factory.py" data-source-label="providers/factory.py" title="阅读 nanobot/providers/factory.py:21–62 的代表性摘录与讲解">providers/factory.py · 站内摘录</a></td><td>实例化与快照</td><td><code>make_provider()</code>、<code>provider_signature()</code></td></tr>
+  <tr><td><a href="workshop.html#source-5" data-original-href="../../../nanobot/providers/base.py" data-source-label="providers/base.py" title="阅读 nanobot/providers/base.py:48–86 的代表性摘录与讲解">providers/base.py · 站内摘录</a></td><td>统一契约与重试</td><td><code>LLMResponse</code>、<code>chat_with_retry()</code></td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="cli/commands.py" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">cli/commands.py · 模块讲解</a></td><td>Gateway 组合根</td><td><code>_gateway_run()</code> 的 Provider 注入</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-05">读完本章后你应该能回答</h2><ul class="check-list review-list"><li><span class="review-question">模型名前缀和 <code>provider="auto"</code> 同时存在时如何选择？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>模型名的显式 Provider 前缀先参与匹配；没有可用前缀时，<code>provider="auto"</code> 才按 Registry 顺序和凭据/本地条件选择。显式配置不会被 auto 的普通关键词覆盖。</p></div></details></li><li><span class="review-question">为什么很多品牌共用 <code>OpenAICompatProvider</code>，却仍然需要 Registry？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>这些品牌共享 OpenAI 风格的传输实现，但 Registry 仍保存各自的关键词、模型前缀、默认 API 地址、是否需要密钥和 backend 类型，用于正确发现与构造实例。</p></div></details></li><li><span class="review-question">AgentRunner 为什么不直接依赖 OpenAI 或 Anthropic SDK？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Runner 只需要统一的消息、工具、流回调、usage 和 finish reason。SDK 差异由 Provider 消化，因此切换厂商不改 Agent 的循环、工具或 Session 代码。</p></div></details></li><li><span class="review-question">配置文件改变后，哪些对象必须一起替换？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>签名变化后 Gateway 必须原子地替换 Provider、模型名和 context window，并同步更新 Runner 依赖它们的 Consolidator、Dream 等对象，避免一轮中混用旧新配置。</p></div></details></li><li><span class="review-question">Gateway 在 Provider 生命周期中做了什么，Provider 自己又刻意不知道什么？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Gateway 负责加载配置、构造 snapshot、注入热更新 loader 并组装 AgentLoop；Provider 只负责一次模型协议调用及重试，不知道 Channel、Session、Gateway 生命周期或用户投递。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02 · LLM 配置、Provider 实现与 Gateway 装配</footer></div></main></div></body></html>

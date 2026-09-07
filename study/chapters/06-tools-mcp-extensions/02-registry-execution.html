@@ -1,0 +1,63 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>06 · Registry 与调用生命周期 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="tools-mcp-extensions" data-page="registry-execution">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-tools-registry-py-48" data-original-href="../../../nanobot/agent/tools/registry.py" data-source-label="registry.py" title="阅读 nanobot/agent/tools/registry.py:48–71 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Tools · execution</p><h1>Registry 与一次调用的生命周期</h1><p class="lead"><code>ToolRegistry</code> 是唯一能力目录：注册阶段管理实例，Prompt 阶段导出稳定 definitions，执行阶段负责查找、类型转换和参数验证；Runner 则管理并发、安全策略和消息协议。</p><div class="meta-row"><span class="chip">register</span><span class="chip">definitions cache</span><span class="chip">prepare_call</span><span class="chip">tool result</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">Registry 的数据结构很小</h2><div class="code-block"><div class="code-head"><span>agent/tools/registry.py:8</span><span>动态目录 + 定义缓存</span></div><pre><code>class ToolRegistry:
+    def __init__(self):
+        self._tools: dict[str, Tool] = {}
+        self._cached_definitions: list[dict] | None = None
+
+    def register(self, tool):
+        self._tools[tool.name] = tool
+        self._cached_definitions = None
+
+    def unregister(self, name):
+        self._tools.pop(name, None)
+        self._cached_definitions = None</code></pre></div>
+<p>同名注册默认覆盖，register/unregister 都会使 definitions 缓存失效。内置与插件的冲突策略由 ToolLoader 在调用 register 前进一步约束。</p>
+
+<h2 id="reading-section-02">为什么 definitions 要稳定排序</h2><div class="architecture"><div class="arch-layer"><div class="arch-label">第一段</div><div class="arch-items"><span class="arch-item">built-in A</span><span class="arch-item">built-in B</span><span>按 name 排序，作为稳定前缀</span></div></div><div class="arch-layer"><div class="arch-label">第二段</div><div class="arch-items"><span class="arch-item">mcp_a_*</span><span class="arch-item">mcp_b_*</span><span>独立排序后追加</span></div></div></div>
+<p>MCP 连接可能动态改变后缀；将内置定义保持稳定前缀，有利于 Provider 的 prompt/KV cache。结果会缓存到下一次注册变化，而不是每个 iteration 重建。</p>
+
+<h2 id="reading-section-03">端到端调用序列</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>Provider request</small><b>发送 definitions</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>LLM response</small><b>ToolCallRequest</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>Registry</small><b>prepare_call</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>Runner</small><b>run tool</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>messages</small><b>tool result</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>Schema 随模型请求发送</h3><p><code>AgentRunner._build_request_kwargs()</code> 调用 <code>spec.tools.get_definitions()</code>；工具定义和 messages 一起占用 Context 预算。</p></div>
+  <div data-step-panel><h3>Provider 归一化模型返回</h3><p>每次调用带 id、name 和 arguments。Runner 依据 <code>should_execute_tools</code> 判断 finish reason 是否允许真正执行。</p></div>
+  <div data-step-panel><h3>查找、cast、validate</h3><p>不存在的工具返回可用名称；非法参数返回字段级错误；只有成功时才得到 Tool 实例和转换后的参数。</p></div>
+  <div data-step-panel><h3>Runner 控制执行环境</h3><p>在调用 Tool 前执行重复外部查询保护、workspace 违规分类、并发分批和 Hook 事件；取消信号不被普通异常处理吞掉。</p></div>
+  <div data-step-panel><h3>结果闭合 tool_call_id</h3><p>字符串或内容块被规范化，写成 role=tool 消息；下一 iteration 的模型把它作为行动后的观察。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-04"><code>prepare_call()</code> 的三个出口</h2><div class="code-block"><div class="code-head"><span>agent/tools/registry.py:73</span><span>执行前门卫</span></div><pre><code>tool = self._tools.get(name)
+if not tool:
+    return None, params, "Error: Tool ... not found. Available: ..."
+
+cast_params = tool.cast_params(params)
+errors = tool.validate_params(cast_params)
+if errors:
+    return tool, cast_params, "Error: Invalid parameters ..."
+
+return tool, cast_params, None</code></pre></div>
+<p>错误被组织成模型可读字符串，而不是让参数异常直接击穿 Agent Turn。Runner 会把错误作为 tool result，提示模型分析后换一种调用方式；配置为 fail-on-tool-error 的运行场景才将其升级为致命错误。</p>
+
+<h2 id="reading-section-05">Registry.execute 与 Runner._run_tool 的区别</h2><div class="compare-grid"><div class="card"><h3><code>ToolRegistry.execute()</code></h3><p>独立的便利入口：prepare、execute、捕获普通异常，并为错误文本追加“分析后重试”提示。</p></div><div class="card"><h3><code>AgentRunner._run_tool()</code></h3><p>生产 Agent 主链：先调用 prepare_call，但额外处理并发、安全违规计数、AskUserInterrupt、结构化 tool event、外部查询节流与 fatal policy。</p></div></div>
+
+<h2 id="reading-section-06">工具结果的后半程</h2><table class="source-table"><thead><tr><th>阶段</th><th>处理</th><th>目的</th></tr></thead><tbody>
+  <tr><td>Tool/MCP 返回</td><td>str 或内容块列表</td><td>保留文本与媒体表达</td></tr>
+  <tr><td><code>_normalize_tool_result</code></td><td>持久化大结果到 workspace、生成有界预览</td><td>防止当前 Context 爆炸</td></tr>
+  <tr><td>构造 tool message</td><td>写 role、tool_call_id、name、content</td><td>遵守 Provider 工具协议</td></tr>
+  <tr><td>checkpoint</td><td>保存 completed results / pending calls</td><td>任务取消或崩溃后可恢复</td></tr>
+  <tr><td>下一 iteration</td><td>重新治理 messages 后请求模型</td><td>模型读取观察并决定下一步</td></tr>
+</tbody></table>
+
+<div class="callout warning"><strong>ToolRegistry 不是安全沙箱：</strong>它保证名称与参数协议，但路径限制、SSRF、命令 sandbox、敏感状态等安全边界由具体 Tool 和 Runner 的违规分类共同实现。新增 Tool 不能把“已注册”误当成“已安全”。</div>
+
+<h2 id="reading-section-07">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-tools-registry-py-48" data-original-href="../../../nanobot/agent/tools/registry.py" data-source-label="registry.py:19" title="阅读 nanobot/agent/tools/registry.py:48–71 的代表性摘录与讲解">registry.py · 站内摘录</a></td><td>动态注册和缓存失效</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-registry-py-48" data-original-href="../../../nanobot/agent/tools/registry.py" data-source-label="registry.py:48" title="阅读 nanobot/agent/tools/registry.py:48–71 的代表性摘录与讲解">registry.py · 站内摘录</a></td><td>稳定 definitions 排序</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-registry-py-73" data-original-href="../../../nanobot/agent/tools/registry.py" data-source-label="registry.py:73" title="阅读 nanobot/agent/tools/registry.py:73–114 的代表性摘录与讲解">registry.py · 站内摘录</a></td><td>调用准备</td></tr><tr><td><a href="../05-agent-loop/workshop.html#guide-nanobot-agent-runner-py-316" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:569" title="阅读 nanobot/agent/runner.py:316–378 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>definitions 进入 Provider 请求</td></tr><tr><td><a href="../04-context-management/workshop.html#source-6" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:701" title="阅读 nanobot/agent/runner.py:997–1020 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>工具批次和单工具执行</td></tr><tr><td><a href="../04-context-management/workshop.html#source-6" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:969" title="阅读 nanobot/agent/runner.py:997–1020 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>结果规范化</td></tr></tbody></table>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 MCP definitions 被放在稳定内置前缀之后？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>definitions 顺序会影响 Provider prompt cache。稳定内置工具保持固定前缀，连接状态或服务返回顺序更易变化的 MCP 能力放在后面，减少前缀缓存失效。</p></div></details></li><li><span class="review-question">参数错误为什么通常应该回给模型，而不是直接终止 Turn？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>未知工具、JSON/参数校验失败是模型可修正的行动错误。Registry 把可读错误作为 tool result 回填，模型可改参数重试；只有配置为 fail-fast 的场景才让该错误终止运行。</p></div></details></li><li><span class="review-question">Registry 能否替代具体工具的安全检查？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>不能。Registry 只负责名称解析、cast、schema validate 和调度；路径越界、SSRF、命令限制、凭据和业务授权依赖具体 Tool/MCP Server 在执行边界再次验证。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">06.02 · Registry 与调用生命周期</footer></div></main></div></body></html>

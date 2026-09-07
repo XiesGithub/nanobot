@@ -1,0 +1,64 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>03 · MemoryStore 与存储布局 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="memory-system" data-page="memory-store">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-1" data-original-href="../../../nanobot/agent/memory.py" data-source-label="MemoryStore 源码" title="阅读 nanobot/agent/memory.py:235–275 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Memory · storage layer</p><h1>MemoryStore 与存储布局</h1><p class="lead"><code>MemoryStore</code> 故意保持简单：负责文件 I/O、游标和迁移，不决定“什么值得记住”。判断由 Consolidator 与 Dream 的提示词和模型完成。</p><div class="meta-row"><span class="chip">纯文件 I/O</span><span class="chip">JSONL + Markdown</span><span class="chip">cursor</span><span class="chip">atomic replace</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">Workspace 中的文件</h2><div class="code-block"><div class="code-head"><span>实际布局</span><span>由 MemoryStore / SessionManager 创建</span></div><pre><code>workspace/
+├── SOUL.md                    # Agent 的长期行为、语气和身份
+├── USER.md                    # 用户身份与稳定偏好
+├── memory/
+│   ├── MEMORY.md             # 项目事实、决定、持久上下文
+│   ├── history.jsonl         # Consolidator 追加的归档条目
+│   ├── .cursor               # history 写入进度
+│   ├── .dream_cursor         # Dream 消费进度
+│   └── HISTORY.md.bak[...]   # 旧格式迁移后的备份
+└── sessions/
+    └── &lt;channel_chat&gt;.jsonl  # 每个会话的实时消息与 metadata</code></pre></div>
+
+<h2 id="reading-section-02">MemoryStore 的职责边界</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">Markdown I/O</div><div class="arch-items"><span class="arch-item">read/write_memory</span><span class="arch-item">read/write_soul</span><span class="arch-item">read/write_user</span></div></div>
+  <div class="arch-layer"><div class="arch-label">Archive I/O</div><div class="arch-items"><span class="arch-item">append_history</span><span class="arch-item">read_unprocessed_history</span><span class="arch-item">compact_history</span></div></div>
+  <div class="arch-layer"><div class="arch-label">Progress</div><div class="arch-items"><span class="arch-item">_next_cursor</span><span class="arch-item">get/set_last_dream_cursor</span></div></div>
+  <div class="arch-layer"><div class="arch-label">Safety</div><div class="arch-items"><span class="arch-item">strip_think</span><span class="arch-item">hard caps</span><span class="arch-item">atomic rewrite</span><span class="arch-item">legacy migration</span></div></div>
+</div>
+
+<h2 id="reading-section-03">一次 <code>append_history()</code></h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>取 cursor</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>截断</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>清理泄漏</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>追加 JSONL</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>保存 cursor</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>cursor 自增</h3><p>优先读取 <code>.cursor</code>；文件缺失或损坏时尝试读取 JSONL 尾部，再不行就扫描全部合法整数 cursor 取最大值。</p></div>
+  <div data-step-panel><h3>字符硬上限</h3><p>调用方可指定更严格上限；默认应急上限为 64,000 字符，防止异常模型回显让单条记录无限膨胀。</p></div>
+  <div data-step-panel><h3><code>strip_think()</code></h3><p>去掉思考标签或 channel 标记等模板泄漏。即使清理后为空，也保存空内容，而不会回退保存污染原文。</p></div>
+  <div data-step-panel><h3>追加一行 JSON</h3><p>记录包含 <code>cursor</code>、分钟级 <code>timestamp</code> 与 <code>content</code>，使用 <code>ensure_ascii=False</code> 保留中文。</p></div>
+  <div data-step-panel><h3>更新写入进度</h3><p>只有追加完成后才把本次 cursor 写入 <code>.cursor</code>，下一条继续递增。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="code-block"><div class="code-head"><span>memory.py:235 · 概念摘录</span><span>写入格式</span></div><pre><code>cursor = self._next_cursor()
+raw = truncate_text(entry.rstrip(), limit)
+content = strip_think(raw)
+record = {"cursor": cursor, "timestamp": ts, "content": content}
+history_file.append(json.dumps(record) + "\n")
+self._cursor_file.write_text(str(cursor))</code></pre></div>
+
+<h2 id="reading-section-04">读路径如何容忍损坏</h2><div class="compare-grid">
+  <div class="card flat"><h3>JSON 行损坏</h3><p><code>_read_entries()</code> 忽略无法解析的行，其他合法条目仍可使用。</p></div>
+  <div class="card flat"><h3>cursor 类型污染</h3><p>只接受真正的 <code>int</code>，特别拒绝 Python 中也属于 int 子类的 <code>bool</code>；无效条目被跳过并限频告警。</p></div>
+  <div class="card flat"><h3>重写失败</h3><p><code>_write_entries()</code> 先写 <code>.tmp</code>、flush + fsync，再 <code>os.replace</code>；异常时清理临时文件。</p></div>
+  <div class="card flat"><h3>旧格式升级</h3><p>仅当 <code>HISTORY.md</code> 存在且新 JSONL 为空时迁移；迁移后把 Dream cursor 设到末尾，避免升级首日重放全部旧档案。</p></div>
+</div>
+
+<h2 id="reading-section-05">记忆怎样进入 Prompt</h2><div class="data-box"><div class="label">长期层</div><div><code>get_memory_context()</code> 读取 <code>MEMORY.md</code>，由 <code>ContextBuilder</code> 放入 <code># Memory / ## Long-term Memory</code>。</div></div><div class="data-box"><div class="label">近期归档</div><div>读取 cursor 大于 <code>.dream_cursor</code> 的条目，只保留最近 50 条并限制为 32,000 字符，放入 <code># Recent History</code>。</div></div><div class="data-box"><div class="label">Bootstrap</div><div><code>SOUL.md</code> 与 <code>USER.md</code> 通过 <code>BOOTSTRAP_FILES</code> 加载，它们不是由 <code>get_memory_context()</code> 重复加入。</div></div>
+
+<h2 id="reading-section-06">核心源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>实现</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:51" title="阅读 nanobot/agent/memory.py:235–275 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td><code>MemoryStore.__init__</code></td><td>路径、tracked files 与迁移触发</td></tr>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:235" title="阅读 nanobot/agent/memory.py:235–275 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td><code>append_history</code></td><td>上限、去泄漏、JSONL 和 cursor</td></tr>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:284" title="阅读 nanobot/agent/memory.py:235–275 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td>合法 cursor 迭代</td><td>外部写入污染的容错</td></tr>
+  <tr><td><a href="workshop.html#source-2" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:367" title="阅读 nanobot/agent/memory.py:367–401 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td><code>_write_entries</code></td><td>原子替换与 fsync</td></tr>
+  <tr><td><a href="../04-context-management/workshop.html#source-1" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:43" title="阅读 nanobot/agent/context.py:37–76 的代表性摘录与讲解">context.py · 站内摘录</a></td><td><code>build_system_prompt</code></td><td>长期 Memory 与 Recent History 注入位置</td></tr>
+</tbody></table>
+<div class="callout warning"><strong>一致性边界：</strong><code>append_history()</code> 是追加写，随后另写 <code>.cursor</code>，两者不是一个跨文件事务；因此 `_next_cursor()` 设计了从 JSONL 尾部或全文件最大值恢复的路径。</div>
+<h2 id="reading-section-07">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么迁移旧 HISTORY 后要同步推进 Dream cursor？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>旧 HISTORY 已经是迁移前被系统处理过的材料；迁移后若 cursor 仍为旧值，Dream 会把整批内容当新输入重复提炼，因此迁移代码同步写到新的末尾位置。</p></div></details></li><li><span class="review-question"><code>.cursor</code> 丢失时如何避免从 1 重新编号？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Store 会扫描现有 raw history 的行号/记录并从最大编号继续，而不是把缺失 cursor 等同于空库；这样删除游标文件不会造成编号碰撞或从头重复。</p></div></details></li><li><span class="review-question">为什么 SOUL/USER 和 MEMORY 的上下文注入走两条路径？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>SOUL.md 和 USER.md 属于稳定身份/用户规则，作为 bootstrap 文件拼入 system prompt；MEMORY.md 是 Dream 可变的长期事实，通过专门 Memory section 注入并单独控制大小和缺失状态。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">03.02 · MemoryStore 与存储布局</footer></div></main></div></body></html>

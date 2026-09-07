@@ -1,0 +1,52 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>02.03 · Registry、Factory 与 Snapshot | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head>
+<body data-study-root="../.." data-chapter="llm-provider-gateway" data-page="registry-factory"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-3" data-original-href="../../../nanobot/providers/factory.py" data-source-label="Factory 源码" title="阅读 nanobot/providers/factory.py:21–62 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Provider · metadata to object</p><h1>Registry、Factory 与 ProviderSnapshot</h1><p class="lead">Registry 把“某品牌有哪些特征”声明为数据；Factory 读取这份数据选择少量 backend 类；Snapshot 再把一次装配需要共同变化的实例和参数捆绑起来。</p><div class="meta-row"><span class="chip">ProviderSpec</span><span class="chip">make_provider</span><span class="chip">GenerationSettings</span><span class="chip">immutable snapshot</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">对象创建链</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>match</small><b>provider name</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>lookup</small><b>ProviderSpec</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>validate</small><b>凭证条件</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>dispatch</small><b>backend class</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>defaults</small><b>generation</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>snapshot</small><b>一致性快照</b></button>
+</div><div class="step-panels">
+  <div data-step-panel><h3>匹配层只返回名字与配置</h3><p><code>Config.get_provider_name(model)</code> 和 <code>get_provider(model)</code> 复用同一个匹配函数，Factory 不重复推断。</p></div>
+  <div data-step-panel><h3>Spec 是实现选择的单一事实源</h3><p><code>find_by_name()</code> 规范化连字符和大小写后返回不可变 <code>ProviderSpec</code>。Provider 自己无需再次查 Registry。</p></div>
+  <div data-step-panel><h3>先验证不可恢复的配置错误</h3><p>例如 Azure 缺 key/base 会立即抛错；普通兼容端点缺 key 也失败，除非 Spec 标明 local、OAuth 或 direct。</p></div>
+  <div data-step-panel><h3>多个品牌收敛到少数 backend</h3><p>Factory 对 <code>openai_codex</code>、<code>azure_openai</code>、<code>github_copilot</code>、<code>anthropic</code>、<code>bedrock</code> 特化，其余统一创建 <code>OpenAICompatProvider</code>。</p></div>
+  <div data-step-panel><h3>生成参数附着到实例</h3><p>Factory 最后设置 <code>provider.generation</code>。未显式传参的调用由 base 层读取 temperature、max_tokens 与 reasoning_effort。</p></div>
+  <div data-step-panel><h3>Snapshot 把热更新字段锁成一组</h3><p>冻结 dataclass 包含 Provider、model、context_window_tokens 与 signature；调用者拿到的是内部一致的一次配置解析结果。</p></div>
+</div></section>
+
+<h2 id="reading-section-02"><code>ProviderSpec</code> 描述什么</h2><table class="source-table"><thead><tr><th>字段组</th><th>代表字段</th><th>用途</th></tr></thead><tbody>
+  <tr><td>身份</td><td>name、keywords、display_name</td><td>配置字段、模型识别和界面展示</td></tr>
+  <tr><td>实现</td><td>backend</td><td>告诉 Factory 构造哪个 Python 类</td></tr>
+  <tr><td>检测</td><td>is_gateway、is_local、detect_by_key_prefix/base_keyword</td><td>控制 fallback 与本地端点识别</td></tr>
+  <tr><td>连接</td><td>env_key、env_extras、default_api_base</td><td>建立客户端需要的环境与默认地址</td></tr>
+  <tr><td>协议差异</td><td>strip_model_prefix、supports_max_completion_tokens、model_overrides</td><td>修正同为 OpenAI-compatible 的细节差异</td></tr>
+  <tr><td>推理/缓存</td><td>thinking_style、reasoning_as_content、supports_prompt_caching</td><td>控制 thinking 字段和 Prompt Cache</td></tr>
+</tbody></table>
+
+<div class="code-block"><div class="code-head"><span>providers/factory.py · Backend 分派</span><span>概念摘录</span></div><pre><code>spec = find_by_name(provider_name) if provider_name else None
+backend = spec.backend if spec else "openai_compat"
+
+if backend == "anthropic":
+    provider = AnthropicProvider(...)
+elif backend == "bedrock":
+    provider = BedrockProvider(...)
+else:
+    provider = OpenAICompatProvider(..., spec=spec)
+
+provider.generation = GenerationSettings(
+    temperature=defaults.temperature,
+    max_tokens=defaults.max_tokens,
+    reasoning_effort=defaults.reasoning_effort,
+)</code></pre></div>
+
+<h2 id="reading-section-03">Signature 为什么不是只比较 model</h2><p><code>provider_signature()</code> 还包含强制 provider、匹配名称、key、base、额外 header/body、Bedrock region/profile、生成参数和 context window。只要其中之一变化，就必须创建新客户端或更新依赖对象；否则可能出现“页面显示新配置，实际 HTTP 客户端仍握着旧连接参数”的裂脑状态。</p>
+<div class="data-box"><div class="label">不放入 signature 的例子</div><div>Gateway host、Session TTL 等不会改变主 LLM Provider，本章的热更新机制不会因此重建 Provider。</div></div>
+<div class="data-box"><div class="label">不可变不等于深度冻结</div><div><code>ProviderSnapshot(frozen=True)</code> 禁止替换字段，但内部 Provider 仍是有状态对象，例如持有 HTTP client 和 Responses API circuit 状态。</div></div>
+
+<h2 id="reading-section-04">源码与测试入口</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/registry.py" data-source-label="providers/registry.py" title="nanobot/providers/registry.py 的所属模块讲解；该文件未单独逐行收录">providers/registry.py · 模块讲解</a></td><td><code>ProviderSpec</code> 字段与完整注册表</td></tr>
+  <tr><td><a href="workshop.html#source-3" data-original-href="../../../nanobot/providers/factory.py" data-source-label="providers/factory.py" title="阅读 nanobot/providers/factory.py:21–62 的代表性摘录与讲解">providers/factory.py · 站内摘录</a></td><td>凭证验证、backend 分派、signature 与 snapshot</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/cli/test_commands.py" data-source-label="tests/cli/test_commands.py" title="tests/cli/test_commands.py 的所属模块讲解；该文件未单独逐行收录">tests/cli/test_commands.py · 模块讲解</a></td><td>Factory 对 OAuth、extra headers 和不同后端的构造测试</td></tr>
+</tbody></table>
+<h2 id="reading-section-05">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么新增普通兼容 Provider 通常不需要新增 Python Provider 类？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>普通 OpenAI-compatible 服务的协议相同，新增 <code>ProviderSpec</code> 即可复用 <code>OpenAICompatProvider</code>；只有认证、消息格式或流协议不同才需要新 Python 类。</p></div></details></li><li><span class="review-question">ProviderSpec 的 <code>backend</code> 与 <code>name</code> 有什么区别？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>name</code> 是用户配置和识别用的 Provider 名；<code>backend</code> 决定 Factory 实际实例化哪种实现类，例如多个 name 都可映射到 <code>openai_compat</code>。</p></div></details></li><li><span class="review-question">为什么 apiBase 变化必须进入 signature？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>同一模型和 key 指向不同 <code>apiBase</code> 就是不同服务端。若 signature 忽略地址，热更新会误以为配置未变，继续复用连接到旧端点的 Provider。</p></div></details></li><li><span class="review-question">GenerationSettings 为什么放在 Provider 实例而不是每个调用点重复读取 Config？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Factory 把温度、最大输出和 reasoning effort 固化为 <code>GenerationSettings</code> 注入 Provider。调用点可省略参数并得到一致默认，也避免 Runner 反复读取可变 Config。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02.03 · Registry、Factory 与 Snapshot</footer></div></main></div></body></html>

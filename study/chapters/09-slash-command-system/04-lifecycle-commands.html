@@ -1,0 +1,63 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>07.04 · 生命周期命令 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="slash-command-system" data-page="lifecycle-commands">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Commands · lifecycle</p><h1><code>/stop</code>、<code>/restart</code>、<code>/new</code>：控制任务、进程与会话</h1><p class="lead">这三个命令分别作用于三种生命周期：正在执行的 Turn、nanobot 进程、持久化 Session。它们都具有副作用，却通过不同的取消、交接和恢复机制尽量避免状态丢失。</p><div class="meta-row"><span class="chip">task cancellation</span><span class="chip">checkpoint</span><span class="chip">os.execv</span><span class="chip">session archive</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">三个命令控制三层状态</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>/stop</small><b>找到 active tasks</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>cancel</small><b>等待清理</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>/restart</small><b>跨进程交接</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>/new</small><b>清空 Session</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>archive</small><b>保存旧内容</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3><code>/stop</code> 按 session key 找任务</h3><p><code>_active_tasks</code> 保存外层 <code>_dispatch</code> tasks；SubagentManager 也按同一个 key 追踪子 Agent。</p></div>
+  <div data-step-panel><h3>取消不是 fire-and-forget</h3><p>主任务先 <code>cancel()</code>，再逐个 await；AgentLoop 的 CancelledError 分支会尝试把 runtime checkpoint 物化到 Session，随后继续传播取消。</p></div>
+  <div data-step-panel><h3><code>/restart</code> 先留下回信地址</h3><p>channel、chat_id、metadata 和开始时间写入环境变量；新进程启动后由 CLI 或 ChannelManager 消费一次并发送 “Restart completed”。</p></div>
+  <div data-step-panel><h3><code>/new</code> 先停再清</h3><p>它先取消当前 key 的任务，获取 Session，截取 <code>last_consolidated</code> 之后的未归档消息，然后 clear/save/invalidate。</p></div>
+  <div data-step-panel><h3>归档在后台完成</h3><p>旧消息 snapshot 已与可变 Session 脱离；Consolidator.archive 由 <code>_schedule_background</code> 调度，所以用户无需等待总结完成就能开始新对话。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02"><code>/stop</code> 的取消闭环</h2><div class="code-block"><div class="code-head"><span>command/builtin.py:100 + agent/loop.py:692</span><span>主任务与子 Agent 一起取消</span></div><pre><code>async def cmd_stop(ctx):
+    total = await ctx.loop._cancel_active_tasks(ctx.msg.session_key)
+    content = f"Stopped {total} task(s)." if total else "No active task to stop."
+    return OutboundMessage(..., content=content)
+
+async def _cancel_active_tasks(self, key):
+    tasks = self._active_tasks.pop(key, [])
+    cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
+    for t in tasks:
+        with suppress(asyncio.CancelledError, Exception):
+            await t
+    sub_cancelled = await self.subagents.cancel_by_session(key)
+    return cancelled + sub_cancelled</code></pre></div>
+<p>Tool 已完成产生的中间结果可能已写入 runtime checkpoint。被取消的 <code>_dispatch</code> 捕获 CancelledError 后调用 <code>_restore_runtime_checkpoint</code>，避免用户下一轮完全看不到已经发生的工具行动。</p>
+
+<h2 id="reading-section-03"><code>/restart</code> 为什么使用 execv</h2><div class="architecture"><div class="arch-layer"><div class="arch-label">旧进程</div><div class="arch-items"><span class="arch-item">set env notice</span><span>→ 返回 Restarting...</span><span>→ sleep 1s</span><span>→ os.execv</span></div></div><div class="arch-layer"><div class="arch-label">新映像</div><div class="arch-items"><span class="arch-item">同一 PID/启动参数</span><span>→ consume env once</span><span>→ 原渠道收到完成通知</span></div></div></div>
+<div class="code-block"><div class="code-head"><span>command/builtin.py:112–128</span><span>延迟替换当前进程</span></div><pre><code>set_restart_notice_to_env(channel=msg.channel, chat_id=msg.chat_id, metadata=...)
+
+async def _do_restart():
+    await asyncio.sleep(1)
+    os.execv(sys.executable, [sys.executable, "-m", "nanobot"] + sys.argv[1:])
+
+asyncio.create_task(_do_restart())
+return OutboundMessage(..., content="Restarting...")</code></pre></div>
+<p>一秒延迟给 outbound 消息留下发送窗口；环境变量承担跨 exec 的最小交接协议。这里不是优雅 shutdown/relaunch，而是以相同 Python 可执行文件和参数原地替换进程映像。</p>
+
+<h2 id="reading-section-04"><code>/new</code> 的顺序不可随意调整</h2><div class="code-block"><div class="code-head"><span>command/builtin.py:177–191</span><span>同步清理 + 异步归档</span></div><pre><code>await loop._cancel_active_tasks(ctx.key)
+session = ctx.session or loop.sessions.get_or_create(ctx.key)
+snapshot = session.messages[session.last_consolidated:]
+session.clear()
+loop.sessions.save(session)
+loop.sessions.invalidate(session.key)
+if snapshot:
+    loop._schedule_background(loop.consolidator.archive(snapshot))</code></pre></div>
+
+<table class="source-table"><thead><tr><th>命令</th><th>用户先看到</th><th>后台/后续动作</th><th>主要风险</th></tr></thead><tbody>
+  <tr><td>/stop</td><td>取消数量</td><td>等待任务取消与 checkpoint 恢复</td><td>session key 必须与任务登记一致</td></tr>
+  <tr><td>/restart</td><td>Restarting...</td><td>1 秒后 exec；新进程发送完成通知</td><td>未追踪 create_task、发送窗口和环境交接</td></tr>
+  <tr><td>/new</td><td>New session started.</td><td>后台归档 snapshot</td><td>取消、清空、缓存失效顺序</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-05">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py:100" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">builtin.py · 站内摘录</a></td><td>/stop、/restart、/new handlers</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-677" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:692" title="阅读 nanobot/agent/loop.py:677–703 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>活动任务与子 Agent 取消</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-892" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1028" title="阅读 nanobot/agent/loop.py:892–934 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>取消后的 checkpoint 恢复</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/restart.py" data-source-label="utils/restart.py" title="nanobot/utils/restart.py 的所属模块讲解；该文件未单独逐行收录">utils/restart.py · 模块讲解</a></td><td>跨进程通知协议</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/test_consolidate_offset.py" data-source-label="test_consolidate_offset.py:483" title="tests/agent/test_consolidate_offset.py 的所属模块讲解；该文件未单独逐行收录">test_consolidate_offset.py · 模块讲解</a></td><td>/new 归档测试</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">/stop 为什么还要 await 已 cancel 的 task？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>cancel()</code> 只请求取消。继续 await 才能让协程运行 finally、发出/保存 checkpoint、释放 FileState ContextVar 和 lock，并确认 CancelledError 已被消费，避免悬挂任务。</p></div></details></li><li><span class="review-question">/restart 如何让新进程知道该通知哪个聊天？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Handler 在 exec 前用 <code>set_restart_notice_to_env()</code> 把 channel、chat_id 和 metadata 序列化到环境变量；新进程启动后读取并向原聊天发送恢复通知。</p></div></details></li><li><span class="review-question">/new 为什么先复制 snapshot 再 clear？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>clear 会重置 messages 和 offset；若先清空就失去尚未 consolidated 的对话。代码先复制 <code>messages[last_consolidated:]</code>，再 clear/save，最后后台 archive 该副本。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">09.04 · 生命周期命令</footer></div></main></div></body></html>

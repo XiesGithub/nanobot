@@ -1,0 +1,311 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="把配置变成稳定的模型调用契约：数据契约、真实源码逐步讲解、状态演算与从零实现"><title>把配置变成稳定的模型调用契约 · 源码精讲与设计实作</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script><style>
+.learning-diagram{width:100%;height:auto;min-width:650px;color:var(--text,#243247)}.diagram-panel{overflow-x:auto;margin:24px 0;padding:12px;border:1px solid var(--border,#cbd5e1);border-radius:14px}.learning-diagram rect{fill:var(--surface,#f1f5f9);stroke:currentColor;stroke-width:1.3}.learning-diagram text{fill:currentColor;font:17px system-ui,sans-serif}.learning-diagram .sub{font-size:13px}.learning-diagram path{stroke:currentColor;stroke-width:2;fill:none}.learning-diagram .arrowhead{fill:currentColor;stroke:none}.learning-diagram .failure{stroke:#b86b43}.learning-diagram .error-line{stroke:#b86b43;stroke-dasharray:5 4}.source-caption{font-size:.88rem;opacity:.82}article{scroll-margin-top:90px}pre{max-height:900px;overflow:auto}details{margin:20px 0;padding:18px;border:1px solid var(--border,#cbd5e1);border-radius:12px}summary{font-weight:650;cursor:pointer}section{scroll-margin-top:90px}td{vertical-align:top}figcaption{line-height:1.8;margin-top:12px}
+</style></head><body data-study-root="../.." data-chapter="llm-provider-gateway" data-page="workshop"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>Agent 学习手册</span></span></a><div class="header-actions"><a class="button" href="index.html">本章总览</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div><section class="hero"><p class="eyebrow">源码精讲与设计实作</p><h1>把配置变成稳定的模型调用契约</h1><p class="lead">Provider 是协议适配器：配置选中它，工厂创建它，Runner 调用它，响应归一化后才允许进入工具执行。学习重点是确定选择优先级、默认参数的含义，以及变更配置怎样传播到下一轮。</p><div class="meta-row"><span class="chip">当前源码连续摘录</span><span class="chip">离线阅读</span><span class="chip">手工演算 + 设计实作</span></div></section><p>阅读顺序：<a href="#contract">输入输出契约</a> → <a href="#dataflow">模块数据流图</a> → <a href="#source-walkthrough">核心源码精讲</a> → <a href="#trace">手工演算</a> → <a href="#build-it">动手设计与验收</a>。本页所有原文均按当前本地文件行号提取；演算中的固定输出由假 Provider 提供，不需要模型账户。</p><section id="contract"><h2>先确定数据与责任的交接</h2><div class="table-wrap"><table><thead><tr><th>交接点 / 输入</th><th>输出与状态</th><th>约束、失败和所有者</th></tr></thead><tbody><tr><td>配置文件 + 环境引用 ${VAR}</td><td>Config（Pydantic 验证后）</td><td>load_config 处理 JSON/校验异常并回退；resolve_config_env_vars 是另外一步，缺失环境变量会抛 ValueError。</td></tr><tr><td>model + agents.defaults.provider + providers 配置</td><td>(ProviderConfig, registry name)</td><td>forced 优先；auto 依次尝试显式前缀、关键词、本地后备、带凭据后备。registry 顺序影响选择。</td></tr><tr><td>Config + ProviderSpec.backend</td><td>LLMProvider + GenerationSettings</td><td>普通 OpenAI compatible 后端需要凭据，OAuth/local/direct 有豁免条件；工厂错误阻止建立快照。</td></tr><tr><td>messages / tools / model / 可选生成参数</td><td>厂商 kwargs；随后 LLMResponse</td><td>工具 schema 与消息都属于请求；_SENTINEL、None、具体数值的含义不同。</td></tr><tr><td>原始 choices / SDK response / 字符串</td><td>content、tool_calls、finish_reason、usage、error metadata</td><td>has_tool_calls 只表示存在；should_execute_tools 还要求 finish_reason 为 tool_calls 或 stop。</td></tr><tr><td>ProviderSnapshot(provider,model,context_window_tokens,signature)</td><td>Loop / Runner / 子代理 / Memory 后续使用的运行配置</td><td>签名相同不替换；加载失败保留既有状态。signature 包含凭据，不是可直接打印的调试字符串。</td></tr></tbody></table></div></section><section id="dataflow"><h2>沿箭头追踪数据与失败去向</h2><figure class="diagram-panel"><svg class="learning-diagram" viewBox="0 0 900 320" role="img" aria-labelledby="flow-title flow-description" xmlns="http://www.w3.org/2000/svg"><title id="flow-title">本章数据流程与失败路径</title><desc id="flow-description">文本等价：配置先验证并解析环境引用，经匹配算法选择 registry 条目，工厂按 backend 创建 Provider 和生成默认值。Runner 的 messages 与 tools 被翻译成厂商请求，再把响应转为 LLMResponse。失败响应必须经过重试与工具执行门控；不能把任意带 tool_calls 的失败对象当成授权执行。</desc><defs><marker id="flow-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" class="arrowhead"/></marker></defs><rect x="20" y="60" width="170" height="86" rx="12"/><text x="105" y="94" text-anchor="middle">加载与解析</text><text x="105" y="123" text-anchor="middle" class="sub">Config / ${VAR}</text><rect x="250" y="60" width="170" height="86" rx="12"/><text x="335" y="94" text-anchor="middle">匹配与工厂</text><text x="335" y="123" text-anchor="middle" class="sub">ProviderSnapshot</text><rect x="480" y="60" width="170" height="86" rx="12"/><text x="565" y="94" text-anchor="middle">请求与归一化</text><text x="565" y="123" text-anchor="middle" class="sub">kwargs → LLMResponse</text><rect x="710" y="60" width="170" height="86" rx="12"/><text x="795" y="94" text-anchor="middle">Runner 决策</text><text x="795" y="123" text-anchor="middle" class="sub">回答 / 工具 / 错误</text><path d="M190 103 H250" marker-end="url(#flow-arrow)"/><text x="220" y="48" text-anchor="middle" class="sub">model / spec</text><path d="M420 103 H480" marker-end="url(#flow-arrow)"/><text x="450" y="48" text-anchor="middle" class="sub">messages[]</text><path d="M650 103 H710" marker-end="url(#flow-arrow)"/><text x="680" y="48" text-anchor="middle" class="sub">finish_reason</text><rect x="250" y="225" width="400" height="65" rx="12" class="failure"/><text x="450" y="250" text-anchor="middle">配置缺失 / 网络错误 / 非成功终止原因</text><text x="450" y="276" text-anchor="middle" class="sub">加载失败保留旧快照；重试策略判断后才重试</text><path d="M565 146 V207 H510 V225" class="error-line" marker-end="url(#flow-arrow)"/><text x="582" y="180" class="sub">失败 / 未完成</text></svg><figcaption>文本等价：配置先验证并解析环境引用，经匹配算法选择 registry 条目，工厂按 backend 创建 Provider 和生成默认值。Runner 的 messages 与 tools 被翻译成厂商请求，再把响应转为 LLMResponse。失败响应必须经过重试与工具执行门控；不能把任意带 tool_calls 的失败对象当成授权执行。</figcaption></figure></section><section id="source-walkthrough"><h2>把源码读成可执行的因果链</h2><article id="source-1"><h3>1. load_config</h3><p>配置边界先做结构验证，再返回业务代码可读的对象。这里没有发出任何模型请求。</p><p class="source-caption">当前源码原文 · <code>nanobot/config/loader.py</code> · <code>load_config</code> · 第 32–56 行（连续摘录）</p><pre id="excerpt-1" data-source="nanobot/config/loader.py" data-start="32" data-end="56" data-symbol="load_config"><code class="language-python">def load_config(config_path: Path | None = None) -&gt; Config:
+    &quot;&quot;&quot;
+    Load configuration from file or create default.
+
+    Args:
+        config_path: Optional path to config file. Uses default if not provided.
+
+    Returns:
+        Loaded configuration object.
+    &quot;&quot;&quot;
+    path = config_path or get_config_path()
+
+    config = Config()
+    if path.exists():
+        try:
+            with open(path, encoding=&quot;utf-8&quot;) as f:
+                data = json.load(f)
+            data = _migrate_config(data)
+            config = Config.model_validate(data)
+        except (json.JSONDecodeError, ValueError, pydantic.ValidationError) as e:
+            logger.warning(&quot;Failed to load config from {}: {}&quot;, path, e)
+            logger.warning(&quot;Using default configuration.&quot;)
+
+    _apply_ssrf_whitelist(config)
+    return config</code></pre><ol><li>先创建默认 Config。文件存在时读取 JSON、迁移旧格式、model_validate；不存在时直接使用默认。</li><li>JSONDecodeError、ValueError、Pydantic 验证异常会记录警告并保留默认配置；不是所有文件 IO 错误都被这个 except 捕获。</li><li>_apply_ssrf_whitelist 是装配副作用。环境引用解析不在这个函数体中，快照加载器随后显式 resolve_config_env_vars，缺失引用可能因此让整个快照失败。</li></ol></article><article id="source-2"><h3>2. Config._match_provider</h3><p>选择 Provider 不是简单地从模型名截取第一个单词。完整优先级决定了同一模型字符串在不同配置下会使用哪个后端。</p><p class="source-caption">当前源码原文 · <code>nanobot/config/schema.py</code> · <code>Config._match_provider</code> · 第 263–326 行（连续摘录）</p><pre id="excerpt-2" data-source="nanobot/config/schema.py" data-start="263" data-end="326" data-symbol="Config._match_provider"><code class="language-python">    def _match_provider(
+        self, model: str | None = None
+    ) -&gt; tuple[&quot;ProviderConfig | None&quot;, str | None]:
+        &quot;&quot;&quot;Match provider config and its registry name. Returns (config, spec_name).&quot;&quot;&quot;
+        from nanobot.providers.registry import PROVIDERS, find_by_name
+
+        forced = self.agents.defaults.provider
+        if forced != &quot;auto&quot;:
+            spec = find_by_name(forced)
+            if spec:
+                p = getattr(self.providers, spec.name, None)
+                return (p, spec.name) if p else (None, None)
+            return None, None
+
+        model_lower = (model or self.agents.defaults.model).lower()
+        model_normalized = model_lower.replace(&quot;-&quot;, &quot;_&quot;)
+        model_prefix = model_lower.split(&quot;/&quot;, 1)[0] if &quot;/&quot; in model_lower else &quot;&quot;
+        normalized_prefix = model_prefix.replace(&quot;-&quot;, &quot;_&quot;)
+
+        def _kw_matches(kw: str) -&gt; bool:
+            kw = kw.lower()
+            return kw in model_lower or kw.replace(&quot;-&quot;, &quot;_&quot;) in model_normalized
+
+        # Explicit provider prefix wins — prevents `github-copilot/...codex` matching openai_codex.
+        for spec in PROVIDERS:
+            p = getattr(self.providers, spec.name, None)
+            if p and model_prefix and normalized_prefix == spec.name:
+                if spec.is_oauth or spec.is_local or spec.is_direct or p.api_key:
+                    return p, spec.name
+
+        # Match by keyword (order follows PROVIDERS registry)
+        for spec in PROVIDERS:
+            p = getattr(self.providers, spec.name, None)
+            if p and any(_kw_matches(kw) for kw in spec.keywords):
+                if spec.is_oauth or spec.is_local or spec.is_direct or p.api_key:
+                    return p, spec.name
+
+        # Fallback: configured local providers can route models without
+        # provider-specific keywords (for example plain &quot;llama3.2&quot; on Ollama).
+        # Prefer providers whose detect_by_base_keyword matches the configured api_base
+        # (e.g. Ollama&#x27;s &quot;11434&quot; in &quot;http://localhost:11434&quot;) over plain registry order.
+        local_fallback: tuple[ProviderConfig, str] | None = None
+        for spec in PROVIDERS:
+            if not spec.is_local:
+                continue
+            p = getattr(self.providers, spec.name, None)
+            if not (p and p.api_base):
+                continue
+            if spec.detect_by_base_keyword and spec.detect_by_base_keyword in p.api_base:
+                return p, spec.name
+            if local_fallback is None:
+                local_fallback = (p, spec.name)
+        if local_fallback:
+            return local_fallback
+
+        # Fallback: gateways first, then others (follows registry order)
+        # OAuth providers are NOT valid fallbacks — they require explicit model selection
+        for spec in PROVIDERS:
+            if spec.is_oauth:
+                continue
+            p = getattr(self.providers, spec.name, None)
+            if p and p.api_key:
+                return p, spec.name
+        return None, None</code></pre><ol><li>forced!=auto 时直接 find_by_name，并读取对应 ProviderConfig；无效名称返回 (None,None)，不会偷偷退回自动匹配。</li><li>auto 把模型小写并把连字符规范为下划线。带 / 的显式 provider 前缀先于关键词，这避免模型尾部关键词抢占路由。</li><li>前缀与关键词分支都检查该配置存在，且 OAuth/local/direct 或具有 api_key；关键词分支按 PROVIDERS 顺序取第一个。</li><li>没有匹配时先找配置了 api_base 的本地后端，detect_by_base_keyword 更优先；再选非 OAuth 的带 key 后备。没有候选返回空对，由工厂后续检查。</li></ol></article><article id="source-3"><h3>3. make_provider：后端与前置条件</h3><p>registry 声明元信息，工厂负责构造具体对象；让 AgentLoop 不必知道各 SDK 的构造参数。此摘录覆盖检查与前三类分支。</p><p class="source-caption">当前源码原文 · <code>nanobot/providers/factory.py</code> · <code>make_provider：后端与前置条件</code> · 第 21–62 行（连续摘录）</p><pre id="excerpt-3" data-source="nanobot/providers/factory.py" data-start="21" data-end="62" data-symbol="make_provider：后端与前置条件"><code class="language-python">def make_provider(config: Config) -&gt; LLMProvider:
+    &quot;&quot;&quot;Create the LLM provider implied by config.&quot;&quot;&quot;
+    model = config.agents.defaults.model
+    provider_name = config.get_provider_name(model)
+    p = config.get_provider(model)
+    spec = find_by_name(provider_name) if provider_name else None
+    backend = spec.backend if spec else &quot;openai_compat&quot;
+
+    if backend == &quot;azure_openai&quot;:
+        if not p or not p.api_key or not p.api_base:
+            raise ValueError(&quot;Azure OpenAI requires api_key and api_base in config.&quot;)
+    elif backend == &quot;openai_compat&quot; and not model.startswith(&quot;bedrock/&quot;):
+        needs_key = not (p and p.api_key)
+        exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
+        if needs_key and not exempt:
+            raise ValueError(f&quot;No API key configured for provider &#x27;{provider_name}&#x27;.&quot;)
+
+    if backend == &quot;openai_codex&quot;:
+        from nanobot.providers.openai_codex_provider import OpenAICodexProvider
+
+        provider = OpenAICodexProvider(default_model=model)
+    elif backend == &quot;azure_openai&quot;:
+        from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
+
+        provider = AzureOpenAIProvider(
+            api_key=p.api_key,
+            api_base=p.api_base,
+            default_model=model,
+        )
+    elif backend == &quot;github_copilot&quot;:
+        from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
+
+        provider = GitHubCopilotProvider(default_model=model)
+    elif backend == &quot;anthropic&quot;:
+        from nanobot.providers.anthropic_provider import AnthropicProvider
+
+        provider = AnthropicProvider(
+            api_key=p.api_key if p else None,
+            api_base=config.get_api_base(model),
+            default_model=model,
+            extra_headers=p.extra_headers if p else None,
+        )</code></pre><ol><li>同一个 model 用于查询 provider_name、配置 p 和 registry spec；缺 spec 时 backend 默认 openai_compat。</li><li>Azure 要求 key 与 base；普通 compatible 需要 key，特定 OAuth/local/direct 与 bedrock 前缀有豁免。条件失败用 ValueError 解释配置问题。</li><li>不同 backend 延迟导入各自类，因此选定一种后端不必提前初始化所有厂商客户端。后续分支处理 Bedrock 和通用 OpenAICompatProvider。</li></ol></article><article id="source-4"><h3>4. provider_signature / build_provider_snapshot</h3><p>快照把 Provider 实例、模型与预算绑成一个切换单元，签名用于判断配置是否真的改变。</p><p class="source-caption">当前源码原文 · <code>nanobot/providers/factory.py</code> · <code>provider_signature / build_provider_snapshot</code> · 第 95–129 行（连续摘录）</p><pre id="excerpt-4" data-source="nanobot/providers/factory.py" data-start="95" data-end="129" data-symbol="provider_signature / build_provider_snapshot"><code class="language-python">def provider_signature(config: Config) -&gt; tuple[object, ...]:
+    &quot;&quot;&quot;Return the config fields that affect the primary LLM provider.&quot;&quot;&quot;
+    model = config.agents.defaults.model
+    defaults = config.agents.defaults
+    p = config.get_provider(model)
+    return (
+        model,
+        defaults.provider,
+        config.get_provider_name(model),
+        config.get_api_key(model),
+        config.get_api_base(model),
+        p.extra_headers if p else None,
+        p.extra_body if p else None,
+        getattr(p, &quot;region&quot;, None) if p else None,
+        getattr(p, &quot;profile&quot;, None) if p else None,
+        defaults.max_tokens,
+        defaults.temperature,
+        defaults.reasoning_effort,
+        defaults.context_window_tokens,
+    )
+
+
+def build_provider_snapshot(config: Config) -&gt; ProviderSnapshot:
+    return ProviderSnapshot(
+        provider=make_provider(config),
+        model=config.agents.defaults.model,
+        context_window_tokens=config.agents.defaults.context_window_tokens,
+        signature=provider_signature(config),
+    )
+
+
+def load_provider_snapshot(config_path: Path | None = None) -&gt; ProviderSnapshot:
+    from nanobot.config.loader import load_config, resolve_config_env_vars
+
+    return build_provider_snapshot(resolve_config_env_vars(load_config(config_path)))</code></pre><ol><li>signature 不只包含 model；还包含 provider 选择、key、base、headers、extra_body、region/profile 与生成/窗口参数。修改 temperature 同样是运行配置变更。</li><li>build_provider_snapshot 先 make_provider，再提取模型和窗口。其上方的工厂尾部把 defaults.temperature/max_tokens/reasoning_effort 放入 GenerationSettings。</li><li>load_provider_snapshot 显式完成 load→环境解析→构造。构造失败则不会拿到半成品快照；不要输出 signature，因为它确实包含敏感配置值。</li></ol></article><article id="source-5"><h3>5. LLMResponse / GenerationSettings</h3><p>这个对象是厂商世界到 Runner 的语义边界。下游既看内容，也看终止原因和错误属性。</p><p class="source-caption">当前源码原文 · <code>nanobot/providers/base.py</code> · <code>LLMResponse / GenerationSettings</code> · 第 48–86 行（连续摘录）</p><pre id="excerpt-5" data-source="nanobot/providers/base.py" data-start="48" data-end="86" data-symbol="LLMResponse / GenerationSettings"><code class="language-python">@dataclass
+class LLMResponse:
+    &quot;&quot;&quot;Response from an LLM provider.&quot;&quot;&quot;
+    content: str | None
+    tool_calls: list[ToolCallRequest] = field(default_factory=list)
+    finish_reason: str = &quot;stop&quot;
+    usage: dict[str, int] = field(default_factory=dict)
+    retry_after: float | None = None  # Provider supplied retry wait in seconds.
+    reasoning_content: str | None = None  # Kimi, DeepSeek-R1, MiMo etc.
+    thinking_blocks: list[dict] | None = None  # Anthropic extended thinking
+    # Structured error metadata used by retry policy when finish_reason == &quot;error&quot;.
+    error_status_code: int | None = None
+    error_kind: str | None = None  # e.g. &quot;timeout&quot;, &quot;connection&quot;
+    error_type: str | None = None  # Provider/type semantic, e.g. insufficient_quota.
+    error_code: str | None = None  # Provider/code semantic, e.g. rate_limit_exceeded.
+    error_retry_after_s: float | None = None
+    error_should_retry: bool | None = None
+
+    @property
+    def has_tool_calls(self) -&gt; bool:
+        &quot;&quot;&quot;Check if response contains tool calls.&quot;&quot;&quot;
+        return len(self.tool_calls) &gt; 0
+
+    @property
+    def should_execute_tools(self) -&gt; bool:
+        &quot;&quot;&quot;Tools execute only when has_tool_calls AND finish_reason is ``tool_calls`` / ``stop``.
+        Blocks gateway-injected calls under ``refusal`` / ``content_filter`` / ``error`` (#3220).&quot;&quot;&quot;
+        if not self.has_tool_calls:
+            return False
+        return self.finish_reason in (&quot;tool_calls&quot;, &quot;stop&quot;)
+
+
+@dataclass(frozen=True)
+class GenerationSettings:
+    &quot;&quot;&quot;Default generation settings.&quot;&quot;&quot;
+
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    reasoning_effort: str | None = None</code></pre><ol><li>每个响应独立分配 tool_calls 与 usage 默认容器。content 可以 None，reasoning_content 和 thinking_blocks 分开保存，不能混成用户回答。</li><li>has_tool_calls 只检查列表非空；should_execute_tools 额外门控 finish_reason。refusal/content_filter/error 即使带有调用对象，也返回 False。</li><li>结构化 error_status_code/error_kind/error_code 等服务于重试；错误不是仅靠 content 中是否出现 Error 字样判断。GenerationSettings 是 frozen dataclass，调用方应覆盖请求值而不是任意就地改字段。</li></ol></article><article id="source-6"><h3>6. LLMProvider.chat_with_retry</h3><p>默认值解析与可靠性策略共用在基类，具体 Provider 只需要实现实际协议调用。</p><p class="source-caption">当前源码原文 · <code>nanobot/providers/base.py</code> · <code>LLMProvider.chat_with_retry</code> · 第 563–602 行（连续摘录）</p><pre id="excerpt-6" data-source="nanobot/providers/base.py" data-start="563" data-end="602" data-symbol="LLMProvider.chat_with_retry"><code class="language-python">    async def chat_with_retry(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: object = _SENTINEL,
+        temperature: object = _SENTINEL,
+        reasoning_effort: object = _SENTINEL,
+        tool_choice: str | dict[str, Any] | None = None,
+        retry_mode: str = &quot;standard&quot;,
+        on_retry_wait: Callable[[str], Awaitable[None]] | None = None,
+    ) -&gt; LLMResponse:
+        &quot;&quot;&quot;Call chat() with retry on transient provider failures.
+
+        Parameters default to ``self.generation`` when not explicitly passed,
+        so callers no longer need to thread temperature / max_tokens /
+        reasoning_effort through every layer. Explicit ``None`` is also
+        normalized to the provider&#x27;s generation defaults so that downstream
+        ``_build_kwargs`` never sees ``None`` for ``max_tokens`` / ``temperature``
+        (which would crash ``max(1, max_tokens)``).
+        &quot;&quot;&quot;
+        if max_tokens is self._SENTINEL or max_tokens is None:
+            max_tokens = self.generation.max_tokens
+        if temperature is self._SENTINEL or temperature is None:
+            temperature = self.generation.temperature
+        if reasoning_effort is self._SENTINEL:
+            reasoning_effort = self.generation.reasoning_effort
+
+        kw: dict[str, Any] = dict(
+            messages=messages, tools=tools, model=model,
+            max_tokens=max_tokens, temperature=temperature,
+            reasoning_effort=reasoning_effort, tool_choice=tool_choice,
+        )
+        return await self._run_with_retry(
+            self._safe_chat,
+            kw,
+            messages,
+            retry_mode=retry_mode,
+            on_retry_wait=on_retry_wait,
+        )</code></pre><ol><li>max_tokens/temperature 缺省或显式 None 都用 self.generation 默认值；这样 _build_kwargs 的 max(1,max_tokens) 不会收到 None。</li><li>reasoning_effort 仅在 _SENTINEL 时回退；显式 None 保留为关闭/不指定语义。不能对三种参数统一写 value or default，否则 0 等合法输入也被吞掉。</li><li>最终 kw 交给 _run_with_retry(_safe_chat,...)；本段并不无条件循环重试所有错误。上层可选择 retry_mode、接收 on_retry_wait。</li></ol></article><article id="source-7"><h3>7. OpenAICompatProvider._build_kwargs</h3><p>同一内部参数需要按厂商能力转换成不同的 wire 字段。本摘录展示模型前缀、消息清理、温度和输出预算映射。</p><p class="source-caption">当前源码原文 · <code>nanobot/providers/openai_compat_provider.py</code> · <code>OpenAICompatProvider._build_kwargs</code> · 第 470–511 行（连续摘录）</p><pre id="excerpt-7" data-source="nanobot/providers/openai_compat_provider.py" data-start="470" data-end="511" data-symbol="OpenAICompatProvider._build_kwargs"><code class="language-python">    def _build_kwargs(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str | None,
+        max_tokens: int,
+        temperature: float,
+        reasoning_effort: str | None,
+        tool_choice: str | dict[str, Any] | None,
+    ) -&gt; dict[str, Any]:
+        model_name = model or self.default_model
+        spec = self._spec
+
+        if spec and spec.supports_prompt_caching:
+            model_name = model or self.default_model
+            if any(model_name.lower().startswith(k) for k in (&quot;anthropic/&quot;, &quot;claude&quot;)):
+                messages, tools = self._apply_cache_control(messages, tools)
+
+        if spec and spec.strip_model_prefix:
+            model_name = model_name.split(&quot;/&quot;)[-1]
+
+        kwargs: dict[str, Any] = {
+            &quot;model&quot;: model_name,
+            &quot;messages&quot;: self._sanitize_messages(self._sanitize_empty_content(messages)),
+        }
+
+        # GPT-5 and reasoning models (o1/o3/o4) reject temperature when
+        # reasoning_effort is active.  Only include it when safe.
+        if self._supports_temperature(model_name, reasoning_effort):
+            kwargs[&quot;temperature&quot;] = temperature
+
+        if spec and getattr(spec, &quot;supports_max_completion_tokens&quot;, False):
+            kwargs[&quot;max_completion_tokens&quot;] = max(1, max_tokens)
+        else:
+            kwargs[&quot;max_tokens&quot;] = max(1, max_tokens)
+
+        if spec:
+            model_lower = model_name.lower()
+            for pattern, overrides in spec.model_overrides:
+                if pattern in model_lower:
+                    kwargs.update(overrides)
+                    break</code></pre><ol><li>model 或 default_model 确定实际模型；仅 spec 允许时附加缓存控制或去掉路径前缀。模型字符串仍受项目配置约束，练习统一使用 deepseek-v4-flash。</li><li>两层 sanitize 清理空内容和厂商消息格式。输出 kwargs 的 model/messages 是实际发送结构，不能把内部 _meta 当 SDK 支持字段。</li><li>temperature 只在能力判断允许时发送。输出 token 字段由 supports_max_completion_tokens 决定，否则使用 max_tokens，值至少为 1。</li><li>model_overrides 按模式取首次命中并更新 kwargs；因此排查实际请求时必须考虑 spec，而不是只查看 defaults。</li></ol></article><article id="source-8"><h3>8. AgentLoop._apply_provider_snapshot / _refresh_provider_snapshot</h3><p>切换是装配责任。只更新 loop.model 会让后台归档和子代理继续使用旧设置。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/loop.py</code> · <code>AgentLoop._apply_provider_snapshot / _refresh_provider_snapshot</code> · 第 453–481 行（连续摘录）</p><pre id="excerpt-8" data-source="nanobot/agent/loop.py" data-start="453" data-end="481" data-symbol="AgentLoop._apply_provider_snapshot / _refresh_provider_snapshot"><code class="language-python">    def _apply_provider_snapshot(self, snapshot: ProviderSnapshot) -&gt; None:
+        &quot;&quot;&quot;Swap model/provider for future turns without disturbing an active one.&quot;&quot;&quot;
+        provider = snapshot.provider
+        model = snapshot.model
+        context_window_tokens = snapshot.context_window_tokens
+        if self.provider is provider and self.model == model:
+            return
+        old_model = self.model
+        self.provider = provider
+        self.model = model
+        self.context_window_tokens = context_window_tokens
+        self.runner.provider = provider
+        self.subagents.set_provider(provider, model)
+        self.consolidator.set_provider(provider, model, context_window_tokens)
+        self.dream.set_provider(provider, model)
+        self._provider_signature = snapshot.signature
+        logger.info(&quot;Runtime model switched for next turn: {} -&gt; {}&quot;, old_model, model)
+
+    def _refresh_provider_snapshot(self) -&gt; None:
+        if self._provider_snapshot_loader is None:
+            return
+        try:
+            snapshot = self._provider_snapshot_loader()
+        except Exception:
+            logger.exception(&quot;Failed to refresh provider config&quot;)
+            return
+        if snapshot.signature == self._provider_signature:
+            return
+        self._apply_provider_snapshot(snapshot)</code></pre><ol><li>_refresh 在没有 loader 时直接退出；加载异常捕获后保留旧 Provider。签名一致也不应用新实例。</li><li>_apply 将 Provider、模型、context_window_tokens 更新到 Loop，并同步 runner.provider、subagents、consolidator、dream。</li><li>末尾保存 signature 作为下次比较基准。这里没有持久化 Session 的逻辑，也不能把这几行视为任意并发调度下的全局数据库事务；在轮入口刷新是它的使用前提。</li></ol></article></section><section id="trace"><h2>用一组具体数据推演全部变化</h2><p>固定练习条件：provider=deepseek（显式选择），model=<code>deepseek-v4-flash</code>，对应凭据已配置但不显示，temperature=0.2、max_tokens=512。FakeProvider 不联网，顺序返回一次暂时性错误和一次工具请求。</p><div class="table-wrap"><table><thead><tr><th>步骤</th><th>输入</th><th>推导结果</th></tr></thead><tbody><tr><td>1 匹配</td><td>forced=deepseek</td><td>直接读取 deepseek 配置；不会扫描其他供应商关键词。</td></tr><tr><td>2 构造</td><td>Registry backend=openai_compat</td><td>获得兼容 Provider；generation=(0.2,512,配置的 reasoning_effort)。</td></tr><tr><td>3 调用</td><td>max_tokens=None；temperature=0；reasoning_effort=None</td><td>max_tokens→512；temperature 保留 0；reasoning_effort 保留 None。model 保持 deepseek-v4-flash。</td></tr><tr><td>4 首次响应</td><td>finish_reason=error，error_status_code=503</td><td>交给基类可靠性策略判定；仅在允许重试时等待并再调 FakeProvider，工具执行数仍是 0。</td></tr><tr><td>5 第二次响应</td><td>tool_calls=[{id:c7,name:read_file,arguments:{path:notes.txt}}]，finish_reason=tool_calls</td><td>has_tool_calls=True；should_execute_tools=True；Runner 才可执行 c7。</td></tr><tr><td>6 反例响应</td><td>同样 c7，但 finish_reason=refusal</td><td>has_tool_calls=True，should_execute_tools=False；执行数必须保持 0。</td></tr><tr><td>7 配置更新</td><td>仅 temperature 0.2→0.3</td><td>签名变化；下一次轮入口替换快照并传播给四个使用者。若环境引用缺失导致 loader 异常，则保留旧配置。</td></tr></tbody></table></div><p>再检查身份边界：HTTP 接口把请求 model 与应用配置名比较；Provider 工厂选择真实后端；_build_kwargs 才决定 wire model 格式。这三层承担不同任务。把 HTTP model 直接用来临时改工厂会绕开配置与快照的一致性。</p></section><section id="build-it"><h2>独立搭建本章最小模块</h2><p>从零实现一个无网络的 <code>MiniProviderGateway</code>。输入是普通字典配置和统一请求，输出为自定义 Response dataclass。实现 forced/auto 两种选择、生成参数解析、基于结构化错误的有限重试、工具门控、签名变更传播。所有例子只使用 <code>deepseek-v4-flash</code>；使用假凭据存在性布尔值，不读取实际凭据文件。</p><details><summary>展开参考方案：结构、算法与错误处理</summary><ol><li>把 registry 表定义为 name、keywords、backend、needs_key。selector 是纯函数，显式指定无匹配应抛清晰错误；auto 先前缀再关键词。</li><li>定义独立 MISSING 对象；max_tokens/temperature 为 MISSING 或 None 时用 generation，reasoning_effort 仅 MISSING 时回退。</li><li>adapter 接受 FakeTransport，记录请求字典但排除凭据；Response 保存 finish_reason/error_status_code/tool_calls。执行工具必须同时检查非空调用和成功终止原因。</li><li>用最多 3 次尝试模拟 503→503→成功；401 立即返回错误。sleep 接口注入一个记录器，使验收不真实等待。该规则是练习简化策略，并非生产基类全部策略。</li><li>快照管理先构造新对象再替换指针，构造异常保留旧对象；为 runner、memory 两个假消费者传入同一快照版本。签名内部比较，日志只打印不含秘密的版本号。</li></ol></details><h3>验收条件</h3><ol><li>forced=unknown 必须失败，不能 silently auto。前缀匹配优先于模型尾部关键词。</li><li>None 与显式 0 的温度案例按演算得到不同结果；reasoning_effort=None 不恢复默认。</li><li>带 tool_calls 的 error/refusal 不执行工具；连续暂时性错误达到次数上限后停止。</li><li>更新失败保持所有消费者原版本；成功变更后消费者一致。任何输出和日志都没有凭据内容。</li></ol></section><section id="boundaries"><h2>边界、不变量与容易写错的地方</h2><ol><li>ProviderSpec 是声明，Factory 是构造，Provider 是协议适配；HTTP / Session 不应该渗入 Provider 子类。</li><li>配置签名 frozen 不意味着签名里的嵌套 dict 不可变；应把快照作为替换单元，避免外部就地修改 extra_headers。</li><li>不要把所有 429 当可重试。配额耗尽与限速在基类里是不同语义；结构化错误信息比字符串匹配更可靠。</li><li>环境变量缺失、模型参数不兼容和网络暂时失败处于三个不同阶段，修复方向分别是配置、协议映射和可靠性策略。</li><li>本页引用的多厂商分支是源码事实，不是建议改变本仓库运行模型；项目的实际 LLM 调用始终使用 deepseek-v4-flash。</li></ol></section><div class="page-nav" data-study-page-nav></div><footer class="footer">nanobot Agent 学习手册 · 源码精讲与设计实作 · 本页为学习材料，不改动生产运行逻辑</footer></div></main></div></body></html>

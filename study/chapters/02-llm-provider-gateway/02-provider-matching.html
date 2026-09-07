@@ -1,0 +1,47 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>02.02 · Provider 匹配算法 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head>
+<body data-study-root="../.." data-chapter="llm-provider-gateway" data-page="provider-matching"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-2" data-original-href="../../../nanobot/config/schema.py" data-source-label="匹配源码" title="阅读 nanobot/config/schema.py:263–326 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Provider · deterministic resolution</p><h1><code>Config._match_provider()</code> 如何决定使用谁</h1><p class="lead">“auto”不是一次模糊猜测，而是一条有顺序的决策链。显式 Provider 最优先；自动模式再看模型前缀、关键词、本地端点，最后才选第一个有凭证的通用 Provider。</p><div class="meta-row"><span class="chip">forced selection</span><span class="chip">prefix wins</span><span class="chip">ordered registry</span><span class="chip">local fallback</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">匹配状态机</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>provider != auto?</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>显式模型前缀</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>关键词命中</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>本地端点</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>首个可用 key</b></button>
+</div><div class="step-panels">
+  <div data-step-panel><h3>强制选择直接按 Registry 名称</h3><p>当 <code>agents.defaults.provider</code> 不是 <code>auto</code> 时，先用 <code>find_by_name()</code> 规范化名称，再读取同名 <code>providers</code> 字段；未知名称直接返回空匹配。</p></div>
+  <div data-step-panel><h3>前缀避免关键词误判</h3><p>模型写成 <code>github-copilot/gpt-...</code> 时，斜杠前的前缀先与 <code>ProviderSpec.name</code> 比较，因此不会因为模型名含 “codex” 而误配到另一个 OAuth Provider。</p></div>
+  <div data-step-panel><h3>关键词按 Registry 顺序扫描</h3><p>模型全名会同时生成小写和连字符归一化版本。命中后还要求该 Provider 有 key，或属于 OAuth、本地、direct 类型。</p></div>
+  <div data-step-panel><h3>没有品牌前缀的本地模型仍能工作</h3><p>例如 <code>llama3.2</code> 不含 ollama。算法会检查已配置 <code>api_base</code> 的本地 Provider，优先选择地址中命中 <code>detect_by_base_keyword</code> 的项。</p></div>
+  <div data-step-panel><h3>最后 fallback 到第一个有 key 的非 OAuth Provider</h3><p>Gateway 能路由任意模型，因此 Registry 把它们放在普通厂商前。OAuth 被排除，是因为登录态 Provider 必须通过模型/Provider 显式选择，不能因“可用”而意外接管请求。</p></div>
+</div></section>
+
+<div class="code-block"><div class="code-head"><span>config/schema.py · 决策骨架</span><span>概念摘录</span></div><pre><code>forced = self.agents.defaults.provider
+if forced != "auto":
+    spec = find_by_name(forced)
+    ...
+
+for spec in PROVIDERS:          # explicit model prefix
+    if normalized_prefix == spec.name and usable(spec, p): ...
+for spec in PROVIDERS:          # model keyword
+    if any(_kw_matches(kw) for kw in spec.keywords) and usable(spec, p): ...
+for spec in PROVIDERS:          # configured local endpoint
+    ...
+for spec in PROVIDERS:          # first configured non-OAuth key
+    ...</code></pre></div>
+
+<h2 id="reading-section-02">示例推演</h2><table class="source-table"><thead><tr><th>配置/模型</th><th>命中阶段</th><th>原因</th></tr></thead><tbody>
+  <tr><td><code>provider="anthropic"</code></td><td>强制选择</td><td>不再根据模型名尝试其他 Provider</td></tr>
+  <tr><td><code>openrouter/anthropic/claude...</code></td><td>模型前缀</td><td><code>openrouter</code> 与 Registry name 精确匹配</td></tr>
+  <tr><td><code>deepseek-chat</code> + DeepSeek key</td><td>关键词</td><td>模型名包含 ProviderSpec keyword</td></tr>
+  <tr><td><code>llama3.2</code> + <code>localhost:11434</code></td><td>本地 fallback</td><td>模型没有品牌词，但地址特征指向 Ollama</td></tr>
+  <tr><td>未知模型 + OpenRouter key</td><td>最终 fallback</td><td>Gateway 在有 key 的 Provider 中优先</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-03">“已匹配”不等于“已可调用”</h2><p><code>_match_provider()</code> 的职责是选择配置与名称；凭证完整性由 <code>make_provider()</code> 再验证。Azure 要求 key 与 base 同时存在；普通 OpenAI-compatible backend 通常要求 key，但 local、OAuth、direct Provider 可豁免。</p>
+<div class="callout warning"><strong>顺序就是行为：</strong><code>PROVIDERS</code> 是有序 tuple。新增或移动条目不仅改变 status 展示，也可能改变关键词冲突和最终 fallback 的结果，因此 Registry 顺序属于运行时决策的一部分。</div>
+
+<h2 id="reading-section-04">源码与测试入口</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-2" data-original-href="../../../nanobot/config/schema.py" data-source-label="config/schema.py:_match_provider" title="阅读 nanobot/config/schema.py:263–326 的代表性摘录与讲解">config/schema.py:_match_provider · 站内摘录</a></td><td>五阶段选择逻辑和可用性条件</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/registry.py" data-source-label="providers/registry.py" title="nanobot/providers/registry.py 的所属模块讲解；该文件未单独逐行收录">providers/registry.py · 模块讲解</a></td><td>条目顺序、keywords、local/gateway/oauth 标记</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/cli/test_commands.py" data-source-label="tests/cli/test_commands.py" title="tests/cli/test_commands.py 的所属模块讲解；该文件未单独逐行收录">tests/cli/test_commands.py · 模块讲解</a></td><td>OAuth、本地地址与多个 Provider 的匹配案例</td></tr>
+</tbody></table>
+<h2 id="reading-section-05">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么模型前缀必须先于普通关键词？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>前缀是用户对 Provider 的显式命名，应先剥离并锁定候选；普通关键词可能重叠或出现在模型名其他位置，先匹配关键词会让显式路由被误判。</p></div></details></li><li><span class="review-question">本地 Provider 没有 API key 为什么仍可命中？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Registry 把 Ollama 等后端标记为无需 API key/本地类型，匹配条件允许它们依靠地址和模型配置命中，而不是用凭据是否存在作为硬门槛。</p></div></details></li><li><span class="review-question">OAuth Provider 为什么不能成为最终 fallback？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>OAuth Provider 需要交互登录或缓存 token，不能仅凭空配置安全地自动启用。它必须被显式选择或满足专用认证条件，避免 auto 最终落到一个尚未授权的后端。</p></div></details></li><li><span class="review-question">当多个 Provider 都有 key 时，什么决定最终选择？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>显式 Provider/模型前缀优先；auto 情况下按 Registry 定义的确定顺序检查候选的配置与凭据。因此同时有多个 key 时，注册优先级而非 key 的值决定结果。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02.02 · Provider 匹配算法</footer></div></main></div></body></html>

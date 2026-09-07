@@ -1,0 +1,50 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>02.01 · LLM 配置模型与加载 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head>
+<body data-study-root="../.." data-chapter="llm-provider-gateway" data-page="config-model"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-2" data-original-href="../../../nanobot/config/schema.py" data-source-label="配置源码" title="阅读 nanobot/config/schema.py:263–326 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Provider · configuration boundary</p><h1>LLM 配置模型与加载</h1><p class="lead">nanobot 把“选择哪个模型”“怎样连接服务”“Agent 如何消费输出”和“Gateway 在哪里监听”分开放置。先看清参数属于哪一层，才能避免把 model、provider、apiBase 和 context window 混成一件事。</p><div class="meta-row"><span class="chip">Pydantic</span><span class="chip">camelCase aliases</span><span class="chip">${ENV_VAR}</span><span class="chip">config migration</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">配置加载流水线</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>path</small><b>确定 config 路径</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>json</small><b>读取或默认</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>migrate</small><b>迁移旧字段</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>validate</small><b>Pydantic 建模</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>env ref</small><b>解析 ${VAR}</b></button>
+</div><div class="step-panels">
+  <div data-step-panel><h3>默认路径可被实例覆盖</h3><p><code>get_config_path()</code> 默认返回 <code>~/.nanobot/config.json</code>；CLI 传入自定义路径时用模块级变量保存，后续热加载继续读取同一文件。</p></div>
+  <div data-step-panel><h3>缺失文件使用默认模型</h3><p><code>load_config()</code> 先构造 <code>Config()</code>。文件存在才读取 JSON；解析或验证失败会记录 warning，并保留默认配置，而不是让 Gateway 使用半解析对象。</p></div>
+  <div data-step-panel><h3>兼容旧配置结构</h3><p><code>_migrate_config()</code> 在建模前迁移历史字段，例如把旧的 workspace 限制和 MyTool 开关移到新层级。</p></div>
+  <div data-step-panel><h3>别名与约束在模型层完成</h3><p>公共 <code>Base</code> 使用 <code>to_camel</code> 并允许字段名填充，因此 JSON 可写 <code>apiKey</code>，Python 中仍访问 <code>api_key</code>。Field 同时约束范围和兼容别名。</p></div>
+  <div data-step-panel><h3>凭证引用单独解析</h3><p>Gateway/SDK 调用 <code>resolve_config_env_vars()</code>，递归替换字符串中的 <code>${OPENAI_API_KEY}</code>。变量缺失时抛出明确错误，避免把占位符当作真实 key 发出。</p></div>
+</div></section>
+
+<h2 id="reading-section-02">四组容易混淆的参数</h2><table class="source-table"><thead><tr><th>位置</th><th>代表字段</th><th>影响</th></tr></thead><tbody>
+  <tr><td><code>agents.defaults</code></td><td>model、provider、maxTokens、temperature、reasoningEffort</td><td>选择模型和默认生成行为</td></tr>
+  <tr><td><code>providers.&lt;name&gt;</code></td><td>apiKey、apiBase、extraHeaders、extraBody</td><td>连接哪个端点、请求额外携带什么</td></tr>
+  <tr><td><code>agents.defaults</code></td><td>contextWindowTokens、maxToolIterations、providerRetryMode</td><td>Agent 上下文预算和运行策略，并非厂商 API 参数</td></tr>
+  <tr><td><code>gateway</code></td><td>host、port、heartbeat</td><td>nanobot 服务本身的监听与后台服务配置</td></tr>
+</tbody></table>
+
+<div class="code-block"><div class="code-head"><span>config/schema.py · 核心层级</span><span>源码摘录</span></div><pre><code>class AgentDefaults(Base):
+    model: str = "anthropic/claude-opus-4-5"
+    provider: str = "auto"
+    max_tokens: int = 8192
+    context_window_tokens: int = 65_536
+    temperature: float = 0.1
+    provider_retry_mode: Literal["standard", "persistent"] = "standard"
+
+class ProviderConfig(Base):
+    api_key: str | None = None
+    api_base: str | None = None
+    extra_headers: dict[str, str] | None = None
+    extra_body: dict[str, Any] | None = None</code></pre></div>
+
+<h2 id="reading-section-03">两类“环境变量”不是同一机制</h2><div class="compare-grid">
+  <div class="card flat"><h3>BaseSettings 嵌套变量</h3><p>根 <code>Config</code> 声明 <code>env_prefix="NANOBOT_"</code> 和 <code>env_nested_delimiter="__"</code>，直接构造 Settings 时支持嵌套环境字段。</p></div>
+  <div class="card flat"><h3>配置值中的引用</h3><p>常规配置文件更常写 <code>"apiKey": "${OPENAI_API_KEY}"</code>；这是 loader 在模型建立后递归解析的显式引用，可用于任意字符串字段和扩展配置。</p></div>
+</div>
+
+<div class="callout warning"><strong>边界提示：</strong><code>contextWindowTokens</code> 是 nanobot 用于估算与压缩 Prompt 的预算，不会自动从远端模型元数据读取；配置过大可能让请求超窗，配置过小则会更早归档历史。</div>
+
+<h2 id="reading-section-04">源码与测试入口</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-2" data-original-href="../../../nanobot/config/schema.py" data-source-label="config/schema.py" title="阅读 nanobot/config/schema.py:263–326 的代表性摘录与讲解">config/schema.py · 站内摘录</a></td><td>配置分层、别名、默认值和约束</td></tr>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/config/loader.py" data-source-label="config/loader.py" title="阅读 nanobot/config/loader.py:32–56 的代表性摘录与讲解">config/loader.py · 站内摘录</a></td><td>路径、迁移、默认回退和环境变量引用</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/config/test_env_interpolation.py" data-source-label="tests/config/test_env_interpolation.py" title="tests/config/test_env_interpolation.py 的所属模块讲解；该文件未单独逐行收录">tests/config/test_env_interpolation.py · 模块讲解</a></td><td>环境变量替换、缺失变量与嵌套扩展字段</td></tr>
+</tbody></table>
+<h2 id="reading-section-05">自测</h2><ul class="check-list review-list"><li><span class="review-question"><code>maxTokens</code> 与 <code>contextWindowTokens</code> 分别限制什么？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>maxTokens</code> 是一次生成最多输出多少 token；<code>contextWindowTokens</code> 是模型可容纳的整次上下文上限，预算计算要同时考虑 system、历史、工具 schema、输入和输出余量。</p></div></details></li><li><span class="review-question">为什么 apiKey 推荐写成环境变量引用，而不是直接写入 JSON？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>配置解析支持环境变量引用，启动时再由解析器替换。这样配置文件可以提交或共享而不携带明文凭据，也便于不同环境注入不同 key。</p></div></details></li><li><span class="review-question">JSON 解析失败时 load_config 为什么回到完整默认对象？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>load_config()</code> 捕获不存在或 JSON/校验失败并返回新的 <code>Config()</code>，保证调用者拿到完整 Pydantic 默认结构；错误配置不会产生半初始化对象。</p></div></details></li><li><span class="review-question"><code>apiBase</code> 为空时，默认地址从哪里补上？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Factory 选中 <code>ProviderSpec</code> 后，会使用该 spec 注册的默认 <code>api_base</code>；用户配置的 <code>apiBase</code> 非空时才覆盖它。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02.01 · LLM 配置模型与加载</footer></div></main></div></body></html>

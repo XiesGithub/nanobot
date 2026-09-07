@@ -1,0 +1,317 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Subagent 后台协作：当前源码连续摘录、数据流程、状态演算和模块实现练习"><title>07 · Subagent 后台协作 · 源码精讲与设计实作 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head><body data-study-root="../.." data-chapter="subagent-system" data-page="workshop"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="index.html">章节总览</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div><section class="hero"><p class="eyebrow">Chapter 07 · Source workshop</p><h1>Subagent 后台协作：源码精讲与设计实作</h1><p class="lead">把“开一个后台任务”拆成身份管理、独立执行、结果回注和主会话续跑。尤其看清总线 channel、模型 role 与归档 role 的区别。</p><div class="meta-row"><a class="chip" href="#contract">输入输出契约</a><a class="chip" href="#dataflow">模块数据流图</a><a class="chip" href="#source-walkthrough">核心源码精讲</a><a class="chip" href="#build-it">动手设计与验收</a></div></section><div class="callout"><strong>使用方法：</strong>先遮住后面的演算结果，写出每一步进入和离开的数据，再读连续源码核对。摘录来自当前工作区；行号指原文件，代码块未插入讲解行。练习使用假 Provider、假时钟或内存队列，无需 API 凭据；若自行接入项目真实模型，须使用 <code>deepseek-v4-flash</code>，项目命令在 Conda <code>nanobot</code> 环境执行。</div><section id="contract"><h2>先约定谁持有数据、谁可以改变数据</h2><p>子 Agent 拥有独立推理消息与工具实例，主会话仍拥有最终响应责任。origin 不只是通知地址，还必须携带会话隔离所需的有效 key。</p><div class="table-wrap"><table class="source-table"><thead><tr><th>进入 / 离开边界</th><th>数据形状与示例</th><th>所有权、约束与失败表现</th></tr></thead><tbody><tr><td>主 Agent→spawn</td><td>task、label、origin_channel、origin_chat_id、session_key</td><td>回执只有受理状态；不能当作子任务成果。</td></tr><tr><td>Manager→Runner</td><td>[system prompt,user task] + 新 ToolRegistry</td><td>同工作目录不是文件系统隔离；scope 控制能力装配。</td></tr><tr><td>Runner→Manager</td><td>final_content / stop_reason / tool_events</td><td>tool_error 组合部分进展，error 回注失败，取消单独传播。</td></tr><tr><td>Manager→bus</td><td>InboundMessage(channel="system",sender_id="subagent",override=K)</td><td>metadata 包含 injected_event/subagent_task_id/origin_message_id。</td></tr><tr><td>bus→主 Session</td><td>pending 输入或新系统 Turn；结果事件归档</td><td>忙碌转换为 user 且不保留 task_id；空闲系统入口归档 assistant 事件并按 task_id 有限去重。</td></tr></tbody></table></div></section><section id="dataflow"><h2>沿箭头追踪数据，而非只记函数名</h2><figure><div class="diagram-scroll"><svg class="learning-diagram" viewBox="0 0 900 390" role="img" aria-labelledby="subagent-title subagent-desc" xmlns="http://www.w3.org/2000/svg"><title id="subagent-title">主 Agent spawn的数据与失败路径</title><desc id="subagent-desc">文字等价：主 Agent 提交 task 与 origin，spawn 建立任务身份并立即返回回执；独立 Runner 执行后得到结果或失败，包装为带 task_id 和 session_key_override 的 system 入站事件；主会话忙时进入 pending queue，空闲时启动新的系统消息 Turn。普通任务异常也必须走失败结果回注；外部取消保持取消语义。</desc><style>.learning-diagram{width:100%;height:auto;display:block;--d-bg:#f1f5f9;--d-fg:#18324c;--d-line:#45627b;--d-error:#b23b46}[data-theme="dark"] .learning-diagram{--d-bg:#172538;--d-fg:#e0ecf8;--d-line:#9cbbd5;--d-error:#ff9c9c}@media(prefers-color-scheme:dark){html:not([data-theme="light"]) .learning-diagram{--d-bg:#172538;--d-fg:#e0ecf8;--d-line:#9cbbd5;--d-error:#ff9c9c}}.learning-diagram rect{fill:var(--d-bg);stroke:var(--d-line);stroke-width:1.5}.learning-diagram text{fill:var(--d-fg);font:14px system-ui,sans-serif;text-anchor:middle}.learning-diagram .node-title{font-size:17px;font-weight:650}.learning-diagram .edge{fill:none;stroke:var(--d-line);stroke-width:2;marker-end:url(#subagent-arrow)}.learning-diagram .error-edge{fill:none;stroke:var(--d-error);stroke-width:2;stroke-dasharray:6 4;marker-end:url(#subagent-error)}.learning-diagram .error-text{fill:var(--d-error)}</style><defs><marker id="subagent-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--d-line)"/></marker><marker id="subagent-error" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--d-error)"/></marker></defs><rect x="25" y="35" width="210" height="85" rx="12"/><text class="node-title" x="130" y="68">主 Agent spawn</text><text x="130" y="96">task + origin + key</text><rect x="345" y="35" width="210" height="85" rx="12"/><text class="node-title" x="450" y="68">后台任务</text><text x="450" y="96">task_id / status</text><rect x="665" y="35" width="210" height="85" rx="12"/><text class="node-title" x="770" y="68">独立 Runner</text><text x="770" y="96">system + user task</text><rect x="665" y="225" width="210" height="85" rx="12"/><text class="node-title" x="770" y="258">完成或失败</text><text x="770" y="286">result + stop_reason</text><rect x="345" y="225" width="210" height="85" rx="12"/><text class="node-title" x="450" y="258">总线回注</text><text x="450" y="286">system InboundMessage</text><rect x="25" y="225" width="210" height="85" rx="12"/><text class="node-title" x="130" y="258">主会话继续</text><text x="130" y="286">pending / 新 Turn</text><path class="edge" d="M235 78H345"/><text x="290" y="60">task + origin</text><path class="edge" d="M555 78H665"/><text x="610" y="60">AgentRunSpec</text><path class="edge" d="M770 120V225"/><text x="787" y="175">result</text><path class="edge" d="M665 268H555"/><text x="610" y="250">task_id + key</text><path class="edge" d="M345 268H235"/><text x="290" y="250">有效会话 key</text><path class="error-edge" d="M450 120V165H770V225"/><text class="error-text" x="610" y="155">任务异常 → error 结果回注</text></svg></div><figcaption>文字等价：主 Agent 提交 task 与 origin，spawn 建立任务身份并立即返回回执；独立 Runner 执行后得到结果或失败，包装为带 task_id 和 session_key_override 的 system 入站事件；主会话忙时进入 pending queue，空闲时启动新的系统消息 Turn。普通任务异常也必须走失败结果回注；外部取消保持取消语义。</figcaption></figure></section><section id="source-walkthrough"><h2>当前源码逐段精讲</h2><article class="source-excerpt" id="guide-nanobot-agent-subagent-py-127"><h3>1. spawn 返回的是受理回执，不是结果</h3><p>后台任务与调用者之间先建立身份和归属，再谈如何执行。task_id 是后续取消、状态和回注去重的连接点。</p><div class="code-block" id="nanobot-agent-subagent-py-127" data-guide="guide-nanobot-agent-subagent-py-127" data-source="nanobot/agent/subagent.py" data-start="127" data-end="167" data-symbol="SubagentManager.spawn"><div class="code-head"><span>当前源码原文：nanobot/agent/subagent.py · SubagentManager.spawn · 第 127–167 行（连续摘录）</span></div><pre><code>    async def spawn(
+        self,
+        task: str,
+        label: str | None = None,
+        origin_channel: str = &quot;cli&quot;,
+        origin_chat_id: str = &quot;direct&quot;,
+        session_key: str | None = None,
+        origin_message_id: str | None = None,
+    ) -&gt; str:
+        &quot;&quot;&quot;Spawn a subagent to execute a task in the background.&quot;&quot;&quot;
+        task_id = str(uuid.uuid4())[:8]
+        display_label = label or task[:30] + (&quot;...&quot; if len(task) &gt; 30 else &quot;&quot;)
+        origin = {&quot;channel&quot;: origin_channel, &quot;chat_id&quot;: origin_chat_id, &quot;session_key&quot;: session_key}
+
+        status = SubagentStatus(
+            task_id=task_id,
+            label=display_label,
+            task_description=task,
+            started_at=time.monotonic(),
+        )
+        self._task_statuses[task_id] = status
+
+        bg_task = asyncio.create_task(
+            self._run_subagent(task_id, task, display_label, origin, status, origin_message_id)
+        )
+        self._running_tasks[task_id] = bg_task
+        if session_key:
+            self._session_tasks.setdefault(session_key, set()).add(task_id)
+
+        def _cleanup(_: asyncio.Task) -&gt; None:
+            self._running_tasks.pop(task_id, None)
+            self._task_statuses.pop(task_id, None)
+            if session_key and (ids := self._session_tasks.get(session_key)):
+                ids.discard(task_id)
+                if not ids:
+                    del self._session_tasks[session_key]
+
+        bg_task.add_done_callback(_cleanup)
+
+        logger.info(&quot;Spawned subagent [{}]: {}&quot;, task_id, display_label)
+        return f&quot;Subagent [{display_label}] started (id: {task_id}). I&#x27;ll notify you when it completes.&quot;</code></pre></div><ol><li>生成短 task_id、展示 label，保存 origin 中的渠道、chat_id 与 session_key；创建 initializing 状态对象。</li><li>create_task 启动 _run_subagent，将任务登记到 _running_tasks；有 session_key 时也写 session→task_id 集合。</li><li>done callback 清除任务、状态与空会话索引。spawn 立即返回 started 文案，不能据此宣称后台工作完成。</li></ol><p><strong>取舍与异常边界：</strong>注册索引是进程内管理，不是持久任务队列；重启后不能从这些字典恢复任务。这里只展示创建逻辑，并没有在 spawn 函数内部使用 semaphore 等待并发名额。</p></article><article class="source-excerpt" id="guide-nanobot-agent-subagent-py-185"><h3>2. 子 Agent 复用 Runner，重新建立工具与上下文</h3><p>子任务不复制主会话的完整消息历史；它得到聚焦任务和新建工具注册表。</p><div class="code-block" id="nanobot-agent-subagent-py-185" data-guide="guide-nanobot-agent-subagent-py-185" data-source="nanobot/agent/subagent.py" data-start="185" data-end="230" data-symbol="SubagentManager._run_subagent"><div class="code-head"><span>当前源码原文：nanobot/agent/subagent.py · SubagentManager._run_subagent · 第 185–230 行（连续摘录）</span></div><pre><code>        try:
+            tools = self._build_tools()
+            system_prompt = self._build_subagent_prompt()
+            messages: list[dict[str, Any]] = [
+                {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: system_prompt},
+                {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: task},
+            ]
+
+            result = await self.runner.run(AgentRunSpec(
+                initial_messages=messages,
+                tools=tools,
+                model=self.model,
+                max_iterations=self.max_iterations,
+                max_tool_result_chars=self.max_tool_result_chars,
+                hook=_SubagentHook(task_id, status),
+                max_iterations_message=&quot;Task completed but no final response was generated.&quot;,
+                error_message=None,
+                fail_on_tool_error=True,
+                checkpoint_callback=_on_checkpoint,
+            ))
+            status.phase = &quot;done&quot;
+            status.stop_reason = result.stop_reason
+
+            if result.stop_reason == &quot;tool_error&quot;:
+                status.tool_events = list(result.tool_events)
+                await self._announce_result(
+                    task_id, label, task,
+                    self._format_partial_progress(result),
+                    origin, &quot;error&quot;, origin_message_id,
+                )
+            elif result.stop_reason == &quot;error&quot;:
+                await self._announce_result(
+                    task_id, label, task,
+                    result.error or &quot;Error: subagent execution failed.&quot;,
+                    origin, &quot;error&quot;, origin_message_id,
+                )
+            else:
+                final_result = result.final_content or &quot;Task completed but no final response was generated.&quot;
+                logger.info(&quot;Subagent [{}] completed successfully&quot;, task_id)
+                await self._announce_result(task_id, label, task, final_result, origin, &quot;ok&quot;, origin_message_id)
+
+        except Exception as e:
+            status.phase = &quot;error&quot;
+            status.error = str(e)
+            logger.exception(&quot;Subagent [{}] failed&quot;, task_id)
+            await self._announce_result(task_id, label, task, f&quot;Error: {e}&quot;, origin, &quot;error&quot;, origin_message_id)</code></pre></div><ol><li>构造独立 tools，消息起点只有 system_prompt 与 user task。独立 registry/FileStates 避免共享易变工具状态，但 workspace 仍是同一个文件系统目录。</li><li>用同一 Runner 契约传入 model、迭代上限、hook 和 checkpoint 回调。fail_on_tool_error=True 使子任务将致命工具问题作为明确停止原因。</li><li>Runner 返回后设置 done 与 stop_reason；tool_error 发送已完成步骤和失败，error 发送错误，其余分支使用最终内容。外层普通异常设置 error 并回注失败说明。</li></ol><p><strong>取舍与异常边界：</strong>done 是执行阶段结束，不代表业务成功；还要看 stop_reason。CancelledError 在现代 Python 中不属于 Exception，不能把取消误称为此 except 捕获并发送 failed 的普通异常。</p></article><article class="source-excerpt" id="guide-nanobot-agent-subagent-py-232"><h3>3. 结果重新成为一条带归属的入站消息</h3><p>这是异步协作最容易遗漏的一段：后台结果不直接抢占主 Agent 的消息链，而是通过总线交还控制。</p><div class="code-block" id="nanobot-agent-subagent-py-232" data-guide="guide-nanobot-agent-subagent-py-232" data-source="nanobot/agent/subagent.py" data-start="232" data-end="275" data-symbol="SubagentManager._announce_result"><div class="code-head"><span>当前源码原文：nanobot/agent/subagent.py · SubagentManager._announce_result · 第 232–275 行（连续摘录）</span></div><pre><code>    async def _announce_result(
+        self,
+        task_id: str,
+        label: str,
+        task: str,
+        result: str,
+        origin: dict[str, str],
+        status: str,
+        origin_message_id: str | None = None,
+    ) -&gt; None:
+        &quot;&quot;&quot;Announce the subagent result to the main agent via the message bus.&quot;&quot;&quot;
+        status_text = &quot;completed successfully&quot; if status == &quot;ok&quot; else &quot;failed&quot;
+
+        announce_content = render_template(
+            &quot;agent/subagent_announce.md&quot;,
+            label=label,
+            status_text=status_text,
+            task=task,
+            result=result,
+        )
+
+        # Inject as system message to trigger main agent.
+        # Use session_key_override to align with the main agent&#x27;s effective
+        # session key (which accounts for unified sessions) so the result is
+        # routed to the correct pending queue (mid-turn injection) instead of
+        # being dispatched as a competing independent task.
+        override = origin.get(&quot;session_key&quot;) or f&quot;{origin[&#x27;channel&#x27;]}:{origin[&#x27;chat_id&#x27;]}&quot;
+        metadata: dict[str, Any] = {
+            &quot;injected_event&quot;: &quot;subagent_result&quot;,
+            &quot;subagent_task_id&quot;: task_id,
+        }
+        if origin_message_id:
+            metadata[&quot;origin_message_id&quot;] = origin_message_id
+        msg = InboundMessage(
+            channel=&quot;system&quot;,
+            sender_id=&quot;subagent&quot;,
+            chat_id=f&quot;{origin[&#x27;channel&#x27;]}:{origin[&#x27;chat_id&#x27;]}&quot;,
+            content=announce_content,
+            session_key_override=override,
+            metadata=metadata,
+        )
+
+        await self.bus.publish_inbound(msg)
+        logger.debug(&quot;Subagent [{}] announced result to {}:{}&quot;, task_id, origin[&#x27;channel&#x27;], origin[&#x27;chat_id&#x27;])</code></pre></div><ol><li>先用模板将 label、任务、结果和状态合成 announce_content；真正的关联信息另放 metadata，不依赖正文字符串解析。</li><li>override 优先使用 origin.session_key，否则以 channel:chat_id 回退。统一会话等模式下必须保持主运行任务使用的有效 key。</li><li>封装 channel=system、sender_id=subagent 的 InboundMessage；chat_id 编码原投递渠道与目标，metadata 带 task_id 和可选 origin_message_id，然后 publish_inbound。</li></ol><p><strong>取舍与异常边界：</strong>这里的 system 是总线的事件渠道，不等于直接授予模型 system role。忙碌 Runner 注入会规范化成 user 消息，而空闲系统 Turn 的归档函数采用 assistant 事件记录，三者不能混为一谈。</p></article><article class="source-excerpt" id="guide-nanobot-agent-loop-py-892"><h3>4. 主 Agent 忙碌时将回注放入正确队列</h3><p>同一个 subagent_result 回来时，主 Turn 可能仍在执行，也可能已经结束；会话有效 key 决定采用哪条路径。</p><div class="code-block" id="nanobot-agent-loop-py-892" data-guide="guide-nanobot-agent-loop-py-892" data-source="nanobot/agent/loop.py" data-start="892" data-end="934" data-symbol="AgentLoop.run pending routing"><div class="code-head"><span>当前源码原文：nanobot/agent/loop.py · AgentLoop.run pending routing · 第 892–934 行（连续摘录）</span></div><pre><code>            raw = msg.content.strip()
+            if self.commands.is_priority(raw):
+                await self._dispatch_command_inline(
+                    msg, msg.session_key, raw,
+                    self.commands.dispatch_priority,
+                )
+                continue
+            effective_key = self._effective_session_key(msg)
+            # If this session already has an active pending queue (i.e. a task
+            # is processing this session), route the message there for mid-turn
+            # injection instead of creating a competing task.
+            if effective_key in self._pending_queues:
+                # Non-priority commands must not be queued for injection;
+                # dispatch them directly (same pattern as priority commands).
+                if self.commands.is_dispatchable_command(raw):
+                    await self._dispatch_command_inline(
+                        msg, effective_key, raw,
+                        self.commands.dispatch,
+                    )
+                    continue
+                pending_msg = msg
+                if effective_key != msg.session_key:
+                    pending_msg = dataclasses.replace(
+                        msg,
+                        session_key_override=effective_key,
+                    )
+                try:
+                    self._pending_queues[effective_key].put_nowait(pending_msg)
+                except asyncio.QueueFull:
+                    logger.warning(
+                        &quot;Pending queue full for session {}, falling back to queued task&quot;,
+                        effective_key,
+                    )
+                else:
+                    logger.info(
+                        &quot;Routed follow-up message to pending queue for session {}&quot;,
+                        effective_key,
+                    )
+                    continue
+            # Compute the effective session key before dispatching
+            # This ensures /stop command can find tasks correctly when unified session is enabled
+            task = asyncio.create_task(self._dispatch(msg))
+            self._active_tasks.setdefault(effective_key, []).append(task)</code></pre></div><ol><li>先分流优先命令，再计算 effective_key。已有 pending queue 意味着该会话有处理任务可接收中途输入。</li><li>已知普通命令也直接路由，不进入模型注入队列；其他输入必要时复制消息补 effective override，然后 put_nowait。</li><li>队列接收成功就 continue；不存在队列或 QueueFull 时创建 _dispatch 任务并登记。新任务仍需经过 _dispatch 的同会话锁，而不是并发改历史。</li></ol><p><strong>取舍与异常边界：</strong>回注是合作式交接，不会在工具执行到一半任意修改 messages。队列有容量上限，满队列回退路径不能假装与即时注入有相同延迟。</p></article><article class="source-excerpt" id="guide-nanobot-agent-runner-py-189"><h3>5. 回调数据被转为有限数量的 user 消息</h3><p>Runner 不认识渠道对象，只消费 injection_callback 给出的内容；它负责把形状收敛为模型消息。</p><div class="code-block" id="nanobot-agent-runner-py-189" data-guide="guide-nanobot-agent-runner-py-189" data-source="nanobot/agent/runner.py" data-start="189" data-end="232" data-symbol="AgentRunner._drain_injections"><div class="code-head"><span>当前源码原文：nanobot/agent/runner.py · AgentRunner._drain_injections · 第 189–232 行（连续摘录）</span></div><pre><code>    async def _drain_injections(self, spec: AgentRunSpec) -&gt; list[dict[str, Any]]:
+        &quot;&quot;&quot;Drain pending user messages via the injection callback.
+
+        Returns normalized user messages (capped by
+        ``_MAX_INJECTIONS_PER_TURN``), or an empty list when there is
+        nothing to inject. Messages beyond the cap are logged so they
+        are not silently lost.
+        &quot;&quot;&quot;
+        if spec.injection_callback is None:
+            return []
+        try:
+            signature = inspect.signature(spec.injection_callback)
+            accepts_limit = (
+                &quot;limit&quot; in signature.parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in signature.parameters.values()
+                )
+            )
+            if accepts_limit:
+                items = await spec.injection_callback(limit=_MAX_INJECTIONS_PER_TURN)
+            else:
+                items = await spec.injection_callback()
+        except Exception:
+            logger.exception(&quot;injection_callback failed&quot;)
+            return []
+        if not items:
+            return []
+        injected_messages: list[dict[str, Any]] = []
+        for item in items:
+            if isinstance(item, dict) and item.get(&quot;role&quot;) == &quot;user&quot; and &quot;content&quot; in item:
+                injected_messages.append(item)
+                continue
+            text = getattr(item, &quot;content&quot;, str(item))
+            if text.strip():
+                injected_messages.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: text})
+        if len(injected_messages) &gt; _MAX_INJECTIONS_PER_TURN:
+            dropped = len(injected_messages) - _MAX_INJECTIONS_PER_TURN
+            logger.warning(
+                &quot;Injection callback returned {} messages, capping to {} ({} dropped)&quot;,
+                len(injected_messages), _MAX_INJECTIONS_PER_TURN, dropped,
+            )
+            injected_messages = injected_messages[:_MAX_INJECTIONS_PER_TURN]
+        return injected_messages</code></pre></div><ol><li>没有回调时返回空列表。支持 limit 参数的回调会收到每次注入上限，否则使用无参兼容调用。</li><li>回调异常记日志并返回空；合法 role=user 且带 content 的字典原样接纳，其他条目从 content 属性或字符串提取非空文本。</li><li>超出 _MAX_INJECTIONS_PER_TURN 的条目在最后被截断并警告。所以生产回调最好遵守 limit，保留未消费项，而不是先把队列全部取空。</li></ol><p><strong>取舍与异常边界：</strong>这个函数只规范化输入，何时调用由 Runner 的工具后/最终响应等检查点决定；注入循环也另有上限，不能无限延长同一 Turn。</p></article><article class="source-excerpt" id="guide-nanobot-agent-loop-py-770"><h3>6. 忙碌回注的真实转换：正文保留，身份元数据不透传</h3><p>这一段是队列与 Runner 之间的实际回调。它还揭示了忙碌注入与空闲系统 Turn 的持久化语义并不完全相同。</p><div class="code-block" id="nanobot-agent-loop-py-770" data-guide="guide-nanobot-agent-loop-py-770" data-source="nanobot/agent/loop.py" data-start="770" data-end="833" data-symbol="AgentLoop._run_agent_loop._drain_pending"><div class="code-head"><span>当前源码原文：nanobot/agent/loop.py · AgentLoop._run_agent_loop._drain_pending · 第 770–833 行（连续摘录）</span></div><pre><code>        async def _drain_pending(*, limit: int = _MAX_INJECTIONS_PER_TURN) -&gt; list[dict[str, Any]]:
+            &quot;&quot;&quot;Drain follow-up messages from the pending queue.
+
+            When no messages are immediately available but sub-agents
+            spawned in this dispatch are still running, blocks until at
+            least one result arrives (or timeout).  This keeps the runner
+            loop alive so subsequent sub-agent completions are consumed
+            in-order rather than dispatched separately.
+            &quot;&quot;&quot;
+            if pending_queue is None:
+                return []
+
+            def _to_user_message(pending_msg: InboundMessage) -&gt; dict[str, Any]:
+                content = pending_msg.content
+                media = pending_msg.media if pending_msg.media else None
+                if media:
+                    content, media = extract_documents(content, media)
+                    media = media or None
+                user_content = self.context._build_user_content(content, media)
+                runtime_ctx = self.context._build_runtime_context(
+                    pending_msg.channel,
+                    self._runtime_chat_id(pending_msg),
+                    self.context.timezone,
+                )
+                if isinstance(user_content, str):
+                    merged: str | list[dict[str, Any]] = f&quot;{runtime_ctx}\n\n{user_content}&quot;
+                else:
+                    merged = [{&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: runtime_ctx}] + user_content
+                return {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: merged}
+
+            items: list[dict[str, Any]] = []
+            while len(items) &lt; limit:
+                try:
+                    items.append(_to_user_message(pending_queue.get_nowait()))
+                except asyncio.QueueEmpty:
+                    break
+
+            # Block if nothing drained but sub-agents spawned in this dispatch
+            # are still running.  Keeps the runner loop alive so subsequent
+            # completions are injected in-order rather than dispatched separately.
+            if (not items
+                    and session is not None
+                    and self.subagents.get_running_count_by_session(session.key) &gt; 0):
+                try:
+                    msg = await asyncio.wait_for(pending_queue.get(), timeout=300)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        &quot;Timeout waiting for sub-agent completion in session {}&quot;,
+                        session.key,
+                    )
+                    return items
+                items.append(_to_user_message(msg))
+                while len(items) &lt; limit:
+                    try:
+                        items.append(_to_user_message(pending_queue.get_nowait()))
+                    except asyncio.QueueEmpty:
+                        break
+
+            return items
+
+        active_session_key = session.key if session else session_key
+        file_state_token = bind_file_states(self._file_state_store.for_session(active_session_key))
+        try:
+            result = await self.runner.run(AgentRunSpec(</code></pre></div><ol><li>pending_queue 不存在就返回空；每个待处理 InboundMessage 先提取文档/媒体，再生成带运行时上下文的 user 内容。返回对象只有 role 与 content，不附带原始 subagent_task_id。</li><li>非阻塞排空最多 limit 条。队列暂空但当前 Session 仍有运行子任务时，最多等待300秒获得一条结果，再取余下即时可用项。这个等待让主 Runner 有机会同轮消费后续成果。</li><li>回调返回的 user 消息进入 Runner 事实链，后来随整轮保存；因为此转换没有带 task_id，不能用下一段的 assistant 事件去重保证来描述这条忙碌路径。</li></ol><p><strong>取舍与异常边界：</strong>两种入口不完全等价是当前源码事实。300秒是等待一次队列结果的上限，不是子任务的总运行期限；超时返回已有 items，仍由上层决定是否结束。</p></article><article class="source-excerpt" id="guide-nanobot-agent-loop-py-1544"><h3>7. 空闲系统 Turn 按 task_id 归档去重</h3><p>当后台结果没有在忙碌主 Turn 中被消费，而是进入 _process_system_message 时，该入口调用此函数先归档。去重键必须来自 metadata。</p><div class="code-block" id="nanobot-agent-loop-py-1544" data-guide="guide-nanobot-agent-loop-py-1544" data-source="nanobot/agent/loop.py" data-start="1544" data-end="1566" data-symbol="AgentLoop._persist_subagent_followup"><div class="code-head"><span>当前源码原文：nanobot/agent/loop.py · AgentLoop._persist_subagent_followup · 第 1544–1566 行（连续摘录）</span></div><pre><code>    def _persist_subagent_followup(self, session: Session, msg: InboundMessage) -&gt; bool:
+        &quot;&quot;&quot;Persist subagent follow-ups before prompt assembly so history stays durable.
+
+        Returns True if a new entry was appended; False if the follow-up was
+        deduped (same ``subagent_task_id`` already in session) or carries no
+        content worth persisting.
+        &quot;&quot;&quot;
+        if not msg.content:
+            return False
+        task_id = msg.metadata.get(&quot;subagent_task_id&quot;) if isinstance(msg.metadata, dict) else None
+        if task_id and any(
+            m.get(&quot;injected_event&quot;) == &quot;subagent_result&quot; and m.get(&quot;subagent_task_id&quot;) == task_id
+            for m in session.messages
+        ):
+            return False
+        session.add_message(
+            &quot;assistant&quot;,
+            msg.content,
+            sender_id=msg.sender_id,
+            injected_event=&quot;subagent_result&quot;,
+            subagent_task_id=task_id,
+        )
+        return True</code></pre></div><ol><li>空 content 不保存。存在 task_id 时扫描当前 session.messages，找到同事件类型、同 task_id 就返回 False。</li><li>新结果作为 assistant 事件记录写入 Session，附 sender_id、injected_event 与 subagent_task_id，返回 True 让上层决定保存文件。</li><li>去重范围是当前 Session 中仍保留的记录；没有 task_id 的结果没有此身份保障，不能宣称系统实现全局永久 exactly-once。</li></ol><p><strong>取舍与异常边界：</strong>该函数不直接调用 sessions.save，调用者必须处理返回值并持久化。事件归档 role 与模型注入 role 不同，是存储视图与请求视图的区别。</p></article></section><section id="worked-example"><h2>手工演算：消息和状态如何一步步变化</h2><p>主输入来自 <code>websocket:room7</code>，有效会话 key 记为 <code>K</code>，主 Turn 正在运行。spawn 受理任务 <code>“列出当前目录的测试文件”</code>，本例假设生成 id=<code>a1b2c3d4</code>。模型和工具均用固定假对象。</p><div class="table-wrap"><table class="source-table"><thead><tr><th>时间</th><th>管理器 / 总线状态</th><th>主会话状态</th></tr></thead><tbody><tr><td>t0 受理</td><td>running={a1b2c3d4:Task}；session_tasks[K]={id}；phase=initializing</td><td>spawn 工具结果只是 started 回执</td></tr><tr><td>t1 执行</td><td>独立 messages=[S_sub,U_task]；工具执行并产生结果</td><td>主 Turn 可以继续自己的模型/工具迭代</td></tr><tr><td>t2 完成</td><td>stop_reason=completed；构造 result 事件，override=K</td><td>bus inbound 收到 sender=subagent、task_id=id</td></tr><tr><td>t3 路由</td><td>pending[K] 原本为空→含该事件</td><td>不创建竞争 Turn；若队列已消失，则走 _dispatch 系统消息路径</td></tr><tr><td>t4 工具后检查点</td><td>callback 交回内容→规范化 user 消息</td><td>messages 尾部追加结果消息；下一次 Provider 看到报告</td></tr><tr><td>t5 清理 / 持久化</td><td>done callback 删除进程内索引</td><td>忙碌注入随事实链保存为 user 内容，此转换未保留 task_id；不享有空闲入口的事件去重保证</td></tr></tbody></table></div><p>空闲分支对照：若 t3 时 pending[K] 已消失，系统消息 Turn 调用 _persist_subagent_followup，将结果归档成带 task_id 的 assistant 事件；同 Session 再次调用该归档函数处理相同 id 返回 False。这是该函数的有限去重，不应套用到忙碌回注。失败演算：若子工具触发致命错误，stop_reason=tool_error，回注内容由最近成功步骤和失败事件组成，主 Agent 仍有机会给用户解释进展。取消演算：cancel_by_session(K) 取消并 await 活任务，done callback 清理索引；不能期待普通 Exception 分支替你发送取消通知。</p></section><section id="build-it"><h2>从空文件实现一个可推演的最小模块</h2><p>从零实现一个“后台作业管理器 + 主会话邮箱”。模拟两种归属不同的任务，让结果只能进入正确邮箱。本练习统一保留事件身份并去重，是增强的教学方案；当前生产代码的忙碌回注会丢弃 task_id，不能用练习伪代码反推它也具备同等去重保障。</p><ol><li>实现 running、statuses、session_tasks 三张表；spawn 返回 id，使用假 runner 并发等待不同事件。</li><li>结果统一包装为 {task_id,key,status,content}，主循环忙时进邮箱，空闲时交给新 Turn 回调。不要让子任务直接追加主 messages。</li><li>实现按 session 取消、done 清理和按 task_id 的持久化去重；编写跨会话、重复结果和队列满的输入。</li></ol><details class="answer-reveal"><summary>展开参考方案与设计理由</summary><div class="answer-content"><p><strong>下面是教学参考伪代码，不是仓库原文。</strong>它只覆盖本练习的有限输入；先完成自己的实现，再逐项比较责任边界。</p><pre><code>spawn(task, origin):
+    id = fresh_id()
+    statuses[id] = &quot;initializing&quot;
+    running[id] = create_task(run_and_announce(id, task, origin))
+    session_tasks[origin.key].add(id)
+    running[id].add_done_callback(lambda _: cleanup(id, origin.key))
+    return id
+run_and_announce(id, task, origin):
+    result = await isolated_runner(task)
+    await bus.put(Event(id=id, key=origin.key, result=result))
+route(event):
+    if has_mailbox(event.key) and mailbox_has_capacity(event.key):
+        enqueue(event.key, event)
+    else:
+        schedule_serial_turn(event.key, event)
+persist_once(event, session):
+    if event.id in session.result_ids: return False
+    session.append_result(event)
+    return True</code></pre><p>将 I/O 放在可替换的回调中，用固定输入验证状态与调用次数；错误路径必须留下可观察的结果，不能只写日志。</p></div></details><h3>验收条件</h3><ol><li>K1、K2 两个任务倒序完成，结果仍分别进入 K1、K2，不能按“最近活跃会话”路由。</li><li>同一 task_id 两次持久化只追加一次；测试中明确去重范围只覆盖保留在 Session 的记录。</li><li>取消 K1 后 K2 继续；K1 的 running/status/session 索引最终清空。</li><li>主 Turn 忙碌时结果只在明确检查点变成模型输入；子任务不能直接修改主链。</li></ol></section><section id="invariants"><h2>边界、不变量与容易写错的地方</h2><ol><li>进程内任务管理不是分布式作业系统；没有看到恢复日志就不能声称重启后自动续跑。</li><li>独立 Registry 和 FileStates 限制内存共享，不能防止两个任务同时写同一个真实文件。</li><li>origin.session_key 是回注正确性的关键；统一会话下只拼 channel:chat_id 可能走错邮箱。</li><li>status.phase=done 表示 Runner 已返回；失败分类仍看 stop_reason，不要只展示 done 就宣称成功。</li><li>回注正文属于任务结果数据，不应把它当成任意提高权限的 system 指令。忙碌队列转换没有保留 task_id，不能宣称所有回注都享有统一去重。</li></ol></section><section id="self-test"><h2>独立推理练习</h2><ol><li>为什么不能直接 await spawn 得到最终报告？<details><summary>展开推理依据</summary><p>spawn await 只等待任务被安排，返回 started 文案；最终结果经总线异步到达。</p></details></li><li>去重能否覆盖已经被裁剪掉的所有历史任务？<details><summary>展开推理依据</summary><p>当前函数只扫描 session.messages，无法证明已经不存在的旧 task_id；全局去重需要额外持久索引。</p></details></li><li>为什么主 Agent 不忙时也要经过总线？<details><summary>展开推理依据</summary><p>统一入口才能执行会话恢复、上下文构建与响应投递，避免后台任务另写一套渠道发送逻辑。</p></details></li></ol></section><div class="page-nav" data-study-page-nav></div><footer class="footer">07 · Subagent 后台协作 · 源码精讲与设计实作</footer></div></main></div></body></html>

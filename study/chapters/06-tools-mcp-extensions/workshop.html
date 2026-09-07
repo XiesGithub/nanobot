@@ -1,0 +1,240 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Tools 与 MCP 扩展：当前源码连续摘录、数据流程、状态演算和模块实现练习"><title>06 · Tools 与 MCP 扩展 · 源码精讲与设计实作 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head><body data-study-root="../.." data-chapter="tools-mcp-extensions" data-page="workshop"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="index.html">章节总览</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div><section class="hero"><p class="eyebrow">Chapter 06 · Source workshop</p><h1>Tools 与 MCP 扩展：源码精讲与设计实作</h1><p class="lead">从 schema 到真实副作用，中间有哪些不可省略的边界？沿注册、校验、加载与远程适配源码，做出一个可验证的最小能力系统。</p><div class="meta-row"><a class="chip" href="#contract">输入输出契约</a><a class="chip" href="#dataflow">模块数据流图</a><a class="chip" href="#source-walkthrough">核心源码精讲</a><a class="chip" href="#build-it">动手设计与验收</a></div></section><div class="callout"><strong>使用方法：</strong>先遮住后面的演算结果，写出每一步进入和离开的数据，再读连续源码核对。摘录来自当前工作区；行号指原文件，代码块未插入讲解行。练习使用假 Provider、假时钟或内存队列，无需 API 凭据；若自行接入项目真实模型，须使用 <code>deepseek-v4-flash</code>，项目命令在 Conda <code>nanobot</code> 环境执行。</div><section id="contract"><h2>先约定谁持有数据、谁可以改变数据</h2><p>Tool 是能力契约，Loader 是装配政策，Registry 是运行时映射，Runner 是调度策略。MCP 只是其中一种执行适配方式。</p><div class="table-wrap"><table class="source-table"><thead><tr><th>进入 / 离开边界</th><th>数据形状与示例</th><th>所有权、约束与失败表现</th></tr></thead><tbody><tr><td>装配→Loader</td><td>ToolContext + scope="core"/"subagent"</td><td>enabled 与 scope 过滤；创建异常隔离；插件内置重名受保护。</td></tr><tr><td>Registry→Provider</td><td>list[{type:"function",function:{name,parameters,…}}]</td><td>定义稳定排序；register/unregister 后重建缓存。</td></tr><tr><td>模型→准备阶段</td><td>name:str，params:dict，tool_call_id 在外层保留</td><td>先查找、再转换、再校验；参数校验不是路径或网络授权。</td></tr><tr><td>准备→Tool</td><td>工具实例 + cast_params</td><td>执行才发生副作用；read_only/exclusive 决定默认 concurrency_safe。</td></tr><tr><td>MCP→Runner</td><td>远程 content blocks 被转成字符串</td><td>超时/连接错误可变成说明文本；外部取消必须传播。</td></tr></tbody></table></div></section><section id="dataflow"><h2>沿箭头追踪数据，而非只记函数名</h2><figure><div class="diagram-scroll"><svg class="learning-diagram" viewBox="0 0 900 390" role="img" aria-labelledby="tools-title tools-desc" xmlns="http://www.w3.org/2000/svg"><title id="tools-title">ToolLoader的数据与失败路径</title><desc id="tools-desc">文字等价：Loader 在 scope 过滤后向 Registry 注册实例；Registry 发出排序后的 schema，Provider 根据定义返回 name 与 arguments；调用先解析、转换、校验，再到本地 Tool 或 MCP Session；成功内容或错误反馈被 Runner 关联 tool_call_id 回送模型。未知名字和参数错误在执行前返回错误。</desc><style>.learning-diagram{width:100%;height:auto;display:block;--d-bg:#f1f5f9;--d-fg:#18324c;--d-line:#45627b;--d-error:#b23b46}[data-theme="dark"] .learning-diagram{--d-bg:#172538;--d-fg:#e0ecf8;--d-line:#9cbbd5;--d-error:#ff9c9c}@media(prefers-color-scheme:dark){html:not([data-theme="light"]) .learning-diagram{--d-bg:#172538;--d-fg:#e0ecf8;--d-line:#9cbbd5;--d-error:#ff9c9c}}.learning-diagram rect{fill:var(--d-bg);stroke:var(--d-line);stroke-width:1.5}.learning-diagram text{fill:var(--d-fg);font:14px system-ui,sans-serif;text-anchor:middle}.learning-diagram .node-title{font-size:17px;font-weight:650}.learning-diagram .edge{fill:none;stroke:var(--d-line);stroke-width:2;marker-end:url(#tools-arrow)}.learning-diagram .error-edge{fill:none;stroke:var(--d-error);stroke-width:2;stroke-dasharray:6 4;marker-end:url(#tools-error)}.learning-diagram .error-text{fill:var(--d-error)}</style><defs><marker id="tools-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--d-line)"/></marker><marker id="tools-error" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--d-error)"/></marker></defs><rect x="25" y="35" width="210" height="85" rx="12"/><text class="node-title" x="130" y="68">ToolLoader</text><text x="130" y="96">scope + ToolContext</text><rect x="345" y="35" width="210" height="85" rx="12"/><text class="node-title" x="450" y="68">Registry</text><text x="450" y="96">name → Tool</text><rect x="665" y="35" width="210" height="85" rx="12"/><text class="node-title" x="770" y="68">Provider</text><text x="770" y="96">tool schemas</text><rect x="665" y="225" width="210" height="85" rx="12"/><text class="node-title" x="770" y="258">prepare / validate</text><text x="770" y="286">name + arguments</text><rect x="345" y="225" width="210" height="85" rx="12"/><text class="node-title" x="450" y="258">本地 / MCP执行</text><text x="450" y="286">Tool.execute / call_tool</text><rect x="25" y="225" width="210" height="85" rx="12"/><text class="node-title" x="130" y="258">返回模型</text><text x="130" y="286">id + content / error</text><path class="edge" d="M235 78H345"/><text x="290" y="60">实例注册</text><path class="edge" d="M555 78H665"/><text x="610" y="60">definitions</text><path class="edge" d="M770 120V225"/><text x="787" y="175">tool call</text><path class="edge" d="M665 268H555"/><text x="610" y="250">cast params</text><path class="edge" d="M345 268H235"/><text x="290" y="250">结果内容</text><path class="error-edge" d="M770 310V345H130V310"/><text class="error-text" x="450" y="370">未知名 / 非法参数 → error</text></svg></div><figcaption>文字等价：Loader 在 scope 过滤后向 Registry 注册实例；Registry 发出排序后的 schema，Provider 根据定义返回 name 与 arguments；调用先解析、转换、校验，再到本地 Tool 或 MCP Session；成功内容或错误反馈被 Runner 关联 tool_call_id 回送模型。未知名字和参数错误在执行前返回错误。</figcaption></figure></section><section id="source-walkthrough"><h2>当前源码逐段精讲</h2><article class="source-excerpt" id="guide-nanobot-agent-tools-base-py-48"><h3>1. 参数校验把模型字符串变成可检验的输入</h3><p>工具不应假设模型总能按 schema 输出正确类型。该校验器返回一组错误，而不是直接执行能力。</p><div class="code-block" id="nanobot-agent-tools-base-py-48" data-guide="guide-nanobot-agent-tools-base-py-48" data-source="nanobot/agent/tools/base.py" data-start="48" data-end="101" data-symbol="Schema.validate_json_schema_value"><div class="code-head"><span>当前源码原文：nanobot/agent/tools/base.py · Schema.validate_json_schema_value · 第 48–101 行（连续摘录）</span></div><pre><code>    def validate_json_schema_value(val: Any, schema: dict[str, Any], path: str = &quot;&quot;) -&gt; list[str]:
+        &quot;&quot;&quot;Validate ``val`` against a JSON Schema fragment; returns error messages (empty means valid).
+
+        Used by :class:`Tool` and each concrete Schema&#x27;s :meth:`validate_value`.
+        &quot;&quot;&quot;
+        raw_type = schema.get(&quot;type&quot;)
+        nullable = (isinstance(raw_type, list) and &quot;null&quot; in raw_type) or schema.get(&quot;nullable&quot;, False)
+        t = Schema.resolve_json_schema_type(raw_type)
+        label = path or &quot;parameter&quot;
+
+        if nullable and val is None:
+            return []
+        if t == &quot;integer&quot; and (not isinstance(val, int) or isinstance(val, bool)):
+            return [f&quot;{label} should be integer&quot;]
+        if t == &quot;number&quot; and (
+            not isinstance(val, _JSON_TYPE_MAP[&quot;number&quot;]) or isinstance(val, bool)
+        ):
+            return [f&quot;{label} should be number&quot;]
+        if t in _JSON_TYPE_MAP and t not in (&quot;integer&quot;, &quot;number&quot;) and not isinstance(val, _JSON_TYPE_MAP[t]):
+            return [f&quot;{label} should be {t}&quot;]
+
+        errors: list[str] = []
+        if &quot;enum&quot; in schema and val not in schema[&quot;enum&quot;]:
+            errors.append(f&quot;{label} must be one of {schema[&#x27;enum&#x27;]}&quot;)
+        if t in (&quot;integer&quot;, &quot;number&quot;):
+            if &quot;minimum&quot; in schema and val &lt; schema[&quot;minimum&quot;]:
+                errors.append(f&quot;{label} must be &gt;= {schema[&#x27;minimum&#x27;]}&quot;)
+            if &quot;maximum&quot; in schema and val &gt; schema[&quot;maximum&quot;]:
+                errors.append(f&quot;{label} must be &lt;= {schema[&#x27;maximum&#x27;]}&quot;)
+        if t == &quot;string&quot;:
+            if &quot;minLength&quot; in schema and len(val) &lt; schema[&quot;minLength&quot;]:
+                errors.append(f&quot;{label} must be at least {schema[&#x27;minLength&#x27;]} chars&quot;)
+            if &quot;maxLength&quot; in schema and len(val) &gt; schema[&quot;maxLength&quot;]:
+                errors.append(f&quot;{label} must be at most {schema[&#x27;maxLength&#x27;]} chars&quot;)
+        if t == &quot;object&quot;:
+            props = schema.get(&quot;properties&quot;, {})
+            for k in schema.get(&quot;required&quot;, []):
+                if k not in val:
+                    errors.append(f&quot;missing required {Schema.subpath(path, k)}&quot;)
+            for k, v in val.items():
+                if k in props:
+                    errors.extend(Schema.validate_json_schema_value(v, props[k], Schema.subpath(path, k)))
+        if t == &quot;array&quot;:
+            if &quot;minItems&quot; in schema and len(val) &lt; schema[&quot;minItems&quot;]:
+                errors.append(f&quot;{label} must have at least {schema[&#x27;minItems&#x27;]} items&quot;)
+            if &quot;maxItems&quot; in schema and len(val) &gt; schema[&quot;maxItems&quot;]:
+                errors.append(f&quot;{label} must be at most {schema[&#x27;maxItems&#x27;]} items&quot;)
+            if &quot;items&quot; in schema:
+                prefix = f&quot;{path}[{{}}]&quot; if path else &quot;[{}]&quot;
+                for i, item in enumerate(val):
+                    errors.extend(
+                        Schema.validate_json_schema_value(item, schema[&quot;items&quot;], prefix.format(i))
+                    )
+        return errors</code></pre></div><ol><li>读取 type 和 nullable，明确允许的 null 才提前通过。整数/数值专门排除 bool，因为 Python 中 bool 是 int 的子类。</li><li>类型通过后检查 enum、范围和长度约束；对象检查 required，再递归检查已声明属性。错误路径可包含嵌套字段名。</li><li>数组验证项数与每个 item，最终返回 errors；空数组意味着没有发现错误，不是“验证未运行”。</li></ol><p><strong>取舍与异常边界：</strong>这是一套局部 JSON Schema 支持，不是完整规范实现。此段只递归 props 中的字段，不能据此声称会拒绝所有未知参数；复杂 oneOf 等需额外逻辑。</p></article><article class="source-excerpt" id="guide-nanobot-agent-tools-registry-py-48"><h3>2. 工具集合同时也是稳定提示词的一部分</h3><p>注册表不仅查名字，还把运行时对象变成发给 Provider 的定义列表。稳定顺序能减少无意义的提示词变动。</p><div class="code-block" id="nanobot-agent-tools-registry-py-48" data-guide="guide-nanobot-agent-tools-registry-py-48" data-source="nanobot/agent/tools/registry.py" data-start="48" data-end="71" data-symbol="ToolRegistry.get_definitions"><div class="code-head"><span>当前源码原文：nanobot/agent/tools/registry.py · ToolRegistry.get_definitions · 第 48–71 行（连续摘录）</span></div><pre><code>    def get_definitions(self) -&gt; list[dict[str, Any]]:
+        &quot;&quot;&quot;Get tool definitions with stable ordering for cache-friendly prompts.
+
+        Built-in tools are sorted first as a stable prefix, then MCP tools are
+        sorted and appended.  The result is cached until the next
+        register/unregister call.
+        &quot;&quot;&quot;
+        if self._cached_definitions is not None:
+            return self._cached_definitions
+
+        definitions = [tool.to_schema() for tool in self._tools.values()]
+        builtins: list[dict[str, Any]] = []
+        mcp_tools: list[dict[str, Any]] = []
+        for schema in definitions:
+            name = self._schema_name(schema)
+            if name.startswith(&quot;mcp_&quot;):
+                mcp_tools.append(schema)
+            else:
+                builtins.append(schema)
+
+        builtins.sort(key=self._schema_name)
+        mcp_tools.sort(key=self._schema_name)
+        self._cached_definitions = builtins + mcp_tools
+        return self._cached_definitions</code></pre></div><ol><li>缓存存在时直接返回；register/unregister 负责使缓存失效。工具对象属性自行变化不会自动触发这一机制。</li><li>将 to_schema() 结果按名字前缀分为 builtin 与 mcp_ 两组，分别排序。</li><li>将 builtin 作为稳定前缀、MCP 接在后面并保存缓存。该分类依赖名称，不依赖 Python 类的来源证明。</li></ol><p><strong>取舍与异常边界：</strong>缓存提高效率但返回共享列表，调用者不应原地修改。mcp_ 命名是表示约定，不是安全认证，也不是服务能力授权。</p></article><article class="source-excerpt" id="guide-nanobot-agent-tools-registry-py-73"><h3>3. 名字解析、转换、校验和执行各有边界</h3><p>一条模型调用通常只有 name 与 params。prepare_call 把这两项转为可执行工具对象和经过处理的参数。</p><div class="code-block" id="nanobot-agent-tools-registry-py-73" data-guide="guide-nanobot-agent-tools-registry-py-73" data-source="nanobot/agent/tools/registry.py" data-start="73" data-end="114" data-symbol="ToolRegistry.prepare_call / execute"><div class="code-head"><span>当前源码原文：nanobot/agent/tools/registry.py · ToolRegistry.prepare_call / execute · 第 73–114 行（连续摘录）</span></div><pre><code>    def prepare_call(
+        self,
+        name: str,
+        params: dict[str, Any],
+    ) -&gt; tuple[Tool | None, dict[str, Any], str | None]:
+        &quot;&quot;&quot;Resolve, cast, and validate one tool call.&quot;&quot;&quot;
+        # Guard against invalid parameter types (e.g., list instead of dict)
+        if not isinstance(params, dict) and name in (&#x27;write_file&#x27;, &#x27;read_file&#x27;):
+            return None, params, (
+                f&quot;Error: Tool &#x27;{name}&#x27; parameters must be a JSON object, got {type(params).__name__}. &quot;
+                &quot;Use named parameters: tool_name(param1=\&quot;value1\&quot;, param2=\&quot;value2\&quot;)&quot;
+            )
+
+        tool = self._tools.get(name)
+        if not tool:
+            return None, params, (
+                f&quot;Error: Tool &#x27;{name}&#x27; not found. Available: {&#x27;, &#x27;.join(self.tool_names)}&quot;
+            )
+
+        cast_params = tool.cast_params(params)
+        errors = tool.validate_params(cast_params)
+        if errors:
+            return tool, cast_params, (
+                f&quot;Error: Invalid parameters for tool &#x27;{name}&#x27;: &quot; + &quot;; &quot;.join(errors)
+            )
+        return tool, cast_params, None
+
+    async def execute(self, name: str, params: dict[str, Any]) -&gt; Any:
+        &quot;&quot;&quot;Execute a tool by name with given parameters.&quot;&quot;&quot;
+        _HINT = &quot;\n\n[Analyze the error above and try a different approach.]&quot;
+        tool, params, error = self.prepare_call(name, params)
+        if error:
+            return error + _HINT
+
+        try:
+            assert tool is not None  # guarded by prepare_call()
+            result = await tool.execute(**params)
+            if isinstance(result, str) and result.startswith(&quot;Error&quot;):
+                return result + _HINT
+            return result
+        except Exception as e:
+            return f&quot;Error executing {name}: {str(e)}&quot; + _HINT</code></pre></div><ol><li>read_file/write_file 遇到非对象参数先返回清晰错误；工具名不存在则列出可用名字。注意这个顶层特判只针对这两个工具。</li><li>先 cast_params 再 validate_params：例如 schema 允许的安全数字转换可先完成。错误返回三元组中的 error，调用者不应继续执行。</li><li>execute 遇到准备错误直接返回带修正提示的文字；真正 tool.execute(**params) 在 try 中执行，异常被转成错误文字，已有 Error 前缀结果也追加提示。</li></ol><p><strong>取舍与异常边界：</strong>prepare_call 在 execute 的 try 外部，cast/validate 自身抛异常不受下面 except 捕获。Runner 还有自己的 _run_tool 调度与错误策略，不能认为它简单无条件调用本段 execute。</p></article><article class="source-excerpt" id="guide-nanobot-agent-tools-loader-py-86"><h3>4. 发现类不代表允许实例化进本轮</h3><p>Loader 根据 scope 和 enabled 决定装入哪些工具，Registry 专注名字到对象的映射。</p><div class="code-block" id="nanobot-agent-tools-loader-py-86" data-guide="guide-nanobot-agent-tools-loader-py-86" data-source="nanobot/agent/tools/loader.py" data-start="86" data-end="116" data-symbol="ToolLoader.load"><div class="code-head"><span>当前源码原文：nanobot/agent/tools/loader.py · ToolLoader.load · 第 86–116 行（连续摘录）</span></div><pre><code>    def load(self, ctx: Any, registry: ToolRegistry, *, scope: str = &quot;core&quot;) -&gt; list[str]:
+        registered: list[str] = []
+        builtin_names: set[str] = set()
+        sources = [(self.discover(), False), (self._discover_plugins().values(), True)]
+        for source, is_plugin_source in sources:
+            for tool_cls in source:
+                cls_label = tool_cls.__name__
+                try:
+                    if scope not in getattr(tool_cls, &quot;_scopes&quot;, {&quot;core&quot;}):
+                        continue
+                    if not tool_cls.enabled(ctx):
+                        continue
+                    tool = tool_cls.create(ctx)
+                    if registry.has(tool.name):
+                        if is_plugin_source and tool.name in builtin_names:
+                            logger.warning(
+                                &quot;Plugin %s skipped: conflicts with built-in tool %s&quot;,
+                                cls_label, tool.name,
+                            )
+                            continue
+                        logger.warning(
+                            &quot;Tool name collision: %s from %s overwrites existing&quot;,
+                            tool.name, cls_label,
+                        )
+                    registry.register(tool)
+                    registered.append(tool.name)
+                    if not is_plugin_source:
+                        builtin_names.add(tool.name)
+                except Exception:
+                    logger.error(&quot;Failed to register tool: %s&quot;, cls_label)
+        return registered</code></pre></div><ol><li>先遍历内置发现结果，再遍历入口点插件；scope 不匹配或 enabled 为假直接跳过。</li><li>用 ToolContext 调用 create；若插件名字与已装入内置工具冲突，跳过插件，保护内置名字。</li><li>其他重名记录警告后覆盖；成功注册使 schema 缓存失效。一个工具初始化异常被隔离，继续装入其他工具。</li></ol><p><strong>取舍与异常边界：</strong>“Registry.register 会覆盖”与“插件不能覆盖内置工具”不矛盾，后者是 Loader 的政策。绕过 Loader 直接注册时，不能假装仍享有相同冲突保护。</p></article><article class="source-excerpt" id="guide-nanobot-agent-tools-mcp-py-149"><h3>5. 远程能力被适配成本地 Tool 契约</h3><p>Wrapper 分离模型可见名称与服务器原始名称，使 Provider 命名限制不泄漏到远程协议。</p><div class="code-block" id="nanobot-agent-tools-mcp-py-149" data-guide="guide-nanobot-agent-tools-mcp-py-149" data-source="nanobot/agent/tools/mcp.py" data-start="149" data-end="191" data-symbol="MCPToolWrapper.__init__ / execute"><div class="code-head"><span>当前源码原文：nanobot/agent/tools/mcp.py · MCPToolWrapper.__init__ / execute · 第 149–191 行（连续摘录）</span></div><pre><code>    def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
+        self._session = session
+        self._original_name = tool_def.name
+        self._name = _sanitize_name(f&quot;mcp_{server_name}_{tool_def.name}&quot;)
+        self._description = tool_def.description or tool_def.name
+        raw_schema = tool_def.inputSchema or {&quot;type&quot;: &quot;object&quot;, &quot;properties&quot;: {}}
+        self._parameters = _normalize_schema_for_openai(raw_schema)
+        self._tool_timeout = tool_timeout
+
+    @property
+    def name(self) -&gt; str:
+        return self._name
+
+    @property
+    def description(self) -&gt; str:
+        return self._description
+
+    @property
+    def parameters(self) -&gt; dict[str, Any]:
+        return self._parameters
+
+    async def execute(self, **kwargs: Any) -&gt; str:
+        from mcp import types
+
+        for attempt in range(2):  # At most 1 retry
+            try:
+                result = await asyncio.wait_for(
+                    self._session.call_tool(self._original_name, arguments=kwargs),
+                    timeout=self._tool_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    &quot;MCP tool &#x27;{}&#x27; timed out after {}s&quot;, self._name, self._tool_timeout
+                )
+                return f&quot;(MCP tool call timed out after {self._tool_timeout}s)&quot;
+            except asyncio.CancelledError:
+                # MCP SDK&#x27;s anyio cancel scopes can leak CancelledError on timeout/failure.
+                # Re-raise only if our task was externally cancelled (e.g. /stop).
+                task = asyncio.current_task()
+                if task is not None and task.cancelling() &gt; 0:
+                    raise
+                logger.warning(&quot;MCP tool &#x27;{}&#x27; was cancelled by server/SDK&quot;, self._name)
+                return &quot;(MCP tool call was cancelled)&quot;</code></pre></div><ol><li>模型看到清洗后的 mcp_server_tool 名；真正调用服务器时使用 _original_name。inputSchema 被规范化后通过 parameters 属性暴露。</li><li>execute 用 wait_for 包住远程 call_tool；超时转为可读字符串。该字符串没有 Error 前缀，不能用 Registry 的前缀规则概括全部远程失败。</li><li>CancelledError 特别区分：当前任务正在被外部取消时重新抛出，让 /stop 生效；否则把 SDK/服务端泄漏的取消信号变为失败文本。</li></ol><p><strong>取舍与异常边界：</strong>只有 wrapper 对象共享 Session，并不等于远程工具无副作用。MCPToolWrapper 未在这里声明 read_only，不能默认把所有远程调用并行化。</p></article><article class="source-excerpt" id="guide-nanobot-agent-tools-mcp-py-192"><h3>6. 有限重试与结果降维</h3><p>远程调用既可能失败，也可能返回异构内容块。Wrapper 需要把这些形状收敛为当前 Tool 的结果。</p><div class="code-block" id="nanobot-agent-tools-mcp-py-192" data-guide="guide-nanobot-agent-tools-mcp-py-192" data-source="nanobot/agent/tools/mcp.py" data-start="192" data-end="226" data-symbol="MCPToolWrapper.execute retry and result"><div class="code-head"><span>当前源码原文：nanobot/agent/tools/mcp.py · MCPToolWrapper.execute retry and result · 第 192–226 行（连续摘录）</span></div><pre><code>            except Exception as exc:
+                if _is_transient(exc):
+                    if attempt == 0:
+                        logger.warning(
+                            &quot;MCP tool &#x27;{}&#x27; hit transient error ({}), retrying once...&quot;,
+                            self._name,
+                            type(exc).__name__,
+                        )
+                        await asyncio.sleep(1)  # Brief backoff before retry
+                        continue
+                    # Second transient failure — give up with retry-specific message
+                    logger.exception(
+                        &quot;MCP tool &#x27;{}&#x27; failed after retry: {}&quot;,
+                        self._name,
+                        type(exc).__name__,
+                    )
+                    return f&quot;(MCP tool call failed after retry: {type(exc).__name__})&quot;
+                logger.exception(
+                    &quot;MCP tool &#x27;{}&#x27; failed: {}: {}&quot;,
+                    self._name,
+                    type(exc).__name__,
+                    exc,
+                )
+                return f&quot;(MCP tool call failed: {type(exc).__name__})&quot;
+            else:
+                # Success — extract result
+                parts = []
+                for block in result.content:
+                    if isinstance(block, types.TextContent):
+                        parts.append(block.text)
+                    else:
+                        parts.append(str(block))
+                return &quot;\n&quot;.join(parts) or &quot;(no output)&quot;
+
+        return &quot;(MCP tool call failed)&quot;  # Unreachable, but satisfies type checkers</code></pre></div><ol><li>识别为 transient 的异常第一次等待 1 秒后 continue；第二次不再重试，返回含异常类型的失败说明。非 transient 异常立即结束。</li><li>成功时遍历 content；TextContent 保留 text，其余 block 用 str 转换，最后以换行拼接，空结果变成 (no output)。</li><li>两次尝试是上界，重试仅针对列出的连接类异常，不针对超时路径。不要把总超时时间误算为单次 timeout。</li></ol><p><strong>取舍与异常边界：</strong>文本化方便通用模型消费，但不能保留所有多模态语义。重试存在“服务器已执行但响应丢失”的歧义，有写副作用的服务需要幂等键，而不是无限重试。</p></article></section><section id="worked-example"><h2>手工演算：消息和状态如何一步步变化</h2><p>设计一个教学工具 <code>scale</code>：参数 n 是 integer 且 minimum=1，返回 n×2。注册 read_file、scale 与 mcp_docs_search 后，模拟调用 <code>{id:"c7",name:"scale",arguments:{n:"3"}}</code>。这里的 scale 只是练习工具，不冒充当前内置能力。</p><div class="table-wrap"><table class="source-table"><thead><tr><th>步骤</th><th>状态 / 数据</th><th>推导</th></tr></thead><tbody><tr><td>注册</td><td>_tools 含三个对象；_cached_definitions=None</td><td>每次注册都使缓存失效</td></tr><tr><td>取定义</td><td>[read_file,scale,mcp_docs_search]</td><td>内置按名排序，MCP 独立排在后面</td></tr><tr><td>准备 c7</td><td>name=scale；params={n:"3"}→{n:3}</td><td>cast 根据 schema 转换；validate 返回 []</td></tr><tr><td>执行</td><td>await scale.execute(n=3)→"6"</td><td>一次调用产生一个结果</td></tr><tr><td>回填</td><td>role=tool,tool_call_id=c7,name=scale,content="6"</td><td>模型下一轮同时看到 c7 声明与结果</td></tr><tr><td>失败变体</td><td>n=0→minimum 错误；name=scael→未找到</td><td>两种情况执行次数都为 0；模型得到修正反馈</td></tr></tbody></table></div><p>再把结果换成远程 MCP：连接第一次 BrokenPipeError、第二次返回两个 TextContent("a","b")，最终为 "a\nb"，远程尝试次数为 2；若第一次超时则直接返回超时文本，次数为 1。外部取消必须继续向上冒泡。</p></section><section id="build-it"><h2>从空文件实现一个可推演的最小模块</h2><p>实现一个内存工具注册表和模拟远程适配器。练习目标是验证边界与错误传播，不需要安装 MCP 服务器。</p><ol><li>建立 Tool 接口：name、parameters、cast、validate、execute；注册表支持注册/注销和稳定 schema 缓存。</li><li>实现 scale 的 integer/minimum 验证，避免把 bool 接受成整数；名字解析失败和参数失败不得进入 execute。</li><li>实现 FakeSession 的脚本化结果序列，分别模拟一次瞬时连接错误、超时和外部取消；给每次远程尝试计数。</li></ol><details class="answer-reveal"><summary>展开参考方案与设计理由</summary><div class="answer-content"><p><strong>下面是教学参考伪代码，不是仓库原文。</strong>它只覆盖本练习的有限输入；先完成自己的实现，再逐项比较责任边界。</p><pre><code>register(tool):
+    tools[tool.name] = tool
+    definitions_cache = None
+prepare(name, params):
+    if name not in tools: return error(&quot;unknown tool&quot;)
+    casted = tools[name].cast(params)
+    errors = tools[name].validate(casted)
+    if errors: return error(errors)
+    return tools[name], casted
+remote_call(args):
+    for attempt in [0, 1]:
+        try: return await with_timeout(session.call(args))
+        except ExternalCancellation: raise
+        except Timeout: return failure(&quot;timeout&quot;)
+        except TransientFailure:
+            if attempt == 1: return failure(&quot;retry exhausted&quot;)
+            await bounded_backoff()</code></pre><p>将 I/O 放在可替换的回调中，用固定输入验证状态与调用次数；错误路径必须留下可观察的结果，不能只写日志。</p></div></details><h3>验收条件</h3><ol><li>n="3" 得到 6；n=0、n=true、缺 n 都不执行；错误中能定位 n。</li><li>注销 scale 后 schema 中不再包含它；重复取定义保持顺序，不改变缓存内容。</li><li>瞬时失败最多调用 2 次，超时只调用 1 次，外部取消保持取消状态。</li><li>为写工具明确禁用并发；说明为什么服务端幂等比客户端重试次数更能防止重复写入。</li></ol></section><section id="invariants"><h2>边界、不变量与容易写错的地方</h2><ol><li>参数类型检查不能替代安全边界。文件工具仍须 _resolve_path 校验 allowed_dir；网络工具仍须 validate_url_target 防 SSRF。</li><li>不要把“schema 可见”当作“调用安全”。description 和工具返回内容也会进入后续提示词，需避免泄漏内部敏感信息。</li><li>同名覆盖政策由调用路径决定：直接 Registry.register 与 ToolLoader 插件装配的行为不同。</li><li>MCP Resource/Prompt 的 read_only 与通用 MCP Tool 默认权限不同，不能按 mcp_ 前缀统一并发。</li><li>新增能力优先位于工具或 MCP 边缘，避免为了一个新工具修改核心 Loop/Runner。</li></ol></section><section id="self-test"><h2>独立推理练习</h2><ol><li>为何 validate 在 execute 前仍不能保证没有异常？<details><summary>展开推理依据</summary><p>cast/validate 本身可能抛异常，远程连接也可能失败；准备结果与执行异常是两个边界。</p></details></li><li>为什么要保留 original_name？<details><summary>展开推理依据</summary><p>模型可见名称经过清洗和命名空间拼接，服务器仍只认识原始 tool 名。</p></details></li><li>重试一次就能保证不会重复写吗？<details><summary>展开推理依据</summary><p>不能。首次调用可能完成写入后连接断开；需要远端幂等或可确认的操作状态。</p></details></li></ol></section><div class="page-nav" data-study-page-nav></div><footer class="footer">06 · Tools 与 MCP 扩展 · 源码精讲与设计实作</footer></div></main></div></body></html>

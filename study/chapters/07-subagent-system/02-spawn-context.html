@@ -1,0 +1,55 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08.02 · SpawnTool 与父请求身份 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="subagent-system" data-page="spawn-context">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/tools/spawn.py" data-source-label="spawn.py" title="nanobot/agent/tools/spawn.py 的所属模块讲解；该文件未单独逐行收录">模块指南</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Subagent · entry point</p><h1>SpawnTool：把模型委派转成可路由后台任务</h1><p class="lead">SpawnTool 同时扮演两种适配器：对模型，它是只有 task/label 的简单 Tool；对运行时，它把当前 channel、chat、effective session 和原始 message id 悄悄附加到 Manager.spawn。</p><div class="meta-row"><span class="chip">task schema</span><span class="chip">ContextAware</span><span class="chip">ContextVar</span><span class="chip">global limit</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">模型只需要描述任务</h2><div class="code-block"><div class="code-head"><span>agent/tools/spawn.py:16–22</span><span>Tool Schema</span></div><pre><code>@tool_parameters(tool_parameters_schema(
+    task=StringSchema("The task for the subagent to complete"),
+    label=StringSchema("Optional short label for the task (for display)"),
+    required=["task"],
+))
+class SpawnTool(Tool, ContextAware): ...</code></pre></div>
+<p>Schema 没有 model、timeout、tools 或 session 参数：主模型只能委派内容和显示标签，不能自行扩大子 Agent 权限或选择另一个 Provider。</p>
+
+<h2 id="reading-section-02">调用前后的五步</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>turn setup</small><b>set_context</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>LLM</small><b>spawn call</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>guard</small><b>检查并发</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>manager</small><b>传递 origin</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>tool result</small><b>started</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>AgentLoop 注入当前请求身份</h3><p>在模型循环前，所有 ContextAware 工具接收 RequestContext。SpawnTool 保存 channel、chat_id、session_key 和 message_id。</p></div>
+  <div data-step-panel><h3>模型产生结构化 Tool call</h3><p>task 应是子 Agent 可独立完成的具体工作；label 为空时 Manager 会截取 task 前 30 个字符作为显示标签。</p></div>
+  <div data-step-panel><h3>并发门槛在 Tool 入口</h3><p><code>get_running_count()</code> 是全局计数，不按 session。达到上限时返回 “Cannot spawn subagent”，让主模型等待或换方案。</p></div>
+  <div data-step-panel><h3>路由字段不暴露给模型</h3><p>execute 从 ContextVar 读取 origin 信息后调用 Manager.spawn，防止模型伪造结果应回到哪个渠道或会话。</p></div>
+  <div data-step-panel><h3>started 是主模型的即时观察</h3><p>Manager 创建后台 task 后立即返回 id 和 started 文本。真正结果稍后通过 MessageBus 进入另一次注入，而不是这条 Tool result。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">为什么用 ContextVar，而不是普通字段</h2><div class="code-block"><div class="code-head"><span>agent/tools/spawn.py:26–45</span><span>请求隔离</span></div><pre><code>self._origin_channel = ContextVar("spawn_origin_channel", default="cli")
+self._origin_chat_id = ContextVar("spawn_origin_chat_id", default="direct")
+self._session_key = ContextVar("spawn_session_key", default="cli:direct")
+self._origin_message_id = ContextVar("spawn_origin_message_id", default=None)
+
+def set_context(self, ctx: RequestContext):
+    self._origin_channel.set(ctx.channel)
+    self._origin_chat_id.set(ctx.chat_id)
+    self._session_key.set(ctx.session_key or f"{ctx.channel}:{ctx.chat_id}")
+    self._origin_message_id.set(ctx.message_id)</code></pre></div>
+<p>主 ToolRegistry 被多个并发 session 共用。若把 origin 存成普通实例属性，另一个 Turn 的 set_context 可能覆盖它，导致结果串到错误聊天。ContextVar 让每个 asyncio task 看到自己的值，测试会并发设置不同渠道验证隔离。</p>
+
+<h2 id="reading-section-04">从 ToolLoader 到 SpawnTool</h2><div class="architecture"><div class="arch-layer"><div class="arch-label">构造期</div><div class="arch-items"><span class="arch-item">ToolContext.subagent_manager</span><span>→ SpawnTool.create(ctx)</span><span>→ main Registry</span></div></div><div class="arch-layer"><div class="arch-label">请求期</div><div class="arch-items"><span class="arch-item">AgentLoop._set_tool_context</span><span>→ RequestContext</span><span>→ ContextVars</span></div></div><div class="arch-layer"><div class="arch-label">执行期</div><div class="arch-items"><span class="arch-item">execute(task,label)</span><span>→ Manager.spawn(origin...)</span></div></div></div>
+
+<h2 id="reading-section-05">即时返回内容的含义</h2><div class="code-block"><div class="code-head"><span>agent/subagent.py:137–167</span><span>登记先于返回</span></div><pre><code>task_id = str(uuid.uuid4())[:8]
+status = SubagentStatus(task_id=task_id, ...)
+self._task_statuses[task_id] = status
+
+bg_task = asyncio.create_task(self._run_subagent(...))
+self._running_tasks[task_id] = bg_task
+self._session_tasks.setdefault(session_key, set()).add(task_id)
+
+return f"Subagent [{display_label}] started (id: {task_id}). ..."</code></pre></div>
+<div class="callout warning"><strong>“后台”不等于父 Turn 马上结束：</strong>spawn execute 很快返回，但主 AgentRunner 随后的 injection callback 会在仍有同 session Subagent 时等待结果，默认最长 300 秒。下一页之后会展开这一协调机制。</div>
+
+<h2 id="reading-section-06">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/tools/spawn.py" data-source-label="spawn.py" title="nanobot/agent/tools/spawn.py 的所属模块讲解；该文件未单独逐行收录">spawn.py · 模块讲解</a></td><td>完整 Tool 入口</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/tools/context.py" data-source-label="tools/context.py" title="nanobot/agent/tools/context.py 的所属模块讲解；该文件未单独逐行收录">tools/context.py · 模块讲解</a></td><td>RequestContext 与 ContextAware</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-770" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:532" title="阅读 nanobot/agent/loop.py:770–833 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>请求期工具上下文注入</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/test_tool_contextvars.py" data-source-label="test_tool_contextvars.py:47" title="tests/test_tool_contextvars.py 的所属模块讲解；该文件未单独逐行收录">test_tool_contextvars.py · 模块讲解</a></td><td>并发 origin 隔离测试</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/tools/test_subagent_tools.py" data-source-label="test_subagent_tools.py:98" title="tests/agent/tools/test_subagent_tools.py 的所属模块讲解；该文件未单独逐行收录">test_subagent_tools.py · 模块讲解</a></td><td>并发上限拒绝测试</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">为什么 origin 字段不能让模型作为 Tool 参数传入？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>origin 是宿主根据当前请求注入的可信 channel/chat/session 身份。若暴露成模型参数，模型可伪造别的会话、绕过并发配额或把结果投递到错误用户。</p></div></details></li><li><span class="review-question">ContextVar 防止了哪一种跨会话错误？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>并发 Turn 共用同一批 Tool 实例；若 origin 存在普通实例字段，一个请求会覆盖另一个。ContextVar 让每个 asyncio task 读取自己的 RequestContext，防止跨 Session 串投结果。</p></div></details></li><li><span class="review-question">spawn Tool result 与最终 Subagent result 有什么区别？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>spawn result 只是同步确认“已创建”及 task id，便于父 Agent 继续工作；最终 result 是后台 Runner 完成后的内容，经 announcement 走同 Turn 注入或新的 system Turn 返回。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">07.02 · SpawnTool 与父请求身份</footer></div></main></div></body></html>

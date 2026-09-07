@@ -1,0 +1,62 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>05 · 并发隔离与消息注入 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="agent-loop" data-page="concurrency-injection">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="并发源码" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Agent Loop · concurrency</p><h1>并发隔离与消息注入</h1><p class="lead">nanobot 同时满足三个目标：不同 Session 可以并发；同一 Session 的状态不能竞争写；用户追问和子 Agent 结果又应尽量进入正在执行的 Turn，而不是机械排到下一轮。</p><div class="meta-row"><span class="chip">session lock</span><span class="chip">global semaphore</span><span class="chip">pending queue</span><span class="chip">mid-turn injection</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">三层并发控制</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">进程总量</div><div class="arch-items"><span class="arch-item">Semaphore(default=3)</span><span>限制同时占用模型/工具资源的 dispatch 数；环境变量 ≤ 0 可关闭限制</span></div></div>
+  <div class="arch-layer"><div class="arch-label">Session 隔离</div><div class="arch-items"><span class="arch-item">dict[key, asyncio.Lock]</span><span>同 key 串行，避免 Session 历史、checkpoint 和工具上下文交叉写入</span></div></div>
+  <div class="arch-layer"><div class="arch-label">Turn 内追问</div><div class="arch-items"><span class="arch-item">Queue(maxsize=20)</span><span>活跃 Session 的后续普通消息路由到当前 Runner</span></div></div>
+</div>
+
+<div class="code-block"><div class="code-head"><span>agent/loop.py:942</span><span>同 Session 串行、跨 Session 并发</span></div><pre><code>session_key = self._effective_session_key(msg)
+lock = self._session_locks.setdefault(session_key, asyncio.Lock())
+gate = self._concurrency_gate or nullcontext()
+pending = asyncio.Queue(maxsize=20)
+self._pending_queues[session_key] = pending
+
+async with lock, gate:
+    response = await self._process_message(msg, pending_queue=pending)</code></pre></div>
+
+<h2 id="reading-section-02">第二条消息到达时的分流</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>A</small><b>优先命令</b></button><span class="flow-arrow">·</span><button class="flow-node" data-step><small>B</small><b>普通命令</b></button><span class="flow-arrow">·</span><button class="flow-node" data-step><small>C</small><b>普通消息</b></button><span class="flow-arrow">·</span><button class="flow-node" data-step><small>D</small><b>队列已满</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>优先命令立即处理</h3><p><code>/stop</code> 在 pending queue 判断前走 inline command path，确保能取消当前任务，而不是被任务自己等待。</p></div>
+  <div data-step-panel><h3>其他可分发命令也不注入</h3><p>活跃 Session 中的 slash command 直接交给 CommandRouter，避免模型把控制指令当成普通对话。</p></div>
+  <div data-step-panel><h3>普通消息进入 pending queue</h3><p>必要时写入 effective session override；当前 Runner 会在工具完成、最终回答或错误等安全点取出。</p></div>
+  <div data-step-panel><h3>满队列回退为 task</h3><p><code>put_nowait</code> 失败时不丢消息，而是继续创建排队 task；它随后受同一个 Session lock 串行保护。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">消息怎样注入 Runner</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:768</span><span>Loop 提供 injection callback</span></div><pre><code>async def _drain_pending(limit=3):
+    # InboundMessage → role=user message
+    # 提取文档、构造图片块，并加当前 runtime context
+    while len(items) &lt; limit:
+        items.append(_to_user_message(pending_queue.get_nowait()))
+
+    if not items and subagents_still_running:
+        msg = await asyncio.wait_for(pending_queue.get(), timeout=300)
+        items.append(_to_user_message(msg))
+    return items</code></pre></div>
+<p>注入消息不是只拼接纯文本，而是重新执行文档提取、媒体构造和 Runtime Context 组装，保证它与普通本轮 user message 拥有一致的输入格式。</p>
+
+<h2 id="reading-section-04">Runner 的安全注入点</h2><table class="source-table"><thead><tr><th>时机</th><th>为什么在这里检查</th><th>继续方式</th></tr></thead><tbody>
+  <tr><td>工具执行完成后</td><td>assistant tool_calls 与 tool results 已闭合</td><td>追加 user message，下一 iteration 重规划</td></tr>
+  <tr><td>模型给出最终回答后</td><td>回答可能已被新追问改变</td><td>先追加 assistant 再追加 user，保持 stream 为 resuming</td></tr>
+  <tr><td>LLM/tool/empty error 后</td><td>新输入可能提供修复线索</td><td>允许从错误分支回到循环</td></tr>
+  <tr><td>达到 max iterations</td><td>不能再继续推理，但不能丢输入</td><td>吸收到 history；不再增加 iteration</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-05">防止无限“追问续命”</h2><div class="summary-grid"><div class="card"><div class="metric">3</div><div class="metric-label">一次 callback 最多注入消息数</div></div><div class="card"><div class="metric">5</div><div class="metric-label">一个 Runner 最多 injection cycles</div></div><div class="card"><div class="metric">300s</div><div class="metric-label">等待本 Session 子 Agent 结果的上限</div></div></div>
+<p>Runner 中的 <code>_MAX_INJECTIONS_PER_TURN</code> 和 <code>_MAX_INJECTION_CYCLES</code> 防止持续输入永久占用同一个 Turn。Runner 结束后，Loop 的 <code>finally</code> 会把 pending queue 剩余项重新发布到 MessageBus，保证有界但不丢失。</p>
+
+<h2 id="reading-section-06">Unified Session 改变隔离键</h2><div class="compare-grid"><div class="card"><h3>默认</h3><p><code>session_key = channel + ":" + chat_id</code>。不同渠道/会话各自有 lock、pending queue 与历史。</p></div><div class="card"><h3>unified_session</h3><p>没有显式 override 时统一使用 <code>unified:default</code>。多设备共享上下文，也意味着它们共享串行锁和注入队列。</p></div></div>
+
+<div class="callout warning"><strong>一个容易忽略的代码顺序：</strong>pending queue 在进入 Session lock 之前注册，并在 <code>_dispatch()</code> 的 finally 中移除、回灌剩余消息。因此“该 key 正在处理”的可见时间覆盖等待 lock/gate 的阶段，而不只覆盖状态机真正运行的阶段。</div>
+
+<h2 id="reading-section-07">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:365" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>active tasks、locks、pending queues 和 semaphore 初始化</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:705" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>effective session key</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:768" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>pending 消息格式化与子 Agent 等待</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:892" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>新输入的四路分流</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:942" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>Session lock 与全局 gate</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-56" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:145" title="阅读 nanobot/agent/runner.py:56–97 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>注入周期控制与追加顺序</td></tr></tbody></table>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么同 Session lock 不能用一个全局 lock 替代？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>全局 lock 会让互不相关的聊天也串行，慢工具阻塞所有用户。按 session key 的 lock 只保护共享同一历史的 Turn，同时保留不同 Session 的并发。</p></div></details></li><li><span class="review-question">用户追问为什么不总是排成下一次独立 Turn？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>当前 Runner 可在模型迭代边界调用 injection callback，把追问作为新 user message并入正在进行的上下文，模型可立即调整计划；只有无法安全注入或运行结束后的消息才需要独立 Turn。</p></div></details></li><li><span class="review-question">pending queue 没被消费完时，finally 怎样保证不丢消息？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>清理阶段会把本轮尚未消费的 pending 消息重新排入调度/保留在队列，而不是随 task 字典删除；同时移除只属于当前运行的注入回调和活动任务记录。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">05.04 · 并发隔离与消息注入</footer></div></main></div></body></html>

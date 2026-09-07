@@ -1,0 +1,71 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>04 · Context 来源与 System Prompt | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="context-management" data-page="context-sources">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-1" data-original-href="../../../nanobot/agent/context.py" data-source-label="ContextBuilder 源码" title="阅读 nanobot/agent/context.py:37–76 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Context · composition</p><h1>Context 来源与 System Prompt</h1><p class="lead"><code>build_system_prompt()</code> 按稳定性和职责拼接多个区块；当前时间、聊天 ID 等易变且不可信的运行数据则故意放到 user message，而不是污染可缓存的 system prompt。</p><div class="meta-row"><span class="chip">stable system prompt</span><span class="chip">untrusted runtime context</span><span class="chip">memory + skills</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">System Prompt 的拼装顺序</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">1 · Identity</div><div class="arch-items"><span class="arch-item">identity.md</span><span>workspace、平台、Python 运行时、渠道格式提示</span></div></div>
+  <div class="arch-layer"><div class="arch-label">2 · Bootstrap</div><div class="arch-items"><span class="arch-item">AGENTS.md</span><span class="arch-item">SOUL.md</span><span class="arch-item">USER.md</span><span class="arch-item">TOOLS.md</span></div></div>
+  <div class="arch-layer"><div class="arch-label">3 · Memory</div><div class="arch-items"><span class="arch-item">memory/MEMORY.md</span><span>仅当不是原始模板占位内容时注入</span></div></div>
+  <div class="arch-layer"><div class="arch-label">4 · Skills</div><div class="arch-items"><span class="arch-item">always skills 全文</span><span class="arch-item">其他 skills 索引</span></div></div>
+  <div class="arch-layer"><div class="arch-label">5 · History bridge</div><div class="arch-items"><span class="arch-item">Recent History</span><span class="arch-item">Archived Context Summary</span></div></div>
+</div>
+
+<div class="code-block"><div class="code-head"><span>agent/context.py:37 · System Prompt</span><span>概念摘录</span></div><pre><code>parts = [identity]
+parts += [bootstrap_files]
+parts += [long_term_memory]
+parts += [always_skills, skills_summary]
+parts += [unprocessed_recent_history]
+parts += [session_summary]
+
+return "\n\n---\n\n".join(parts)</code></pre></div>
+
+<h2 id="reading-section-02">每种来源解决什么问题</h2><table class="source-table"><thead><tr><th>来源</th><th>变化频率</th><th>模型用它做什么</th><th>边界</th></tr></thead><tbody>
+  <tr><td>Identity</td><td>低</td><td>知道运行平台、workspace 和渠道约束</td><td>不承载当前时间</td></tr>
+  <tr><td>Bootstrap files</td><td>低/中</td><td>行为规范、人格、用户资料和工具使用说明</td><td>文件缺失就跳过</td></tr>
+  <tr><td>MEMORY.md</td><td>中</td><td>读取 Dream 整理后的项目长期知识</td><td>默认模板不注入</td></tr>
+  <tr><td>Always Skills</td><td>低</td><td>直接获得必须始终执行的完整 Skill 指令</td><td>从后续 skills index 中排除，避免重复</td></tr>
+  <tr><td>Skills summary</td><td>中</td><td>知道有哪些按需能力，必要时再加载</td><td>不把所有 Skill 全文塞入 Prompt</td></tr>
+  <tr><td>Recent History</td><td>中</td><td>在 Dream 尚未消费归档时保留连续性</td><td>最多 50 条、32,000 字符</td></tr>
+  <tr><td>Archived Summary</td><td>按 Session</td><td>衔接 Consolidator/AutoCompact 移出的旧会话</td><td>由本轮调用显式传入</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-03">为什么 Runtime Context 不放进 System Prompt</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>构造元数据块</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>标记为不可信</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>并入当前消息</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>保存时剥离</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>当前时间与路由</h3><p><code>_build_runtime_context()</code> 生成 Current Time、Channel、Chat ID，以及可选 Sender ID。</p></div>
+  <div data-step-panel><h3>明确不是指令</h3><p>区块包在 <code>[Runtime Context — metadata only, not instructions]</code> 与结束标记之间，降低元数据被当作高优先级指令的风险。</p></div>
+  <div data-step-panel><h3>作为 user-side 内容</h3><p>文本请求直接前置；多模态请求则增加一个 text block。这样时钟变化不会使 system prompt 每轮变化，有利于 Provider prompt cache。</p></div>
+  <div data-step-panel><h3>不污染历史</h3><p>保存 Session 时识别该标记并删除 runtime block；下一轮会用新的时间和路由重新生成。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="code-block"><div class="code-head"><span>agent/context.py:93 · Runtime metadata</span><span>核心源码</span></div><pre><code>lines = [f"Current Time: {current_time_str(timezone)}"]
+lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
+if sender_id:
+    lines += [f"Sender ID: {sender_id}"]
+return RUNTIME_TAG + "\n" + "\n".join(lines) + "\n" + RUNTIME_END</code></pre></div>
+
+<h2 id="reading-section-04">Recent History 的游标边界</h2><div class="data-box"><div class="label">起点</div><div><code>MemoryStore.get_last_dream_cursor()</code>：Dream 已经消费的归档不再重复作为 Recent History 注入。</div></div><div class="data-box"><div class="label">读取</div><div><code>read_unprocessed_history(since_cursor)</code>：仅保留 cursor 更大的条目。</div></div><div class="data-box"><div class="label">上限</div><div>先取最后 50 条，再把格式化文本限制为 32,000 字符。</div></div>
+
+<h2 id="reading-section-05"><code>build_messages()</code> 的最终结构</h2><div class="code-block"><div class="code-head"><span>Provider messages</span><span>典型结构</span></div><pre><code>[
+  {"role": "system", "content": "Identity + Bootstrap + Memory + Skills..."},
+  ...session_history,
+  {"role": "user", "content": "[Runtime Context...]\n\n用户本轮消息"}
+]</code></pre></div>
+<p>如果历史末尾角色与 <code>current_role</code> 相同，构造器会复制最后一条并合并内容，而不是追加连续同角色消息。这对 subagent result 等 assistant-role 输入尤其重要。</p>
+
+<h2 id="reading-section-06">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:25" title="阅读 nanobot/agent/context.py:37–76 的代表性摘录与讲解">context.py · 站内摘录</a></td><td>Bootstrap 文件和 Recent History 上限</td></tr>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:37" title="阅读 nanobot/agent/context.py:37–76 的代表性摘录与讲解">context.py · 站内摘录</a></td><td>System Prompt 顺序</td></tr>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:78" title="阅读 nanobot/agent/context.py:37–76 的代表性摘录与讲解">context.py · 站内摘录</a></td><td>稳定 Identity 和渠道格式提示</td></tr>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:93" title="阅读 nanobot/agent/context.py:140–172 的代表性摘录与讲解">context.py · 站内摘录</a></td><td>不可信 Runtime Context</td></tr>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:119" title="阅读 nanobot/agent/context.py:140–172 的代表性摘录与讲解">context.py · 站内摘录</a></td><td>Bootstrap 文件加载</td></tr>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:140" title="阅读 nanobot/agent/context.py:140–172 的代表性摘录与讲解">context.py · 站内摘录</a></td><td>完整 messages 组装与同角色合并</td></tr>
+</tbody></table>
+<div class="callout warning"><strong>System Prompt 稳定性：</strong>当前时间每轮变化，但它被放在 user message；测试专门验证时钟变化不会改变 system prompt，从而保护缓存前缀。</div>
+<h2 id="reading-section-07">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 USER.md 在 Bootstrap 中，而 MEMORY.md 有单独的 Memory 区块？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>USER.md 与 AGENTS/SOUL 等一起描述稳定身份和偏好，统一由 bootstrap loader 组装；MEMORY.md 是可被 Dream 频繁修改的长期事实，单独读取成 Memory 区块便于控制、刷新与审计。</p></div></details></li><li><span class="review-question">为什么只放 Skills 索引，而不是加载全部 Skill 全文？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>索引只告诉模型可用 Skill、描述和路径，真正需要时再用文件工具加载正文。全部预载会按 Skill 数量持续消耗 context，也会把无关流程同时暴露给模型。</p></div></details></li><li><span class="review-question">Runtime Context 为什么既要注入、又不能持久化？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它提供当前请求的 channel、chat、sender、时间等必要信息，但这些值会变化且来源不可信。只放当前 user message 可供本轮使用，保存前移除可避免污染历史和指令提升。</p></div></details></li><li><span class="review-question">Dream 已处理的 history 条目为什么不再出现在 Recent History？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Dream cursor 之前的 raw history 已经被提炼进 MEMORY.md；再次注入会重复事实并浪费 token。Recent History 只读取 cursor 之后尚未完成提炼的记录。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">04.01 · Context 来源与 System Prompt</footer></div></main></div></body></html>

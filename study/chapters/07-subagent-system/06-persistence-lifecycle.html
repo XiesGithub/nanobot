@@ -1,0 +1,69 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08.06 · Subagent 持久化与生命周期 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="subagent-system" data-page="persistence-lifecycle">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-loop-py-770" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py" title="阅读 nanobot/agent/loop.py:770–833 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Subagent · durability</p><h1>结果持久化、任务清理与按 Session 取消</h1><p class="lead">Subagent 自身不保存会话，但结果必须成为父 Session 的耐久事实。nanobot 对“晚到的独立 system Turn”显式标记和去重；对“当前 Turn 注入”则随主 Runner 的新消息一起保存。</p><div class="meta-row"><span class="chip">subagent_task_id</span><span class="chip">dedupe</span><span class="chip">session ownership</span><span class="chip">cancel & cleanup</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">三张活动表</h2><div class="code-block"><div class="code-head"><span>agent/subagent.py:98–101</span><span>全局、状态与归属</span></div><pre><code>self._running_tasks: dict[str, asyncio.Task[None]] = {}
+self._task_statuses: dict[str, SubagentStatus] = {}
+self._session_tasks: dict[str, set[str]] = {}  # session_key -&gt; task ids</code></pre></div>
+
+<h2 id="reading-section-02">从登记到清理</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>spawn</small><b>写入三张表</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>running</small><b>状态持续更新</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>announce</small><b>先发布结果</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>done callback</small><b>删除活动记录</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>session</small><b>保留结果历史</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>task_id 是三张表的连接键</h3><p>8 位 id 同时关联 asyncio task、SubagentStatus 和父 session 集合，也写进回注 metadata 供持久化去重。</p></div>
+  <div data-step-panel><h3>运行时查询只看活动表</h3><p>全局计数取 _running_tasks 长度；按 session 计数还检查 task 未 done。/status 因此能把子任务加入 active task 数。</p></div>
+  <div data-step-panel><h3>announcement 在 task 结束前发布</h3><p>_run_subagent await publish_inbound 后才返回，确保至少把结果交给 MessageBus，然后 asyncio 才触发 done callback。</p></div>
+  <div data-step-panel><h3>cleanup 不保留完成状态</h3><p>callback 从 running、status 和 session set 中删除 id，空集合也删除；它避免内存持续增长，但不提供历史查询。</p></div>
+  <div data-step-panel><h3>父 Session 承担长期记录</h3><p>同 Turn 注入由主消息列表随 _save_turn 保存；晚到路径先显式插入带 injected_event/task_id 的 assistant 条目，再让父 Agent生成答复。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">晚到结果为什么要先保存再请求模型</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:1128–1156</span><span>durable before prompt</span></div><pre><code>is_subagent = msg.sender_id == "subagent"
+if is_subagent and self._persist_subagent_followup(session, msg):
+    self.sessions.save(session)
+
+history = session.get_history(...)
+current_role = "assistant" if is_subagent else "user"
+messages = self.context.build_messages(
+    history=history,
+    current_message="" if is_subagent else msg.content,
+    current_role=current_role,
+    ...
+)</code></pre></div>
+<p>即使随后主模型调用失败，Subagent announcement 已经落进父 Session；再次打开会话仍能看到背景任务结果。current_message 为空避免把同一结果重复拼入 Prompt。</p>
+
+<h2 id="reading-section-04">去重规则</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:1544–1566</span><span>task id 幂等</span></div><pre><code>if not msg.content:
+    return False
+task_id = msg.metadata.get("subagent_task_id")
+if task_id and any(
+    m.get("injected_event") == "subagent_result"
+    and m.get("subagent_task_id") == task_id
+    for m in session.messages
+):
+    return False
+session.add_message(
+    "assistant", msg.content,
+    sender_id=msg.sender_id,
+    injected_event="subagent_result",
+    subagent_task_id=task_id,
+)</code></pre></div>
+<p>去重只对带 task_id 且已经以 subagent_result 标记持久化的消息生效；空内容直接跳过。结果作为 assistant 事实保存，而不是伪装成新的用户请求。</p>
+
+<h2 id="reading-section-05">取消链</h2><div class="architecture"><div class="arch-layer"><div class="arch-label">用户</div><div class="arch-items"><span class="arch-item">/stop</span><span>→ AgentLoop._cancel_active_tasks(key)</span></div></div><div class="arch-layer"><div class="arch-label">父任务</div><div class="arch-items"><span class="arch-item">cancel main dispatch</span><span>→ await checkpoint cleanup</span></div></div><div class="arch-layer"><div class="arch-label">子任务</div><div class="arch-items"><span class="arch-item">cancel_by_session</span><span>→ task.cancel()</span><span>→ gather(return_exceptions=True)</span></div></div><div class="arch-layer"><div class="arch-label">收尾</div><div class="arch-items"><span class="arch-item">done callback cleanup</span></div></div></div>
+<p><code>asyncio.CancelledError</code> 不属于 _run_subagent 的普通 Exception 处理，因此被取消的子任务通常不会发布“失败”announcement；取消信号向外传播，done callback 仍负责移除活动记录。</p>
+
+<h2 id="reading-section-06">跨渠道与线程路由</h2><table class="source-table"><thead><tr><th>字段</th><th>来源</th><th>用途</th></tr></thead><tbody>
+  <tr><td>origin channel/chat_id</td><td>SpawnTool RequestContext</td><td>system chat_id 编码与最终 Outbound 目标</td></tr>
+  <tr><td>session_key_override</td><td>effective parent session key</td><td>pending queue、Session、取消归属保持一致</td></tr>
+  <tr><td>origin_message_id</td><td>原始请求 metadata</td><td>渠道侧回复关联与重复抑制</td></tr>
+  <tr><td>Slack thread_ts</td><td>thread session key 第三段</td><td>晚到 system Turn 恢复线程 metadata</td></tr>
+</tbody></table>
+
+<div class="callout warning"><strong>两个持久化入口不要混淆：</strong>及时结果由 injection callback 转成 role=user 的 Runner 输入，metadata 标记不会原样保留；晚到结果才调用 <code>_persist_subagent_followup</code>，保存独立 assistant 条目和 task_id。它们解决的是同一语义在不同到达时机下的耐久性。</div>
+
+<h2 id="reading-section-07">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py:127" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">subagent.py · 站内摘录</a></td><td>登记与 done cleanup</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-subagent-py-232" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py:315" title="阅读 nanobot/agent/subagent.py:232–275 的代表性摘录与讲解">subagent.py · 站内摘录</a></td><td>按 session 取消与计数</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-770" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:692" title="阅读 nanobot/agent/loop.py:770–833 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>/stop 的父子任务取消链</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-892" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1103" title="阅读 nanobot/agent/loop.py:892–934 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>晚到结果保存与回复</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/test_loop_save_turn.py" data-source-label="test_loop_save_turn.py:612" title="tests/agent/test_loop_save_turn.py 的所属模块讲解；该文件未单独逐行收录">test_loop_save_turn.py · 模块讲解</a></td><td>持久化、去重和 Slack thread 测试</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">为什么 announcement 必须在 done callback 清理前发布？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>done callback 最终会从活动表删除 task/status；announcement 构造需要读取父 origin、结果和状态。因此执行协程先发布完成消息，回调再清理，避免结果失去路由信息。</p></div></details></li><li><span class="review-question">晚到结果为什么先写 Session 再调用主模型？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>先持久化 Subagent 完成事实，保证随后主模型调用失败或进程退出时结果仍可恢复；然后再让主模型读取该 system Turn，决定如何总结给用户。</p></div></details></li><li><span class="review-question">被 /stop 取消的 Subagent 为什么通常没有失败 announcement？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>/stop</code> 调用 <code>cancel_by_session()</code> 主动取消子 task；取消是用户期望的控制流，协程重新抛出 CancelledError，通常不把它包装成 FAILED announcement 来打扰用户。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">07.06 · Subagent 持久化与生命周期</footer></div></main></div></body></html>

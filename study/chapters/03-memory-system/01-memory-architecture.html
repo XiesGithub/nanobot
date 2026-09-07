@@ -1,0 +1,51 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>03 · Memory 系统全景 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="memory-system" data-page="memory-architecture">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-1" data-original-href="../../../nanobot/agent/memory.py" data-source-label="打开 memory.py" title="阅读 nanobot/agent/memory.py:235–275 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Memory · mental model</p><h1>Memory 系统全景</h1><p class="lead">先回答最重要的问题：一段对话在系统里有哪几种形态，它在什么时候从“当前聊天”变成“可长期复用的事实”？</p><div class="meta-row"><span class="chip">Session</span><span class="chip">Archive</span><span class="chip">Curated Memory</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">三层记忆，不同保真度</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">L1 · 工作记忆</div><div class="arch-items"><span class="arch-item">session.messages</span><span>最完整：当前会话的 user / assistant / tool 结构，直接参与重放</span></div></div>
+  <div class="arch-layer"><div class="arch-label">L2 · 事件归档</div><div class="arch-items"><span class="arch-item">memory/history.jsonl</span><span>较压缩：Consolidator 提取的事实，按 cursor 等待 Dream 消费</span></div></div>
+  <div class="arch-layer"><div class="arch-label">L3 · 长期记忆</div><div class="arch-items"><span class="arch-item">SOUL.md</span><span class="arch-item">USER.md</span><span class="arch-item">MEMORY.md</span><span>最精炼：身份、用户与项目的稳定知识</span></div></div>
+  <div class="arch-layer"><div class="arch-label">审计层</div><div class="arch-items"><span class="arch-item">GitStore</span><span>记录 Dream 的长期文件变更，可查看 diff 与撤销</span></div></div>
+</div>
+
+<div class="compare-grid"><div class="card flat"><h3>这不是向量检索系统</h3><p>当前实现以文件、游标、摘要和 Prompt 注入为核心，没有 embedding、向量索引或相似度搜索。它更像“分层日志 + 定期编辑”。</p></div><div class="card flat"><h3>这也不是完整聊天永久塞入 Prompt</h3><p>Session 会按消息数与 token 预算重放；更老内容被压缩，长期只保留值得持续影响行为的事实。</p></div></div>
+
+<h2 id="reading-section-02">一次普通请求中的时序</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>A</small><b>加载 Session</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>B</small><b>准备摘要</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>C</small><b>检查预算</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>D</small><b>构造 Prompt</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>E</small><b>保存新回合</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3><code>SessionManager.get_or_create()</code></h3><p>先查内存缓存，否则从 <code>sessions/&lt;safe-key&gt;.jsonl</code> 恢复消息和元数据。</p></div>
+  <div data-step-panel><h3><code>AutoCompact.prepare_session()</code></h3><p>若后台刚压缩过空闲会话，取出摘要；重启后也能从 Session 的 <code>_last_summary</code> 恢复。</p></div>
+  <div data-step-panel><h3><code>maybe_consolidate_by_tokens()</code></h3><p>在构造本轮上下文前估算完整 Prompt，必要时将旧消息归档并推进 <code>last_consolidated</code>。</p></div>
+  <div data-step-panel><h3><code>ContextBuilder.build_messages()</code></h3><p>组合长期记忆、未 Dream 的近期归档、会话摘要、合法的 Session 尾部和本轮用户消息。</p></div>
+  <div data-step-panel><h3>保存与上限保护</h3><p>将本轮新增消息保存回 Session；文件消息数超过内部硬上限时，未归档前缀先 raw archive，再裁剪。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">两条异步支线</h2><div class="compare-grid">
+  <div class="card flat"><h3>空闲时：AutoCompact</h3><p><code>AgentLoop.run()</code> 每次等待消息超时（1 秒）会检查过期 Session。它跳过正在处理的会话，在后台压缩旧前缀并保留最多 8 条合法近期消息。</p></div>
+  <div class="card flat"><h3>定期或手动：Dream</h3><p>Dream 批量消费 <code>history.jsonl</code> 的新条目，编辑长期文件。<code>/dream</code> 可手动触发；调度周期由 Dream 配置控制。</p></div>
+</div>
+
+<h2 id="reading-section-04">四个容易混淆的“进度”</h2><table class="source-table"><thead><tr><th>状态</th><th>作用域</th><th>准确含义</th></tr></thead><tbody>
+  <tr><td><code>Session.last_consolidated</code></td><td>单个 Session</td><td><code>messages</code> 中已有多少条被归档，不再作为未压缩历史重放</td></tr>
+  <tr><td><code>memory/.cursor</code></td><td>全局归档</td><td>下一个 <code>history.jsonl</code> 条目的自增编号依据</td></tr>
+  <tr><td><code>memory/.dream_cursor</code></td><td>全局 Dream</td><td>Dream 已成功处理到哪个 history cursor</td></tr>
+  <tr><td><code>metadata._last_summary</code></td><td>单个 Session</td><td>被移出实时消息的最近一段摘要，用于后续上下文衔接</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-05">集成入口源码</h2><table class="source-table"><thead><tr><th>位置</th><th>看什么</th><th>为什么重要</th></tr></thead><tbody>
+  <tr><td><a href="../02-llm-provider-gateway/workshop.html#source-8" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py:377" title="阅读 nanobot/agent/loop.py:453–481 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td>创建 Consolidator、AutoCompact、Dream</td><td>三者共享同一个 MemoryStore 与 Provider</td></tr>
+  <tr><td><a href="../07-subagent-system/workshop.html#guide-nanobot-agent-loop-py-892" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py:877" title="阅读 nanobot/agent/loop.py:892–934 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td>空闲 tick 检查过期 Session</td><td>说明 AutoCompact 不阻塞收消息主循环</td></tr>
+  <tr><td><a href="../01-request-lifecycle/workshop.html#source-5" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py:1344" title="阅读 nanobot/agent/loop.py:1360–1396 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td><code>prepare_session</code></td><td>摘要在本轮构建前取回</td></tr>
+  <tr><td><a href="../01-request-lifecycle/workshop.html#source-5" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py:1360" title="阅读 nanobot/agent/loop.py:1360–1396 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td>token consolidation</td><td>模型调用前主动降压</td></tr>
+  <tr><td><a href="../04-context-management/workshop.html#source-1" data-original-href="../../../nanobot/agent/context.py" data-source-label="agent/context.py:37" title="阅读 nanobot/agent/context.py:37–76 的代表性摘录与讲解">agent/context.py · 站内摘录</a></td><td>记忆注入 system prompt</td><td>落盘内容最终在这里影响模型</td></tr>
+</tbody></table>
+
+<div class="callout warning"><strong>阅读警告：</strong>“归档成功”不等于“已经进入长期 Memory”。Consolidator 只写 <code>history.jsonl</code>；必须等 Dream 成功处理并编辑 Markdown 后，事实才进入稳定长期层。</div>
+<h2 id="reading-section-06">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么需要同时保留 <code>last_consolidated</code> 和 <code>.dream_cursor</code>？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>归档完成不等于 Dream 已提炼：<code>last_consolidated</code> 防止 Session replay 重放已归档消息，<code>.dream_cursor</code> 防止 Dream 重复消费 raw history。二者推进时机不同，不能合并。</p></div></details></li><li><span class="review-question">如果 Dream 一周没运行，刚归档的事实怎样仍能进入模型上下文？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>归档文本先进入 memory store 的 raw history；在 Dream cursor 追上前，ContextBuilder 会把 cursor 之后的内容作为 Recent History 注入，所以新事实无需等待定时 Dream。</p></div></details></li><li><span class="review-question">为什么 AutoCompact 要保留近期消息，而不是把 Session 全部清空？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>近期后缀维持对话连贯性和工具协议配对，也让用户在闲置恢复时仍看到最新上下文。AutoCompact 只把更旧前缀归档，不把 Session 变成完全空白。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">03.01 · Memory 系统全景</footer></div></main></div></body></html>

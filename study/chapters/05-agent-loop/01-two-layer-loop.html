@@ -1,0 +1,60 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>05 · 两层循环与职责边界 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="agent-loop" data-page="two-layer-loop">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="AgentLoop 源码" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Agent Loop · boundaries</p><h1>两层循环与职责边界</h1><p class="lead">把 <code>loop.py</code> 和 <code>runner.py</code> 分开阅读，是理解 nanobot 的第一把钥匙：前者管理应用运行时，后者实现可复用的 Agent 推理执行器。</p><div class="meta-row"><span class="chip">AgentLoop</span><span class="chip">AgentRunner</span><span class="chip">AgentRunSpec</span><span class="chip">AgentRunResult</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">边界不是按“是否调用模型”划分</h2><div class="compare-grid">
+  <div class="card"><h3>AgentLoop：面向应用</h3><ul class="check-list"><li>消费 MessageBus，识别 channel/chat/session</li><li>维护同 Session 串行与跨 Session 并发</li><li>恢复、压缩、构建、保存和响应</li><li>把 channel streaming/progress 适配成回调</li><li>持有 Context、Session、Tools、Subagents 等运行时对象</li></ul></div>
+  <div class="card"><h3>AgentRunner：面向一次运行</h3><ul class="check-list"><li>接收已经构建好的 initial messages</li><li>循环调用统一 Provider 接口</li><li>根据 tool calls 执行 ToolRegistry</li><li>处理重试、注入、终止条件与 usage</li><li>通过 Hook 暴露生命周期，不认识具体渠道</li></ul></div>
+</div>
+
+<div class="callout"><strong>可复用性的证据：</strong>主 Agent、Dream 第二阶段和 Subagent 都直接复用 <code>AgentRunner</code>；Cron/Heartbeat 的实际任务则可通过 <code>process_direct()</code> 重新进入完整 AgentLoop。只有面向聊天渠道、Session 和 MessageBus 的主路径需要持续运行的 <code>AgentLoop.run()</code>。</div>
+
+<h2 id="reading-section-02">调用关系</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">输入边界</div><div class="arch-items"><span class="arch-item">InboundMessage</span><span>→ AgentLoop →</span><span class="arch-item">TurnContext</span></div></div>
+  <div class="arch-layer"><div class="arch-label">运行边界</div><div class="arch-items"><span class="arch-item">initial_messages</span><span>+</span><span class="arch-item">AgentRunSpec</span><span>→ AgentRunner →</span><span class="arch-item">AgentRunResult</span></div></div>
+  <div class="arch-layer"><div class="arch-label">输出边界</div><div class="arch-items"><span class="arch-item">final_content</span><span>+</span><span class="arch-item">messages / stop_reason</span><span>→ AgentLoop →</span><span class="arch-item">OutboundMessage</span></div></div>
+</div>
+
+<h2 id="reading-section-03">AgentRunSpec 是依赖注入边界</h2><div class="code-block"><div class="code-head"><span>agent/runner.py:57</span><span>删节后的核心字段</span></div><pre><code>@dataclass(slots=True)
+class AgentRunSpec:
+    initial_messages: list[dict[str, Any]]
+    tools: ToolRegistry
+    model: str
+    max_iterations: int
+    max_tool_result_chars: int
+    hook: AgentHook | None = None
+    concurrent_tools: bool = False
+    checkpoint_callback: Callable | None = None
+    injection_callback: Callable | None = None
+    context_window_tokens: int = 0</code></pre></div>
+<p>Runner 所需的一切都由 Spec 显式传入：对话、工具、模型、上限与回调。这使它不需要反向读取 AgentLoop 的内部字段，也使 Dream/Subagent 能按自己的策略配置同一执行器。</p>
+
+<h2 id="reading-section-04">AgentRunResult 返回“事实”，而不是渠道响应</h2><table class="source-table"><thead><tr><th>字段</th><th>含义</th><th>AgentLoop 如何使用</th></tr></thead><tbody>
+  <tr><td><code>final_content</code></td><td>最终可显示文本或错误/询问文本</td><td>生成 OutboundMessage</td></tr>
+  <tr><td><code>messages</code></td><td>本次运行后完整的真实消息链</td><td>计算 append boundary 并保存新消息</td></tr>
+  <tr><td><code>tools_used</code></td><td>按调用顺序记录的工具名</td><td>运行统计与上层结果</td></tr>
+  <tr><td><code>usage</code></td><td>所有 iteration 累计 token 使用</td><td>写入 <code>_last_usage</code></td></tr>
+  <tr><td><code>stop_reason</code></td><td>completed、ask_user、error、tool_error、max_iterations 等</td><td>决定流式结束、按钮和错误语义</td></tr>
+  <tr><td><code>had_injections</code></td><td>运行中是否吸收了新输入</td><td>决定 MessageTool 抑制规则</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-05">两种进入 AgentLoop 的方式</h2><div class="compare-grid">
+  <div class="card"><h3><code>run()</code>：服务模式</h3><p>持续消费 MessageBus，把消息创建为异步 task。适合 Gateway 与多渠道长期运行，并支持 <code>/stop</code>、同 Session 注入和全局并发限制。</p></div>
+  <div class="card"><h3><code>process_direct()</code>：直接调用</h3><p>由 SDK、Cron、Heartbeat 等内部调用者构造一个 <code>InboundMessage</code>，直接进入 <code>_process_message()</code>，并返回 OutboundMessage。</p></div>
+</div>
+<div class="code-block"><div class="code-head"><span>agent/loop.py:1669</span><span>内部调用入口</span></div><pre><code>async def process_direct(self, content, session_key="cli:direct", ...):
+    await self._connect_mcp()
+    msg = InboundMessage(channel=channel, sender_id="user",
+                         chat_id=chat_id, content=content, media=media or [])
+    return await self._process_message(msg, session_key=session_key, ...)</code></pre></div>
+
+<h2 id="reading-section-06">设计收益</h2><ul class="number-list"><li><strong>运行时关注点不会污染推理算法：</strong>Runner 不需要知道 Telegram、WebSocket 或 Session 文件。</li><li><strong>同一执行器服务多种场景：</strong>不同调用者只需换 Spec、Hook 与 ToolRegistry。</li><li><strong>失败边界清晰：</strong>Runner 报告停止原因，AgentLoop 决定保存、恢复与用户可见响应。</li><li><strong>测试更聚焦：</strong>Runner 测模型/工具协议，Loop 测并发路由、状态转移和持久化。</li></ul>
+
+<h2 id="reading-section-07">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:229" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>AgentLoop 定义与运行时依赖</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:723" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>把 Loop 环境转换为 AgentRunSpec</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-56" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:57" title="阅读 nanobot/agent/runner.py:56–97 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>Spec/Result 数据边界</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-251" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:234" title="阅读 nanobot/agent/runner.py:251–312 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>可复用内层循环入口</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1398" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1669" title="阅读 nanobot/agent/loop.py:1398–1445 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>process_direct 内部入口</td></tr></tbody></table>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">Session 保存为什么属于 AgentLoop，而不属于 AgentRunner？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Session 属于跨 Turn 的持久状态，还涉及命令清理、压缩、渠道键和原子保存；Runner 只返回本次运行的完整消息增量，不拥有 SessionManager，因此保存放在 AgentLoop。</p></div></details></li><li><span class="review-question">如果新增一个后台 Agent 场景，优先复用哪一层？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>优先复用 <code>AgentRunner</code>：后台任务通常已经有准备好的 prompt、工具范围和终止策略，不需要 MessageBus、普通聊天命令与 OutboundMessage 生命周期。Subagent 和 Dream Phase 2 都采用这种方式。</p></div></details></li><li><span class="review-question">为什么 AgentRunResult 返回完整 messages，而不直接返回 OutboundMessage？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>完整 messages 包含 assistant tool_call、tool result 和最终回复，调用方才能 checkpoint、增量保存、抽取生成媒体或接续运行；<code>OutboundMessage</code> 需要 channel/chat/buttons 等应用信息，只能由 AgentLoop 组装。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">05.01 · 两层循环与职责边界</footer></div></main></div></body></html>

@@ -1,0 +1,53 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>07.05 · 查询命令 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="slash-command-system" data-page="query-commands">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Commands · queries</p><h1><code>/status</code>、<code>/history</code>、<code>/help</code>：不调用模型的可观测性</h1><p class="lead">查询命令直接读取本地权威状态，输出稳定、快速且不消耗模型 token。它们还展示了三种不同的数据来源：运行时统计、持久化 Session、静态命令元数据。</p><div class="meta-row"><span class="chip">best effort status</span><span class="chip">bounded history</span><span class="chip">canonical help</span><span class="chip">render_as text</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">三条只读数据链</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>/status</small><b>运行时快照</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>estimate</small><b>Context 估算</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>/history</small><b>Session 过滤</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>/help</small><b>Spec 遍历</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>outbound</small><b>纯文本呈现</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3><code>/status</code> 聚合多个子系统</h3><p>版本、模型、最近 usage、Context window、Session 消息数、uptime、主任务和 subagent 数都从 AgentLoop 读取。</p></div>
+  <div data-step-panel><h3>估算和外部用量都允许失败</h3><p>Context token 估算失败时回退到最近 prompt_tokens；Web search usage 被 <code>suppress(Exception)</code> 包裹，不能拖垮状态响应。</p></div>
+  <div data-step-panel><h3><code>/history</code> 只展示对话角色</h3><p>读取完整 Session 后只保留 user/assistant；tool/system 被跳过，内容块只提取 text，每条最多 200 字符。</p></div>
+  <div data-step-panel><h3><code>/help</code> 不复制命令清单</h3><p><code>build_help_text()</code> 遍历 <code>BUILTIN_COMMAND_SPECS</code>，把 arg_hint 与 description 组合为统一帮助。</p></div>
+  <div data-step-panel><h3><code>render_as: text</code> 控制渠道渲染</h3><p>状态、历史和帮助不希望 Markdown renderer 折叠换行或误解释内容，因此在 metadata 中明确要求文本呈现。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">为什么 <code>/status</code> 同时注册两次</h2><div class="code-block"><div class="code-head"><span>command/builtin.py:475–480</span><span>priority + exact</span></div><pre><code>router.priority("/stop", cmd_stop)
+router.priority("/restart", cmd_restart)
+router.priority("/status", cmd_status)
+
+router.exact("/new", cmd_new)
+router.exact("/status", cmd_status)</code></pre></div>
+<p>外层 <code>run()</code> 总会先匹配 priority，因此网关运行时通常走快速路径；exact 注册让普通 <code>dispatch()</code> 仍具备完整语义，便于状态机直调、测试和其他调用入口。它是一种“同一 Handler、两种时机”的注册。</p>
+
+<h2 id="reading-section-03"><code>/status</code> 的字段来源</h2><table class="source-table"><thead><tr><th>输出</th><th>来源</th><th>降级策略</th></tr></thead><tbody>
+  <tr><td>version / model / uptime</td><td><code>__version__</code>、loop.model、loop._start_time</td><td>本地确定值</td></tr>
+  <tr><td>last token usage</td><td><code>loop._last_usage</code></td><td>尚无调用时为 0</td></tr>
+  <tr><td>Context 占用</td><td>Consolidator 估算 + Context window</td><td>失败回退最近 prompt tokens</td></tr>
+  <tr><td>Session 消息数</td><td><code>session.get_history(max_messages=0)</code></td><td>session 为空则创建</td></tr>
+  <tr><td>active tasks</td><td>未完成主 tasks + session subagents</td><td>subagent 查询失败被抑制</td></tr>
+  <tr><td>search usage</td><td>可选 provider API</td><td>任何异常都忽略</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-04"><code>/history</code> 的有界格式化</h2><div class="code-block"><div class="code-head"><span>command/builtin.py:415–448</span><span>参数校验和可见消息</span></div><pre><code>count = 10
+if ctx.args.strip():
+    try:
+        count = max(1, min(int(ctx.args.strip()), 50))
+    except ValueError:
+        return OutboundMessage(..., content="Usage: /history [count] ...")
+
+history = session.get_history(max_messages=0)
+visible = [_format_history_message(m) for m in history]
+recent = [m for m in visible if m is not None][-count:]</code></pre></div>
+<div class="callout"><strong>它不是 Context 回放：</strong><code>/history</code> 为人类快速查看而设计，会忽略 system/tool、丢弃图片块并截断文本；ContextBuilder 的历史治理则必须维护 tool-call 协议和多模态语义，两者不可互换。</div>
+
+<h2 id="reading-section-05">帮助文本如何保持渠道复用</h2><div class="architecture"><div class="arch-layer"><div class="arch-label">单一元数据</div><div class="arch-items"><span class="arch-item">BUILTIN_COMMAND_SPECS</span></div></div><div class="arch-layer"><div class="arch-label">文本消费者</div><div class="arch-items"><span class="arch-item">/help Handler</span><span class="arch-item">Telegram _on_help</span></div></div><div class="arch-layer"><div class="arch-label">结构化消费者</div><div class="arch-items"><span class="arch-item">/api/commands</span><span class="arch-item">WebUI palette</span></div></div></div>
+
+<h2 id="reading-section-06">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py:132" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">builtin.py · 站内摘录</a></td><td>/status 聚合</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/helpers.py" data-source-label="utils/helpers.py:435" title="nanobot/utils/helpers.py 的所属模块讲解；该文件未单独逐行收录">utils/helpers.py · 模块讲解</a></td><td>状态文本与 Context 百分比</td></tr><tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py:392" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">builtin.py · 站内摘录</a></td><td>历史裁剪、格式化和 Handler</td></tr><tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-473" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py:452" title="阅读 nanobot/command/builtin.py:473–487 的代表性摘录与讲解">builtin.py · 站内摘录</a></td><td>/help 与共享文本</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">/status 为什么要把 search usage 当成 best effort？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>搜索配额来自可选外部 Provider，可能网络慢、缺 key 或报错；它不是 Agent 健康状态的必要部分。Handler 用 <code>suppress(Exception)</code> 包裹，失败仍立即返回模型、上下文和任务状态。</p></div></details></li><li><span class="review-question">/history 为什么不能代替模型的 Session replay？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它只展示最近 1–50 条 user/assistant 文本，每条还截到 200 字并跳过 tool/system；模型 replay 会考虑 consolidated offset、摘要、工具协议、token budget 和多模态占位，两者用途不同。</p></div></details></li><li><span class="review-question">同一个 /status Handler 为什么属于两个 tier？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>priority 注册让忙碌 Session 无需等锁即可查看状态；exact 注册保证空闲 Turn 内的统一 COMMAND 状态也能匹配，并满足 <code>is_dispatchable_command()</code> 对非 priority 直派的契约。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">09.05 · 查询命令</footer></div></main></div></body></html>

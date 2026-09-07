@@ -1,0 +1,50 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08.01 · Subagent 架构与边界 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="subagent-system" data-page="architecture-boundaries">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Subagent · architecture</p><h1>四个对象组成的单层委派架构</h1><p class="lead">Subagent 功能没有复制 AgentLoop。它复用 Tool 和 AgentRunner 两个通用抽象，只新增一个模型可见入口与一个后台任务管理器，从而把“产品层会话”留在父 Agent。</p><div class="meta-row"><span class="chip">SpawnTool</span><span class="chip">SubagentManager</span><span class="chip">AgentRunSpec</span><span class="chip">MessageBus</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">对象职责从外到内</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>API to model</small><b>SpawnTool</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>lifecycle</small><b>Manager</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>execution</small><b>AgentRunner</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>capabilities</small><b>ToolRegistry</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>integration</small><b>MessageBus</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>SpawnTool 是父 Agent 的委派 API</h3><p>它把自然语言任务和可选标签暴露给模型，注入当前请求的路由身份，并在并发已满时返回可恢复的 Tool 错误文本。</p></div>
+  <div data-step-panel><h3>SubagentManager 拥有后台任务</h3><p>负责生成 id、登记运行状态、创建 asyncio task、构造子运行环境、分类完成/失败、发布结果以及按父 session 取消。</p></div>
+  <div data-step-panel><h3>AgentRunner 提供同一套认知循环</h3><p>子 Agent 和主 Agent 都执行 Provider → tool call → result → Provider 的迭代，只是传入的 AgentRunSpec、Prompt 和 ToolRegistry 不同。</p></div>
+  <div data-step-panel><h3>Registry 决定能力边界</h3><p>每次子任务重新构建 scope=subagent 的 Registry，没有父 Agent 的控制类工具，因而从结构上阻止递归委派和直接发消息。</p></div>
+  <div data-step-panel><h3>MessageBus 把子结果带回产品层</h3><p>SubagentManager 不直接操作 Session 或 Channel；它只发布一个内部 InboundMessage，父 AgentLoop 负责恢复会话、再次推理、保存和回复。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">AgentLoop 在构造期装配 Manager</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:340–357</span><span>共享资源注入</span></div><pre><code>self.context = ContextBuilder(workspace, ...)
+self.tools = ToolRegistry()
+self.runner = AgentRunner(provider)
+self.subagents = SubagentManager(
+    provider=provider,
+    workspace=workspace,
+    bus=bus,
+    model=self.model,
+    tools_config=_tc,
+    max_tool_result_chars=self.max_tool_result_chars,
+    restrict_to_workspace=restrict_to_workspace,
+    disabled_skills=disabled_skills,
+    max_iterations=self.max_iterations,
+)</code></pre></div>
+<p>随后 AgentLoop 把 Manager 放进主 ToolContext，ToolLoader 创建 SpawnTool。依赖方向是 <code>AgentLoop → Manager → AgentRunner</code>；子执行器不会反向持有整个 AgentLoop。</p>
+
+<h2 id="reading-section-03">为什么 Subagent 没有自己的 AgentLoop</h2><div class="compare-grid"><div class="card"><h3>AgentLoop 的产品职责</h3><p>消费 MessageBus、session lock、pending queue、Session/Memory、ContextBuilder、渠道流式输出、自动压缩与命令系统。</p></div><div class="card"><h3>Subagent 只需要执行职责</h3><p>一个 System Prompt、一条 task user message、受限工具和 AgentRunner。结果交回父 Agent 后，产品职责只执行一次。</p></div></div>
+
+<h2 id="reading-section-04">生命周期层级</h2><table class="source-table"><thead><tr><th>对象</th><th>创建时间</th><th>结束/清理</th></tr></thead><tbody>
+  <tr><td>SubagentManager</td><td>AgentLoop 构造时</td><td>随 AgentLoop 进程生命周期</td></tr>
+  <tr><td>Manager.runner</td><td>Manager 构造时</td><td>Provider 可热切换，实例长期复用</td></tr>
+  <tr><td>background task</td><td>每次 spawn</td><td>完成、异常或按 session 取消</td></tr>
+  <tr><td>ToolRegistry/FileStates</td><td>每次 <code>_run_subagent</code></td><td>该次执行结束后释放</td></tr>
+  <tr><td>SubagentStatus</td><td>spawn 登记时</td><td>task done callback 立即从活动表删除</td></tr>
+</tbody></table>
+
+<div class="callout"><strong>边界结论：</strong>Subagent 是“短期执行单元”，不是“第二个用户身份”。它没有独立 chat_id、SessionManager 或长期记忆；父 session key 仅用于结果路由、等待计数和取消归属。</div>
+
+<h2 id="reading-section-05">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-770" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:265" title="阅读 nanobot/agent/loop.py:770–833 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>AgentLoop 构造与 Manager 装配</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py:68" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">subagent.py · 站内摘录</a></td><td>Manager 状态与依赖</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-189" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:100" title="阅读 nanobot/agent/runner.py:189–232 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>无产品状态的共享执行器</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/tools/spawn.py" data-source-label="spawn.py:23" title="nanobot/agent/tools/spawn.py 的所属模块讲解；该文件未单独逐行收录">spawn.py · 模块讲解</a></td><td>委派入口</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">为什么子任务复用 AgentRunner 而不是再创建 AgentLoop？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>子任务已有明确 task、父 Session 身份和完成回调，只需要模型工具迭代。复用 Runner 可共享重试/checkpoint/工具协议，又避免创建 MessageBus、命令、普通 Session 状态机和渠道响应。</p></div></details></li><li><span class="review-question">哪个对象拥有 asyncio task？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>SubagentManager</code> 用 <code>asyncio.create_task()</code> 创建并在其运行表中持有 task；SpawnTool 只请求创建并立即拿到 task id，不拥有后台协程。</p></div></details></li><li><span class="review-question">父 session key 在 Subagent 中承担哪些职责，又不承担哪些职责？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它用于并发配额、按父会话取消、结果回注和持久化路由；子 Agent 不把它当自己的可见对话历史，也不直接写父 Session，自己的 Runner messages 是独立运行轨迹。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">07.01 · Subagent 架构与边界</footer></div></main></div></body></html>

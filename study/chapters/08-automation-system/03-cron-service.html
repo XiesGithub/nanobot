@@ -1,0 +1,77 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08 · CronService 调度与持久化 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="automation-system" data-page="cron-service">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-cron-service-py-31" data-original-href="../../../nanobot/cron/service.py" data-source-label="CronService 源码" title="阅读 nanobot/cron/service.py:31–57 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Automation · scheduler</p><h1>CronService：单定时器驱动的持久化调度器</h1><p class="lead">CronService 不为每个 Job 常驻一个协程。它寻找最早 next run，用一个 timer task 醒来，顺序执行所有到期任务，保存状态，再重新 arm 下一次定时器。</p><div class="meta-row"><span class="chip">one timer task</span><span class="chip">sequential due jobs</span><span class="chip">atomic store</span><span class="chip">action log</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">调度状态机</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>start</small><b>加载与重算</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>arm</small><b>等待最早任务</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>tick</small><b>找出 due jobs</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>run</small><b>逐个执行</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>save</small><b>保存并重排</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3><code>start()</code></h3><p>加载 Store、合并离线 action、重新计算所有 enabled Job 的 next run，原子保存，然后 arm timer。首轮遇到损坏 Store 会拒绝启动。</p></div>
+  <div data-step-panel><h3><code>_arm_timer()</code></h3><p>取消旧 timer，计算所有 Job 中最早的 next run。睡眠上限默认 5 分钟，即使没有近期任务也会周期醒来，以发现外部修改。</p></div>
+  <div data-step-panel><h3><code>_on_timer()</code></h3><p>每次 tick 重新加载磁盘，再筛选 <code>enabled &amp;&amp; now &gt;= next_run</code> 的任务。timer active 期间保持同一内存 Store，避免 list/reload 覆盖执行中的状态。</p></div>
+  <div data-step-panel><h3><code>_execute_job()</code></h3><p>按 due_jobs 顺序逐个 <code>await on_job(job)</code>，不是并行 gather。异常被捕获并写进 Job state，不会阻止状态收尾。</p></div>
+  <div data-step-panel><h3>状态收尾</h3><p>追加 RunRecord（最多 20 条）；at Job 删除或禁用，every/cron 重新计算 next run；统一保存后重新 arm timer。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="code-block"><div class="code-head"><span>cron/service.py:394 · timer 核心</span><span>概念摘录</span></div><pre><code>due_jobs = [
+    job for job in store.jobs
+    if job.enabled and job.state.next_run_at_ms
+    and now &gt;= job.state.next_run_at_ms
+]
+
+for job in due_jobs:
+    await self._execute_job(job)   # 顺序执行
+
+self._save_store()
+self._arm_timer()</code></pre></div>
+
+<h2 id="reading-section-02">执行状态怎样更新</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">开始</div><div class="arch-items"><span class="arch-item">start_ms</span><span>记录实际开始时间</span></div></div>
+  <div class="arch-layer"><div class="arch-label">回调成功</div><div class="arch-items"><span class="arch-item">last_status = ok</span><span class="arch-item">last_error = None</span></div></div>
+  <div class="arch-layer"><div class="arch-label">回调异常</div><div class="arch-items"><span class="arch-item">last_status = error</span><span class="arch-item">last_error = str(exception)</span></div></div>
+  <div class="arch-layer"><div class="arch-label">完成</div><div class="arch-items"><span class="arch-item">duration_ms</span><span class="arch-item">run_history[-20:]</span><span class="arch-item">next_run / delete</span></div></div>
+</div>
+
+<h2 id="reading-section-03">持久化文件</h2><div class="code-block"><div class="code-head"><span>workspace/cron/</span><span>服务运行状态</span></div><pre><code>cron/
+├── jobs.json          # 完整 CronStore 快照
+├── jobs.json.tmp      # 原子写期间临时出现
+├── jobs.json.corrupt-&lt;timestamp&gt;  # 损坏文件保全
+└── action.jsonl       # 服务未运行时记录 add/del/update</code></pre></div>
+
+<h2 id="reading-section-04">为什么同时有 jobs.json 和 action.jsonl</h2><div class="compare-grid">
+  <div class="card flat"><h3>服务运行中</h3><p>add/remove/update 直接加载最新 Store、修改快照、原子保存并重新 arm timer。</p></div>
+  <div class="card flat"><h3>服务未运行</h3><p>操作追加到 <code>action.jsonl</code>。下次 <code>_load_store()</code> 用 job id 合并 add/update/del，运行中合并完成后清空 action log 并保存。</p></div>
+</div><p><code>FileLock</code> 保护 action log 的追加和合并，适配同一路径可能被多个 CronService 实例读写的情形。Store 本身每次操作都会重新从磁盘加载，以吸收外部实例的变化。</p>
+
+<h2 id="reading-section-05">原子写与损坏保护</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>写 tmp</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>flush + fsync</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>os.replace</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>fsync directory</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>完整快照写入临时文件</h3><p>目的文件不会在序列化到一半时被截断。</p></div>
+  <div data-step-panel><h3>强制刷新文件内容</h3><p>先 flush Python buffer，再 fsync 文件描述符。</p></div>
+  <div data-step-panel><h3>原子替换</h3><p><code>os.replace(tmp, jobs.json)</code> 让读者看到旧完整文件或新完整文件，而不是半份 JSON。</p></div>
+  <div data-step-panel><h3>让 rename 持久</h3><p>非 Windows 平台再 fsync 父目录；异常时删除 tmp 并保留原文件。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="callout warning"><strong>损坏文件不会被当成空列表：</strong>解析失败时先把文件改名为 <code>.corrupt-&lt;ts&gt;</code>。首次启动直接抛错；运行过程中则继续使用最近的良好内存快照，避免下一次 save 把所有 Job 清空。</div>
+
+<h2 id="reading-section-06">公共操作与系统任务保护</h2><table class="source-table"><thead><tr><th>API</th><th>运行中</th><th>未运行</th><th>system_event</th></tr></thead><tbody>
+  <tr><td><code>add_job</code></td><td>保存并 re-arm</td><td>append add action</td><td>通过专用 register_system_job</td></tr>
+  <tr><td><code>remove_job</code></td><td>保存并 re-arm</td><td>append del action</td><td>返回 protected</td></tr>
+  <tr><td><code>update_job</code></td><td>重新计算 next run</td><td>append update action</td><td>返回 protected</td></tr>
+  <tr><td><code>run_job</code></td><td colspan="2">可手动执行；force=false 时不运行 disabled Job</td><td>允许内部调用</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-07">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#guide-nanobot-cron-service-py-31" data-original-href="../../../nanobot/cron/service.py" data-source-label="cron/service.py:95" title="阅读 nanobot/cron/service.py:31–57 的代表性摘录与讲解">cron/service.py · 站内摘录</a></td><td>Store 加载、字段兼容与损坏备份</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-cron-service-py-31" data-original-href="../../../nanobot/cron/service.py" data-source-label="cron/service.py:177" title="阅读 nanobot/cron/service.py:31–57 的代表性摘录与讲解">cron/service.py · 站内摘录</a></td><td>action.jsonl 合并</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-cron-service-py-355" data-original-href="../../../nanobot/cron/service.py" data-source-label="cron/service.py:240" title="阅读 nanobot/cron/service.py:355–418 的代表性摘录与讲解">cron/service.py · 站内摘录</a></td><td>Store 序列化与原子写</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-cron-service-py-355" data-original-href="../../../nanobot/cron/service.py" data-source-label="cron/service.py:328" title="阅读 nanobot/cron/service.py:355–418 的代表性摘录与讲解">cron/service.py · 站内摘录</a></td><td>启动、重算与拒绝损坏 Store</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-cron-service-py-355" data-original-href="../../../nanobot/cron/service.py" data-source-label="cron/service.py:372" title="阅读 nanobot/cron/service.py:355–418 的代表性摘录与讲解">cron/service.py · 站内摘录</a></td><td>单 timer 的唤醒策略</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-cron-service-py-420" data-original-href="../../../nanobot/cron/service.py" data-source-label="cron/service.py:420" title="阅读 nanobot/cron/service.py:420–459 的代表性摘录与讲解">cron/service.py · 站内摘录</a></td><td>执行记录与一次性任务收尾</td></tr>
+</tbody></table>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">如果三个 Job 同时 due，它们是并发还是顺序执行？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>顺序执行。<code>_on_timer()</code> 收集 due_jobs 后使用 <code>for job in due_jobs: await _execute_job(job)</code>，没有为每个 Job 创建并发 task。</p></div></details></li><li><span class="review-question"><code>max_sleep_ms</code> 为什么不会让两秒后到期的任务延迟五分钟？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>每次 arm 都取所有启用 Job 中最早的 <code>next_run_at_ms</code>，sleep 为 <code>min(max_sleep_ms, next_wake-now)</code>。五分钟只是无近期任务时的最长轮询，不覆盖更早 deadline。</p></div></details></li><li><span class="review-question">jobs.json 损坏时为什么不能简单返回空 Store？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>损坏可能是热写入或局部故障；当作空 Store 再保存会永久抹掉仍在内存中的已知正确 Job。实现保留 known-good snapshot并生成 corrupt 备份，要求人工检查。</p></div></details></li><li><span class="review-question">服务未启动时 add_job 为什么不直接覆盖 jobs.json？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>未启动实例可能与正在运行的 Gateway 跨进程共享 store。add/update/delete 先追加 action journal，由持有 timer 的服务合并并原子保存，直接覆盖会丢掉另一进程的更新。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">08.03 · CronService 调度与持久化</footer></div></main></div></body></html>

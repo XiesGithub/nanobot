@@ -1,0 +1,58 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="nanobot Subagent 子代理系统源码学习章节"><title>07 · Subagent 子代理系统 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="subagent-system" data-page="overview">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="核心源码" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Chapter 07 · delegation</p><h1>Subagent：在一个主 Agent Turn 中委派独立任务</h1><p class="lead">nanobot 的 Subagent 不是另一套服务，也不是拥有长期会话的机器人。它是主模型通过 <code>spawn</code> Tool 创建的后台 <code>AgentRunner</code>：拿到聚焦任务、受限工具和独立消息列表，完成后再把结果注入父会话。</p><div class="meta-row"><span class="chip">8 个学习页面</span><span class="chip">SpawnTool</span><span class="chip">SubagentManager</span><span class="chip">isolated AgentRunner</span><span class="chip">result injection</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<div class="callout"><strong>核心心智模型：</strong>主 Agent 决定“是否委派以及委派什么”；SpawnTool 保存父请求的路由身份；SubagentManager 管理后台 task 和隔离运行环境；Subagent 自己完成模型—工具循环；结果通过 MessageBus 回到父 Agent，由父 Agent 结合原对话自然回复用户。</div>
+
+<h2 id="reading-section-01">一条委派任务的完整链路</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>main LLM</small><b>调用 spawn</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>manager</small><b>创建后台 task</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>subagent</small><b>独立 Runner</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>bus</small><b>system result</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>parent</small><b>续跑并回复</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>模型显式调用 <code>spawn(task, label)</code></h3><p>这仍是一条普通 Tool call。主模型负责把可独立执行的工作描述成聚焦任务，SpawnTool 不自动拆解原请求。</p></div>
+  <div data-step-panel><h3>先登记，再异步执行</h3><p>Manager 生成 8 位 task_id、SubagentStatus 和 session→task 关系，用 <code>asyncio.create_task</code> 启动执行，并立即向主模型返回 started 文本。</p></div>
+  <div data-step-panel><h3>每次运行重新构建能力</h3><p>Subagent 使用专用 System Prompt、只有 system+task 的初始消息，以及 scope=subagent 的新 ToolRegistry；它不继承父会话历史。</p></div>
+  <div data-step-panel><h3>结果伪装成内部入站事件</h3><p>完成或失败结果被套入 announcement 模板，形成 <code>channel="system"</code>、<code>sender_id="subagent"</code> 的 InboundMessage，并带父 session key。</p></div>
+  <div data-step-panel><h3>父 Agent 才面向用户表达</h3><p>结果若及时到达，进入当前 Turn 的 pending queue；若父 Turn 已结束，则触发新的 system Turn。两条路径最终都让主模型总结，而不是让 Subagent 直接发渠道消息。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">组件关系</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">父 Agent</div><div class="arch-items"><span class="arch-item">AgentLoop</span><span class="arch-item">main AgentRunner</span><span class="arch-item">shared ToolRegistry</span></div></div>
+  <div class="arch-layer"><div class="arch-label">委派入口</div><div class="arch-items"><span class="arch-item">SpawnTool</span><span>task + label</span><span>RequestContext → origin</span></div></div>
+  <div class="arch-layer"><div class="arch-label">生命周期</div><div class="arch-items"><span class="arch-item">SubagentManager</span><span class="arch-item">SubagentStatus</span><span>running/session maps</span></div></div>
+  <div class="arch-layer"><div class="arch-label">子执行器</div><div class="arch-items"><span class="arch-item">focused prompt</span><span class="arch-item">fresh tools</span><span class="arch-item">AgentRunner.run</span></div></div>
+  <div class="arch-layer"><div class="arch-label">回传桥</div><div class="arch-items"><span class="arch-item">subagent_announce.md</span><span class="arch-item">MessageBus inbound</span><span class="arch-item">pending injection/system turn</span></div></div>
+</div>
+
+<h2 id="reading-section-03">共享什么，隔离什么</h2><table class="source-table"><thead><tr><th>维度</th><th>共享</th><th>隔离/缺失</th></tr></thead><tbody>
+  <tr><td>模型</td><td>同一个 Provider 与当前 model</td><td>独立 AgentRunner 调用过程和局部 messages</td></tr>
+  <tr><td>文件</td><td>同一个 workspace，副作用彼此可见</td><td>每次 spawn 新建 FileStates 与工具实例</td></tr>
+  <tr><td>上下文</td><td>时间、workspace、可用 Skills 摘要</td><td>不复制父 Session、Memory、当前对话或父 System Prompt</td></tr>
+  <tr><td>能力</td><td>文件、搜索、Shell、Web 等 scope=subagent 工具</td><td>没有 message、spawn、cron、ask_user、MyTool、MCP 等</td></tr>
+  <tr><td>路由</td><td>MessageBus 与父 session/channel 身份</td><td>没有自己的 Channel 或长期 Session</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-04">本章路线</h2><div class="topic-grid">
+  <a class="topic-card" href="01-architecture-boundaries.html"><b>01 · 架构与边界</b><span>四个核心对象、生命周期与非目标</span></a>
+  <a class="topic-card" href="02-spawn-context.html"><b>02 · SpawnTool 与父请求身份</b><span>Schema、ContextVar、并发门槛和 started 结果</span></a>
+  <a class="topic-card" href="03-isolated-runtime.html"><b>03 · 隔离运行环境</b><span>Prompt、Skills、Tool scope、FileStates</span></a>
+  <a class="topic-card" href="04-execution-observability.html"><b>04 · 执行与可观测性</b><span>AgentRunSpec、Hook、Status、错误结果</span></a>
+  <a class="topic-card" href="05-result-injection.html"><b>05 · 结果回注父 Agent</b><span>announcement、pending queue、system Turn</span></a>
+  <a class="topic-card" href="06-persistence-lifecycle.html"><b>06 · 持久化与生命周期</b><span>去重、线程路由、取消和清理</span></a>
+  <a class="topic-card" href="07-config-safety.html"><b>07 · 配置、安全与限制</b><span>资源边界、已知缺口与测试地图</span></a>
+</div>
+
+<h2 id="reading-section-05">核心源码学习地图（站内阅读）</h2><table class="source-table"><thead><tr><th>文件</th><th>职责</th><th>关键入口</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/tools/spawn.py" data-source-label="tools/spawn.py" title="nanobot/agent/tools/spawn.py 的所属模块讲解；该文件未单独逐行收录">tools/spawn.py · 模块讲解</a></td><td>主模型可见的委派 Tool 与请求路由上下文</td><td><code>SpawnTool.execute</code></td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="agent/subagent.py" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">agent/subagent.py · 站内摘录</a></td><td>任务登记、隔离执行、状态、结果 announcement 与取消</td><td><code>SubagentManager</code></td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-770" data-original-href="../../../nanobot/agent/loop.py" data-source-label="agent/loop.py" title="阅读 nanobot/agent/loop.py:770–833 的代表性摘录与讲解">agent/loop.py · 站内摘录</a></td><td>Manager 装配、等待完成、结果注入、system Turn 与持久化</td><td><code>_drain_pending</code>、<code>_process_system_message</code></td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-189" data-original-href="../../../nanobot/agent/runner.py" data-source-label="agent/runner.py" title="阅读 nanobot/agent/runner.py:189–232 的代表性摘录与讲解">agent/runner.py · 站内摘录</a></td><td>主/子 Agent 复用的模型—工具循环与注入检查点</td><td><code>AgentRunner.run</code></td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/templates/agent/subagent_system.md" data-source-label="subagent_system.md" title="nanobot/templates/agent/subagent_system.md 的所属模块讲解；该文件未单独逐行收录">subagent_system.md · 模块讲解</a></td><td>聚焦任务、workspace、Skills 与不可信内容规则</td><td>Subagent System Prompt</td></tr>
+</tbody></table>
+
+<div class="callout warning"><strong>不是递归 Agent 团队：</strong>Subagent 的 Registry 不包含 spawn，所以它不能继续派生子代理；默认并发数还是 1。这个设计优先控制成本、递归爆炸和消息路由复杂度。</div>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">08 · Subagent 子代理系统 · 章节总览</footer></div></main></div></body></html>

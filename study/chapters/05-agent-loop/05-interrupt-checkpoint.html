@@ -1,0 +1,72 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>05 · 中断、Ask User 与 Checkpoint | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="agent-loop" data-page="interrupt-checkpoint">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="恢复源码" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Agent Loop · interruption</p><h1>中断、Ask User 与 Checkpoint</h1><p class="lead">中断有两种完全不同的语义：<code>/stop</code> 是用户要求取消正在运行的 asyncio task；<code>ask_user</code> 是 Agent 主动暂停并请求信息。Checkpoint 让两者都不会破坏 Session 的消息协议。</p><div class="meta-row"><span class="chip">/stop</span><span class="chip">AskUserInterrupt</span><span class="chip">runtime_checkpoint</span><span class="chip">pending_user_turn</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">取消与暂停不能混为一谈</h2><div class="compare-grid">
+  <div class="card"><h3><code>/stop</code>：外部取消</h3><p>CommandRouter 把它当优先命令。Loop 从 <code>_active_tasks[key]</code> 取出所有未完成 task，调用 <code>cancel()</code> 并等待清理，同时取消该 Session 的子 Agent。</p></div>
+  <div class="card"><h3><code>ask_user</code>：受控暂停</h3><p>工具抛出继承自 <code>BaseException</code> 的 <code>AskUserInterrupt</code>。Runner 识别后以问题结束本 Turn，保留 assistant tool_call，下一条用户消息用于继续。</p></div>
+</div>
+
+<h2 id="reading-section-02">/stop 为什么能及时生效</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:692</span><span>取消主任务与子 Agent</span></div><pre><code>async def _cancel_active_tasks(self, key):
+    tasks = self._active_tasks.pop(key, [])
+    cancelled = sum(1 for task in tasks if not task.done() and task.cancel())
+    for task in tasks:
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+    sub_cancelled = await self.subagents.cancel_by_session(key)
+    return cancelled + sub_cancelled</code></pre></div>
+<p>主事件泵没有等待普通 Turn 完成，因此仍能消费 <code>/stop</code>。而 Runner 和工具执行都不吞掉 <code>asyncio.CancelledError</code>，取消信号可以沿调用栈返回 <code>_dispatch()</code> 的专门异常分支。</p>
+
+<h2 id="reading-section-03">三种运行时 Checkpoint</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>phase 1</small><b>awaiting_tools</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>phase 2</small><b>tools_completed</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>phase 3</small><b>final_response</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>模型已决定调用工具，工具尚未完成</h3><p>保存 assistant message 和全部 <code>pending_tool_calls</code>。若此刻取消，恢复逻辑为每个未完成调用生成明确的错误 tool result。</p></div>
+  <div data-step-panel><h3>工具结果已经齐全</h3><p>保存 assistant message、<code>completed_tool_results</code>，并把 pending 列表清空。即使下一次模型请求前崩溃，观察结果仍可恢复。</p></div>
+  <div data-step-panel><h3>最终 assistant 已生成</h3><p>保存最终 assistant message 且无工具结果。SAVE 完成后 checkpoint 被清除，真实 messages 已进入 Session。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-04">Checkpoint 写在哪里</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">Runner</div><div class="arch-items"><span class="arch-item">_emit_checkpoint(payload)</span><span>→ 调用 Spec 中的 callback</span></div></div>
+  <div class="arch-layer"><div class="arch-label">AgentLoop</div><div class="arch-items"><span class="arch-item">_set_runtime_checkpoint</span><span>→</span><span class="arch-item">session.metadata["runtime_checkpoint"]</span><span>→ sessions.save</span></div></div>
+  <div class="arch-layer"><div class="arch-label">恢复</div><div class="arch-items"><span class="arch-item">_restore_runtime_checkpoint</span><span>→ materialize 到 session.messages → 清 metadata</span></div></div>
+</div>
+<p>Checkpoint 放在 Session metadata，而不是直接追加 messages，是因为运行仍可能继续；过早写真实历史会在正常 SAVE 时造成重复。恢复时才将它“实体化”。</p>
+
+<h2 id="reading-section-05">恢复算法如何保持工具协议闭合</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:1595</span><span>恢复的核心形状</span></div><pre><code>restored_messages = [assistant_message]
+restored_messages.extend(completed_tool_results)
+for call in pending_tool_calls:
+    restored_messages.append({
+        "role": "tool",
+        "tool_call_id": call["id"],
+        "name": call["function"]["name"],
+        "content": "Error: Task interrupted before this tool finished.",
+    })
+
+# 找 existing tail 与 restored prefix 的最大重叠，避免重复追加
+session.messages.extend(restored_messages[overlap:])</code></pre></div>
+<ul class="number-list"><li><strong>已完成工具保留真实结果：</strong>用户不会因为取消丢掉已产生的文件、搜索或命令信息。</li><li><strong>未完成工具补错误结果：</strong>每个 assistant tool_call 都有对应 tool message，Provider 不会在下一轮拒绝孤立调用。</li><li><strong>最大尾部重叠去重：</strong>如果部分消息已经被其他路径保存，只追加未重叠后缀。</li><li><strong>最后清 metadata：</strong>同一个 checkpoint 不会在每次启动时重复恢复。</li></ul>
+
+<h2 id="reading-section-06">pending_user_turn 解决另一种崩溃窗口</h2><p>BUILD 阶段会尽早保存用户消息，并设置 <code>session.metadata["pending_user_turn"] = True</code>。如果程序在任何 checkpoint 产生前崩溃，下一次 RESTORE 发现历史以 user 结尾，就补一个 assistant 错误占位：</p>
+<div class="message-stack"><div class="message user"><span class="role">USER · 已提前持久化</span>请修改配置并运行测试</div><div class="message assistant"><span class="role">ASSISTANT · 恢复时补齐</span>Error: Task interrupted before a response was generated.</div></div>
+<p>这不是伪造正常回答，而是明确关闭未完成 Turn，使下一条用户输入不会紧接另一个 user message，保持历史角色结构可重放。</p>
+
+<h2 id="reading-section-07">Ask User 的消息语义</h2><div class="code-block"><div class="code-head"><span>agent/runner.py:285</span><span>询问优先于后续工具</span></div><pre><code>ask_index = next((i for i, tc in enumerate(tool_calls)
+                  if tc.name == "ask_user"), None)
+if ask_index is not None:
+    tool_calls = tool_calls[:ask_index + 1]
+
+# AskUserInterrupt 时：不追加 ask_user 的 tool result
+final_content = fatal_error.question
+stop_reason = "ask_user"</code></pre></div>
+<p>截断 ask_user 之后的工具调用非常关键：模型若同时计划“询问是否安装”与“执行安装”，运行时必须先停在询问。RESPOND 会从 assistant tool call 中提取 options，转换成渠道按钮；下一条用户回复再作为新 Turn 继续。</p>
+
+<div class="callout warning"><strong>Checkpoint 不是通用任务快照：</strong>它只保存恢复消息协议所需的 assistant/tool 边界，不序列化 Python 协程、工具内部状态或模型请求。因此未完成工具不会“从中间继续”，而是以明确失败结果结束。</div>
+
+<h2 id="reading-section-08">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="../09-slash-command-system/workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="command/builtin.py:100" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">command/builtin.py · 站内摘录</a></td><td>/stop 命令</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:692" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>主任务与子 Agent 取消</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/tools/ask.py" data-source-label="tools/ask.py:12" title="nanobot/agent/tools/ask.py 的所属模块讲解；该文件未单独逐行收录">tools/ask.py · 模块讲解</a></td><td>AskUserInterrupt 与工具实现</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-251" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:302" title="阅读 nanobot/agent/runner.py:251–312 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>工具前、工具后、最终响应 checkpoint</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1398" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1568" title="阅读 nanobot/agent/loop.py:1398–1445 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>metadata 写入与恢复</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1398" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1649" title="阅读 nanobot/agent/loop.py:1398–1445 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>仅 user 消息的恢复</td></tr></tbody></table>
+<h2 id="reading-section-09">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 checkpoint 不直接写入 session.messages？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>checkpoint 描述的是正在执行、可能尚不完整的临时协议状态。直接追加会与最终 SAVE 重复且可能留下孤立调用；AgentLoop 先放在 Session metadata，取消/恢复时再去重 materialize。</p></div></details></li><li><span class="review-question">工具执行中被取消后，未完成 tool call 怎样闭合？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>恢复逻辑保留已完成的真实 results，并为 <code>pending_tool_calls</code> 按 ID 合成“因中断未执行”的 tool result，从而让 assistant 声明的每个调用都有闭合响应。</p></div></details></li><li><span class="review-question">ask_user 为什么不能像普通工具一样追加 tool result 后继续？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>ask_user</code> 需要把选项转成渠道按钮并暂停当前推理，等待未来用户输入开启/恢复流程；若像普通工具立即追加 result，模型会在用户尚未作答时继续推理。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">05.05 · 中断、Ask User 与 Checkpoint</footer></div></main></div></body></html>

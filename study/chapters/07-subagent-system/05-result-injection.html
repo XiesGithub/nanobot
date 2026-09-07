@@ -1,0 +1,66 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08.05 · Subagent 结果回注 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="subagent-system" data-page="result-injection">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-loop-py-770" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py" title="阅读 nanobot/agent/loop.py:770–833 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Subagent · result delivery</p><h1>结果不是直接发给用户，而是重新成为父 Agent 的输入</h1><p class="lead">SubagentManager 将 task 与 result 包进一段“请自然总结”的内部消息，再发布到 inbound bus。父 Agent因此能结合原始用户目标、当前 Session 和渠道语气决定最终答复，而不是机械转发子结果。</p><div class="meta-row"><span class="chip">announcement template</span><span class="chip">system inbound</span><span class="chip">mid-turn injection</span><span class="chip">late system turn</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">先生成可供父模型理解的 announcement</h2><div class="code-block"><div class="code-head"><span>templates/agent/subagent_announce.md</span><span>内部交接协议</span></div><pre><code>[Subagent '{{ label }}' {{ status_text }}]
+
+Task: {{ task }}
+
+Result:
+{{ result }}
+
+Summarize this naturally for the user. Keep it brief (1-2 sentences).
+Do not mention technical details like "subagent" or task IDs.</code></pre></div>
+<p>这个模板同时保留“原委派目标”和“执行结果”，使父 Agent 能判断结果是否答非所问；最后两句则把技术性内部事件转换成面向用户的自然回复。</p>
+
+<h2 id="reading-section-02">回注事件携带的路由信息</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>render</small><b>task + result</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>identity</small><b>system/subagent</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>routing</small><b>session override</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>bus</small><b>publish inbound</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>branch</small><b>pending 或新 Turn</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>模板区分成功和失败</h3><p>status_text 是 completed successfully 或 failed，但两者都回到父 Agent；失败同样需要用户可见的解释或后续行动。</p></div>
+  <div data-step-panel><h3>这是内部消息，不是假装用户发言</h3><p>InboundMessage 使用 <code>channel="system"</code> 与 <code>sender_id="subagent"</code>，AgentLoop 可据此选择专用处理路径。</p></div>
+  <div data-step-panel><h3>session_key_override 指向父会话</h3><p>优先使用 spawn 时保存的 effective session key，兼容 unified session 和 Slack thread；缺失时才回退到 channel:chat_id。</p></div>
+  <div data-step-panel><h3>仍通过同一个 MessageBus</h3><p>Manager 不直接调用父 Runner，也不直接写 Session。总线让结果与普通 follow-up 使用同一并发和路由机制。</p></div>
+  <div data-step-panel><h3>是否仍有 pending queue 决定后半程</h3><p>父 Turn 仍活跃时进入 injection；父 Turn 已结束或等待超时后，则像新消息一样创建独立 system Turn。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">Manager 发布的 InboundMessage</h2><div class="code-block"><div class="code-head"><span>agent/subagent.py:253–274</span><span>内部事件信封</span></div><pre><code>override = origin.get("session_key") or f"{origin['channel']}:{origin['chat_id']}"
+metadata = {
+    "injected_event": "subagent_result",
+    "subagent_task_id": task_id,
+}
+if origin_message_id:
+    metadata["origin_message_id"] = origin_message_id
+
+msg = InboundMessage(
+    channel="system",
+    sender_id="subagent",
+    chat_id=f"{origin['channel']}:{origin['chat_id']}",
+    content=announce_content,
+    session_key_override=override,
+    metadata=metadata,
+)
+await self.bus.publish_inbound(msg)</code></pre></div>
+
+<h2 id="reading-section-04">路径 A：在父 Turn 内注入</h2><div class="architecture"><div class="arch-layer"><div class="arch-label">父任务仍在</div><div class="arch-items"><span class="arch-item">pending queue 存在</span><span>← AgentLoop.run 收到 system result</span></div></div><div class="arch-layer"><div class="arch-label">等待机制</div><div class="arch-items"><span class="arch-item">_drain_pending</span><span>最多等 300s</span><span>每批最多 3 条</span></div></div><div class="arch-layer"><div class="arch-label">Runner</div><div class="arch-items"><span class="arch-item">转成 role=user</span><span>→ append/merge</span><span>→ 下一 iteration</span></div></div><div class="arch-layer"><div class="arch-label">用户</div><div class="arch-items"><span class="arch-item">父 Agent最终答复</span></div></div></div>
+<p>主 AgentRunner 在工具执行后、最终文本后、错误后等检查点调用 injection callback。若队列为空但同 session 仍有 Subagent，callback 会阻塞等待第一条结果；这就是“spawn 后父 Turn 没有马上结束”的原因。</p>
+
+<h2 id="reading-section-05">路径 B：父 Turn 结束后再触发</h2><div class="architecture"><div class="arch-layer"><div class="arch-label">结果较晚</div><div class="arch-items"><span class="arch-item">没有 pending queue</span><span>→ _dispatch(system msg)</span></div></div><div class="arch-layer"><div class="arch-label">system path</div><div class="arch-items"><span class="arch-item">_process_system_message</span><span>→ 恢复/压缩父 Session</span><span>→ 持久化结果</span></div></div><div class="arch-layer"><div class="arch-label">新主循环</div><div class="arch-items"><span class="arch-item">build_messages</span><span>→ AgentRunner</span><span>→ OutboundMessage</span></div></div></div>
+<p>这条路径仍会调用主模型，因此用户收到的是结合会话后的总结。它还会执行 Session 保存、Context 治理和后台 consolidation，行为上相当于一次内部触发的新 Turn。</p>
+
+<h2 id="reading-section-06">注入的限流</h2><table class="source-table"><thead><tr><th>限制</th><th>当前值</th><th>作用</th></tr></thead><tbody>
+  <tr><td>每次 drain</td><td>最多 3 条</td><td>防止一次向 Context 塞入过多 follow-up</td></tr>
+  <tr><td>每 Turn 注入周期</td><td>最多 5 次</td><td>阻止持续注入导致主 Runner 永不结束</td></tr>
+  <tr><td>等待一次结果</td><td>300 秒</td><td>在后台任务与用户响应时延之间设上界</td></tr>
+  <tr><td>角色连续性</td><td>相邻 user 合并</td><td>保持 Provider 可接受的消息序列</td></tr>
+</tbody></table>
+
+<div class="callout warning"><strong>路由语义：</strong>回注消息的 transport channel 是 system，而真实目标渠道编码在 chat_id 与 origin 中。任何改动如果丢失 session_key_override，结果可能进入新会话、错过父 pending queue，或失去 Slack thread 归属。</div>
+
+<h2 id="reading-section-07">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-subagent-py-232" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py:232" title="阅读 nanobot/agent/subagent.py:232–275 的代表性摘录与讲解">subagent.py · 站内摘录</a></td><td>announcement 和 system InboundMessage</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/templates/agent/subagent_announce.md" data-source-label="subagent_announce.md" title="nanobot/templates/agent/subagent_announce.md 的所属模块讲解；该文件未单独逐行收录">subagent_announce.md · 模块讲解</a></td><td>父模型交接指令</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-770" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:770" title="阅读 nanobot/agent/loop.py:770–833 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>等待和 pending drain</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-189" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:124" title="阅读 nanobot/agent/runner.py:189–232 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>注入合并与周期限制</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-892" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1103" title="阅读 nanobot/agent/loop.py:892–934 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>晚到结果的 system Turn</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">Subagent 为什么不直接发布 OutboundMessage？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Subagent 不拥有稳定的 channel/chat 投递语义，也不能决定父模型是否要综合结果。它发布带父 origin 的内部 announcement，让 AgentLoop 选择注入、续跑、保存和最终用户回复。</p></div></details></li><li><span class="review-question">哪一个条件决定结果走同 Turn 注入还是新 system Turn？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>父 Session 当前仍有活动 Runner 且 injection callback/pending drain 能在等待窗口内接收时走同 Turn；活动 Turn 已结束或无法注入时，announcement 作为带 override 的 system InboundMessage 开启新 Turn。</p></div></details></li><li><span class="review-question">session_key_override 对 unified session 有什么意义？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它强制 system announcement 继续使用原父 Session 的历史，即使消息的 channel/chat 为内部 subagent 路由；统一会话模式下不会意外落到新的 <code>system:...</code> 会话。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">07.05 · Subagent 结果回注</footer></div></main></div></body></html>

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="nanobot 内部原理多章学习手册">
+  <title>nanobot 内部原理学习手册</title>
+  <link rel="stylesheet" href="assets/study.css">
+  <link rel="stylesheet" href="assets/navigation.css">
+  <script defer src="assets/catalog.js"></script>
+  <script defer src="assets/navigation.js"></script>
+  <script defer src="assets/study.js"></script>
+</head>
+<body data-study-root="." data-page="home">
+  <header class="site-header">
+    <a class="brand" href="index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a>
+    <div class="header-actions"><a class="button" href="#learning-path">学习路线</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" data-study-sidebar></aside>
+    <main class="content"><div class="content-inner">
+      <select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select>
+      <section class="hero">
+        <p class="eyebrow">nanobot internals</p>
+        <h1>读懂 Agent，<br>再亲手实现一个</h1>
+        <p class="lead">以 nanobot 为案例，从消息、模型和工具的最小闭环，走到会话、记忆、子代理和自动化。关键源码、数据流程与设计练习都在手册内，读到哪里，就能在这里推演并验证。</p>
+        <div class="meta-row"><span class="chip">11 章 · 概念到实作与面试</span><span class="chip">真实源码精讲</span><span class="chip">静态离线阅读</span><span class="chip">40 道项目面试题</span></div>
+        <div class="learning-links"><a class="button primary" href="#learning-path">按能力路线开始</a><a class="button" href="chapters/10-build-your-agent/index.html">先运行最小 Agent</a><a class="button" href="chapters/11-interview/index.html">面试练习与模块复习</a></div>
+      </section>
+
+      <div class="callout"><strong>如何使用：</strong>每章先读专题页建立概念，再读“源码精讲与设计实作”，对照图与原文手工演算，最后完成实现任务。源码地图直接打开手册内讲解。你只需具备 Python 函数、类、字典、异常和基本 async/await 知识；运行第10章需要 Python 3.11，阅读本书只需要浏览器。</div>
+
+      <h2 id="learning-path">从阅读到独立实现的五个里程碑</h2>
+      <table class="source-table"><thead><tr><th>顺序与阅读入口</th><th>你要交付什么</th><th>过关信号</th></tr></thead><tbody>
+        <tr><td>① <a href="chapters/01-request-lifecycle/workshop.html">消息全链路</a> → <a href="chapters/02-llm-provider-gateway/workshop.html">Provider 契约</a></td><td>画出一条用户消息跨过哪些边界；写出统一模型响应结构</td><td>能区分 request ID、session key、tool call ID；更换 Provider 不改变 Runner</td></tr>
+        <tr><td>② <a href="chapters/05-agent-loop/workshop.html">Runner</a> → <a href="chapters/06-tools-mcp-extensions/workshop.html">工具</a> → <a href="chapters/10-build-your-agent/index.html">运行最小项目</a></td><td>实现模型→工具→观察→最终答复的受限循环</td><td>合法调用完成往返，非法参数不执行工具，迭代用尽可观察地停止</td></tr>
+        <tr><td>③ <a href="chapters/03-memory-system/workshop.html">会话与记忆</a> → <a href="chapters/04-context-management/workshop.html">上下文</a></td><td>持久化事实、构建有预算的模型输入副本</td><td>两会话不串数据；重启可续聊；裁剪后工具消息仍成对</td></tr>
+        <tr><td>④ <a href="chapters/07-subagent-system/workshop.html">子代理</a> → <a href="chapters/08-automation-system/workshop.html">自动化</a> → <a href="chapters/09-slash-command-system/workshop.html">命令</a></td><td>给后台任务设计归属、结果回注、取消与确定性控制接口</td><td>结果回到正确父会话；调度状态可解释；命令不需要模型猜测</td></tr>
+        <tr><td>⑤ <a href="chapters/10-build-your-agent/index.html">综合实作与扩展验收</a></td><td>为自己的需求写模块接口、状态图和失败测试，修改教学项目</td><td>可以独立说明每个状态由谁拥有、何时持久化，以及失败后是否允许重试</td></tr>
+      </tbody></table>
+
+      <h2 id="system-flow">一条消息如何成为一次行动</h2>
+      <div class="diagram-scroll"><svg class="learning-diagram" viewBox="0 0 940 440" role="img" aria-labelledby="system-title system-desc" xmlns="http://www.w3.org/2000/svg">
+        <title id="system-title">Agent 的数据闭环与状态边界</title><desc id="system-desc">Channel 把用户输入交给应用编排层，编排读取会话并构建上下文，Runner 调用 Provider。工具请求交给 Registry 和 Tool，结果携带相同调用 ID 回到 Runner。最终回答由编排层保存并发回用户。模型和工具错误进入有预算的重试或停止分支。</desc>
+        <defs><marker id="system-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="var(--primary)"/></marker></defs>
+        <g fill="var(--surface-2)" stroke="var(--line)" stroke-width="1.5"><rect x="25" y="85" width="145" height="70" rx="12"/><rect x="235" y="85" width="190" height="70" rx="12"/><rect x="500" y="85" width="155" height="70" rx="12"/><rect x="735" y="85" width="170" height="70" rx="12"/><rect x="230" y="280" width="200" height="75" rx="12"/><rect x="710" y="280" width="200" height="75" rx="12"/><rect x="480" y="280" width="185" height="75" rx="12"/></g>
+        <g fill="var(--text)" text-anchor="middle" font-family="sans-serif" font-size="16"><text x="97" y="113">Channel / HTTP</text><text x="97" y="139" font-size="13">输入归一化、输出适配</text><text x="330" y="113">应用编排 / AgentLoop</text><text x="330" y="139" font-size="13">身份、锁、Context、保存</text><text x="577" y="113">AgentRunner</text><text x="577" y="139" font-size="13">单次运行、循环预算</text><text x="820" y="113">Provider → 模型</text><text x="820" y="139" font-size="13">统一响应、协议适配</text><text x="330" y="308">Session / Memory</text><text x="330" y="336" font-size="13">历史事实 / 长期知识</text><text x="810" y="308">Registry → Tool</text><text x="810" y="336" font-size="13">校验参数后执行</text><text x="572" y="308">异常 / 预算耗尽</text><text x="572" y="336" font-size="13">分类、有限重试或停止</text></g>
+        <g fill="none" stroke="var(--primary)" stroke-width="2" marker-end="url(#system-arrow)"><path d="M170 120H235"/><path d="M425 120H500"/><path d="M655 105H735"/><path d="M735 140H655"/><path d="M620 155V240H810V280"/><path d="M710 310H685V205H580V155"/><path d="M310 280V155"/><path d="M350 155V280"/><path d="M550 155V280"/><path d="M500 95V30H95V85"/></g>
+        <g fill="var(--muted)" font-family="sans-serif" font-size="12"><text x="177" y="102">Inbound</text><text x="430" y="102">messages</text><text x="670" y="92">请求 + schema</text><text x="666" y="171">LLMResponse</text><text x="725" y="232">批准执行 tool_calls</text><text x="591" y="197">tool(call_id, result)</text><text x="235" y="240">读取</text><text x="360" y="240">保存</text><text x="491" y="255">错误</text><text x="175" y="22">最终回答经编排保存、发布 Outbound，再由 Channel 发送</text><text x="32" y="410">工具输出是下一轮模型输入的观察；它不会自动成为最终答复。图中 Provider 表示适配边界。</text></g>
+      </svg></div>
+      <p>按箭头推演：同一条消息先确定会话，再构建模型输入。模型提出的工具调用只有经过运行时校验才执行；结果带原调用 ID 回填，形成反馈循环。持久化由应用侧负责，Provider 负责协议转换。失败路径必须受次数、时间或取消约束，不能无限重试。</p>
+
+      <h2 id="reading-contract">阅读约定：三种代码，各有用途</h2>
+      <div class="summary-grid"><div class="card flat"><h3>源码原文</h3><p>精讲页中的连续片段标明文件、符号与行区间，配套说明输入状态和后续分支。它是生产实现的局部窗口，不能单独粘贴运行。</p></div><div class="card flat"><h3>教学骨架</h3><p>专题页中的省略号、简化签名和流程伪代码用于突出因果关系。相邻入口可打开对应的真实源码精讲，避免把简写当成完整实现。</p></div><div class="card flat"><h3>可运行教学项目</h3><p>第10章给出完整模块与行为测试。默认 Provider 是确定性的脚本替身，便于不联网验证控制流；扩展任务明确说明如何接入真实能力。</p></div></div>
+
+      <h2 id="glossary">先把这些边界分清</h2>
+      <table class="source-table"><thead><tr><th>术语</th><th>准确含义</th><th>不要混淆</th></tr></thead><tbody>
+        <tr><td>Turn / iteration</td><td>一次用户请求的处理 / 其中一次模型调用与可能的工具执行</td><td>一个 Turn 可以经历多次 iteration</td></tr>
+        <tr><td>Session / Context</td><td>可持久化会话事实 / 当前一次模型请求的输入视图</td><td>为了预算裁剪 Context 不等于删除事实</td></tr>
+        <tr><td>Memory / history</td><td>抽取和整理后的长期知识 / 发生过的对话事件</td><td>摘要、知识和原始事件有不同恢复能力</td></tr>
+        <tr><td>Tool / Skill / MCP</td><td>可调用能力 / 提示性操作知识 / 连接外部能力的协议</td><td>有 schema 或提示不代表实现了执行授权与隔离</td></tr>
+        <tr><td>并发 / 隔离 / 幂等</td><td>允许同时推进 / 状态互不污染 / 重复执行不会重复产生副作用</td><td>asyncio task 不是进程沙箱；恢复 checkpoint 不自动保证 exactly-once</td></tr>
+      </tbody></table>
+
+      <h2>章节目录</h2>
+      <div class="chapter-catalog">
+        <a class="chapter-entry ready" href="chapters/01-request-lifecycle/index.html"><div class="chapter-number">01</div><div><h2>从一条用户消息理解内部 Agent</h2><p>HTTP 输入 → InboundMessage → 状态机 → Context → LLM/Tool → Session → Response。</p></div><span class="chapter-state">已完成 · 9 页 · 含精讲</span></a>
+        <a class="chapter-entry ready" href="chapters/02-llm-provider-gateway/index.html"><div class="chapter-number">02</div><div><h2>LLM 配置、Provider 实现与 Gateway 装配</h2><p>Config → Provider 匹配 → Registry/Factory → 统一协议 → 重试/流式 → Gateway 热更新。</p></div><span class="chapter-state">已完成 · 9 页 · 含精讲</span></a>
+        <a class="chapter-entry ready" href="chapters/03-memory-system/index.html"><div class="chapter-number">03</div><div><h2>Memory 系统</h2><p>Session → Consolidator → history.jsonl → Dream → 长期 Memory → Context。</p></div><span class="chapter-state">已完成 · 7 页 · 含精讲</span></a>
+        <a class="chapter-entry ready" href="chapters/04-context-management/index.html"><div class="chapter-number">04</div><div><h2>Context 管理</h2><p>System Prompt → Session replay → token 分层治理 → 多模态/工具结果 → 协议修复。</p></div><span class="chapter-state">已完成 · 7 页 · 含精讲</span></a>
+        <a class="chapter-entry ready" href="chapters/05-agent-loop/index.html"><div class="chapter-number">05</div><div><h2>Agent Loop 深入</h2><p>AgentLoop/AgentRunner 边界、状态机、模型工具迭代、并发注入、中断恢复与 Hooks。</p></div><span class="chapter-state">已完成 · 8 页 · 含精讲</span></a>
+        <a class="chapter-entry ready" href="chapters/06-tools-mcp-extensions/index.html"><div class="chapter-number">06</div><div><h2>工具系统、MCP 与能力扩展</h2><p>Tool 契约 → Registry → Loader/插件 → MCP 传输与适配 → Skill/能力扩展选择。</p></div><span class="chapter-state">已完成 · 8 页 · 含精讲</span></a>
+        <a class="chapter-entry ready" href="chapters/07-subagent-system/index.html"><div class="chapter-number">07</div><div><h2>Subagent 子代理系统</h2><p>SpawnTool → 后台 task → 隔离 AgentRunner/ToolRegistry → MessageBus 回注 → 父 Agent 续跑。</p></div><span class="chapter-state">已完成 · 9 页 · 含精讲</span></a>
+        <a class="chapter-entry ready" href="chapters/08-automation-system/index.html"><div class="chapter-number">08</div><div><h2>自动化任务系统</h2><p>用户 Cron、Heartbeat、Dream 系统任务、Agent 执行、通知评估与渠道回注。</p></div><span class="chapter-state">已完成 · 7 页 · 含精讲</span></a>
+        <a class="chapter-entry ready" href="chapters/09-slash-command-system/index.html"><div class="chapter-number">09</div><div><h2>Agent 聊天斜杠命令系统</h2><p>命令契约 → 四级 Router → AgentLoop 双入口 → 生命周期/查询/Memory 命令 → 渠道呈现。</p></div><span class="chapter-state">已完成 · 9 页 · 含精讲</span></a>
+<a class="chapter-entry ready" href="chapters/10-build-your-agent/index.html"><div class="chapter-number">10</div><div><h2>从零设计并实现你的 Agent</h2><p>独立可运行项目 → 完整模块源码 → 事件轨迹 → 行为测试 → 分阶段扩展与验收。</p></div><span class="chapter-state">实作 · 1 页</span></a>
+        <a class="chapter-entry ready" href="chapters/11-interview/index.html"><div class="chapter-number">11</div><div><h2>项目面试题库与模块复习</h2><p>40 道主问题 → 八类递进主题 → 折叠参考答案 → 相关模块讲解 → 返回原题复练。</p></div><span class="chapter-state">40 题 · 80 个追问</span></a>
+      </div>
+
+      <h2>全书源码学习地图</h2><p>点击模块进入手册内的源码摘录与设计解释。文件名用于说明来源；不要求打开仓库文件。</p>
+      <div class="architecture">
+        <div class="arch-layer"><div class="arch-label">入口</div><div class="arch-items"><a class="arch-item" href="chapters/01-request-lifecycle/workshop.html#source-walkthrough">api/server.py · 精讲</a><a class="arch-item" href="chapters/01-request-lifecycle/workshop.html#source-walkthrough">bus/events.py · 精讲</a><a class="arch-item" href="chapters/01-request-lifecycle/workshop.html#source-walkthrough">nanobot.py · 精讲</a></div></div>
+        <div class="arch-layer"><div class="arch-label">模型装配</div><div class="arch-items"><a class="arch-item" href="chapters/02-llm-provider-gateway/workshop.html#source-walkthrough">config/schema.py · 精讲</a><a class="arch-item" href="chapters/02-llm-provider-gateway/workshop.html#source-walkthrough">providers/registry.py · 精讲</a><a class="arch-item" href="chapters/02-llm-provider-gateway/workshop.html#source-walkthrough">providers/factory.py · 精讲</a><a class="arch-item" href="chapters/02-llm-provider-gateway/workshop.html#source-walkthrough">providers/base.py · 精讲</a></div></div>
+        <div class="arch-layer"><div class="arch-label">Agent 核心</div><div class="arch-items"><a class="arch-item" href="chapters/05-agent-loop/workshop.html#source-walkthrough">agent/loop.py · 精讲</a><a class="arch-item" href="chapters/05-agent-loop/workshop.html#source-walkthrough">agent/runner.py · 精讲</a><a class="arch-item" href="chapters/04-context-management/workshop.html#source-walkthrough">agent/context.py · 精讲</a></div></div>
+        <div class="arch-layer"><div class="arch-label">状态与记忆</div><div class="arch-items"><a class="arch-item" href="chapters/03-memory-system/workshop.html#source-walkthrough">session/manager.py · 精讲</a><a class="arch-item" href="chapters/03-memory-system/workshop.html#source-walkthrough">agent/memory.py · 精讲</a><a class="arch-item" href="chapters/03-memory-system/workshop.html#source-walkthrough">agent/autocompact.py · 精讲</a></div></div>
+        <div class="arch-layer"><div class="arch-label">自动化</div><div class="arch-items"><a class="arch-item" href="chapters/08-automation-system/workshop.html#source-walkthrough">cron/service.py · 精讲</a><a class="arch-item" href="chapters/08-automation-system/workshop.html#source-walkthrough">agent/tools/cron.py · 精讲</a><a class="arch-item" href="chapters/08-automation-system/workshop.html#source-walkthrough">heartbeat/service.py · 精讲</a></div></div>
+        <div class="arch-layer"><div class="arch-label">能力边界</div><div class="arch-items"><a class="arch-item" href="chapters/02-llm-provider-gateway/workshop.html#source-walkthrough">providers/ · 精讲</a><a class="arch-item" href="chapters/06-tools-mcp-extensions/workshop.html#source-walkthrough">agent/tools/ · 精讲</a><a class="arch-item" href="chapters/06-tools-mcp-extensions/workshop.html#source-walkthrough">agent/skills.py · 精讲</a></div></div>
+        <div class="arch-layer"><div class="arch-label">外部扩展</div><div class="arch-items"><a class="arch-item" href="chapters/06-tools-mcp-extensions/workshop.html#source-walkthrough">ToolLoader · 精讲</a><a class="arch-item" href="chapters/06-tools-mcp-extensions/workshop.html#source-walkthrough">nanobot.tools entry points · 精讲</a><a class="arch-item" href="chapters/06-tools-mcp-extensions/workshop.html#source-walkthrough">MCP servers · 精讲</a></div></div>
+        <div class="arch-layer"><div class="arch-label">控制平面</div><div class="arch-items"><a class="arch-item" href="chapters/09-slash-command-system/workshop.html#source-walkthrough">command/router.py · 精讲</a><a class="arch-item" href="chapters/09-slash-command-system/workshop.html#source-walkthrough">command/builtin.py · 精讲</a><a class="arch-item" href="chapters/05-agent-loop/workshop.html#source-walkthrough">AgentLoop COMMAND · 精讲</a></div></div>
+        <div class="arch-layer"><div class="arch-label">委派执行</div><div class="arch-items"><a class="arch-item" href="chapters/07-subagent-system/workshop.html#source-walkthrough">agent/subagent.py · 精讲</a><a class="arch-item" href="chapters/07-subagent-system/workshop.html#source-walkthrough">agent/tools/spawn.py · 精讲</a><a class="arch-item" href="chapters/07-subagent-system/workshop.html#source-walkthrough">subagent_system.md · 精讲</a></div></div>
+      </div>
+
+      <h2>如何扩展本手册</h2>
+      <ol class="number-list">
+        <li>在 <code>chapters/&lt;编号-主题&gt;/</code> 下创建章节首页和小节页面。</li>
+        <li>页面声明 <code>data-study-root</code>、<code>data-chapter</code> 和 <code>data-page</code>。</li>
+        <li>只在 <code>assets/catalog.js</code> 注册页面，侧栏、移动导航、面包屑和前后页会自动更新。</li>
+        <li>运行 <code>tools/check_study.py</code> 检查断链、缺失资源和重复页面标识。</li>
+      </ol>
+      <footer class="footer">nanobot 内部原理学习手册 · 多章目录</footer>
+    </div></main>
+  </div>
+</body>
+</html>

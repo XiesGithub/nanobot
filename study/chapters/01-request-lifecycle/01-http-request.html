@@ -1,0 +1,79 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>01 · 后端接收用户消息 | nanobot Agent 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="request-lifecycle" data-page="http-request">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>Agent 学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-1" data-original-href="../../../nanobot/api/server.py" data-source-label="打开源码" title="阅读 nanobot/api/server.py:194–230 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner">
+<select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select>
+<div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Transport boundary</p><h1>后端怎样接收用户消息</h1><p class="lead">以 OpenAI 兼容 API 为入口，追踪 aiohttp 如何把网络请求转成文本、附件路径和会话标识，再交给 Agent。</p><div class="meta-row"><span class="chip">入口：POST /v1/chat/completions</span><span class="chip">输出：process_direct(...)</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<div class="callout"><strong>本节边界：</strong>从 HTTP 请求开始，讲到调用 <code>AgentLoop.process_direct()</code> 为止。此时还没有发生模型推理。</div>
+
+<h2 id="reading-section-01">分步数据流</h2>
+<section data-stepper>
+  <div class="flow">
+    <button class="flow-node" data-step><small>Step 1</small><b>路由命中</b></button><span class="flow-arrow">→</span>
+    <button class="flow-node" data-step><small>Step 2</small><b>解析请求</b></button><span class="flow-arrow">→</span>
+    <button class="flow-node" data-step><small>Step 3</small><b>验证模型</b></button><span class="flow-arrow">→</span>
+    <button class="flow-node" data-step><small>Step 4</small><b>生成 Session</b></button><span class="flow-arrow">→</span>
+    <button class="flow-node" data-step><small>Step 5</small><b>加锁并调用</b></button>
+  </div>
+  <div class="card flat step-detail">
+    <div data-step-panel><h3><code>POST /v1/chat/completions</code></h3><p>aiohttp 路由把请求交给 <code>handle_chat_completions(request)</code>。<code>AgentLoop</code> 已经存放在 <code>request.app</code> 中，不会每次请求重新创建。</p></div>
+    <div data-step-panel><h3>JSON 或 multipart</h3><p>JSON 走 <code>request.json()</code> 和 <code>_parse_json_content()</code>；上传文件走 <code>_parse_multipart()</code>。两条路径最终都归一成 <code>text</code> 与 <code>media_paths</code>。</p></div>
+    <div data-step-panel><h3>模型名称校验</h3><p>请求中的 <code>model</code> 必须等于当前服务暴露的模型名。API 兼容 OpenAI 格式，但不允许请求任意切换服务端 Provider。</p></div>
+    <div data-step-panel><h3><code>api:{session_id}</code></h3><p>相同的 <code>session_id</code> 会映射到同一个会话历史；没有提供时使用默认 API Session。</p></div>
+    <div data-step-panel><h3>同 Session 串行</h3><p>处理函数先进入该 Session 的 <code>asyncio.Lock</code>，再在超时限制内调用 <code>agent_loop.process_direct(...)</code>。</p></div>
+  </div>
+  <div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div>
+</section>
+
+<h2 id="reading-section-02">入口层代码架构</h2>
+<div class="architecture">
+  <div class="arch-layer"><div class="arch-label">aiohttp 路由</div><div class="arch-items"><span class="arch-item">create_app()</span><span class="arch-item">add_post(...)</span><span>负责将 URL 映射到处理函数</span></div></div>
+  <div class="arch-layer"><div class="arch-label">请求处理</div><div class="arch-items"><span class="arch-item">handle_chat_completions()</span><span>解析、验证、加锁、超时与错误码</span></div></div>
+  <div class="arch-layer"><div class="arch-label">内容解析</div><div class="arch-items"><span class="arch-item">_parse_json_content()</span><span class="arch-item">_parse_multipart()</span></div></div>
+  <div class="arch-layer"><div class="arch-label">Agent 边界</div><div class="arch-items"><span class="arch-item">AgentLoop.process_direct()</span><span>从网络层转入业务层</span></div></div>
+</div>
+
+<h2 id="reading-section-03">核心源码分析</h2>
+<table class="source-table"><thead><tr><th>位置</th><th>职责</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/api/server.py" data-source-label="api/server.py:112" title="阅读 nanobot/api/server.py:194–230 的代表性摘录与讲解">api/server.py · 站内摘录</a></td><td><code>_parse_json_content</code></td><td>把 OpenAI messages 内容归一为文本和媒体路径</td></tr>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/api/server.py" data-source-label="api/server.py:152" title="阅读 nanobot/api/server.py:194–230 的代表性摘录与讲解">api/server.py · 站内摘录</a></td><td><code>_parse_multipart</code></td><td>读取表单字段、限制文件大小、保存上传内容</td></tr>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/api/server.py" data-source-label="api/server.py:194" title="阅读 nanobot/api/server.py:194–230 的代表性摘录与讲解">api/server.py · 站内摘录</a></td><td><code>handle_chat_completions</code></td><td>整个 HTTP 请求生命周期</td></tr>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/api/server.py" data-source-label="api/server.py:228" title="阅读 nanobot/api/server.py:194–230 的代表性摘录与讲解">api/server.py · 站内摘录</a></td><td>Session key</td><td><code>session_id</code> 到内部会话键的映射</td></tr>
+  <tr><td><a href="workshop.html#source-2" data-original-href="../../../nanobot/api/server.py" data-source-label="api/server.py:236" title="阅读 nanobot/api/server.py:249–303 的代表性摘录与讲解">api/server.py · 站内摘录</a></td><td>流式分支</td><td>SSE、token 队列以及何时发送 <code>[DONE]</code></td></tr>
+  <tr><td><a href="workshop.html#source-2" data-original-href="../../../nanobot/api/server.py" data-source-label="api/server.py:305" title="阅读 nanobot/api/server.py:249–303 的代表性摘录与讲解">api/server.py · 站内摘录</a></td><td>非流式分支</td><td>超时、空回答重试和最终 JSON</td></tr>
+</tbody></table>
+
+<div class="code-block"><div class="code-head"><span>nanobot/api/server.py · 非流式核心路径</span><span>概念摘录</span></div><pre><code><span class="kw">async with</span> session_lock:
+    response = <span class="kw">await</span> asyncio.wait_for(
+        agent_loop.<span class="fn">process_direct</span>(
+            content=text,
+            media=media_paths <span class="kw">or</span> <span class="type">None</span>,
+            session_key=session_key,
+            channel=<span class="str">"api"</span>,
+            chat_id=API_CHAT_ID,
+        ),
+        timeout=timeout_s,
+    )</code></pre></div>
+
+<h2 id="reading-section-04">数据怎样变化</h2>
+<div class="data-box"><div class="label">网络输入</div><div><code>{"messages":[{"role":"user","content":"分析项目"}], "session_id":"study"}</code></div></div>
+<div class="data-box"><div class="label">解析结果</div><div><code>text="分析项目"</code> · <code>media_paths=[]</code> · <code>session_id="study"</code></div></div>
+<div class="data-box"><div class="label">会话映射</div><div><code>session_key="api:study"</code></div></div>
+<div class="data-box"><div class="label">下游调用</div><div><code>process_direct(content, media, session_key, channel="api")</code></div></div>
+
+<h2 id="reading-section-05">流式与非流式</h2>
+<div class="compare-grid">
+  <div class="card flat"><h3>非流式</h3><p>等待整个 Agent 完成，取得 <code>OutboundMessage.content</code>，再一次性返回 Chat Completion JSON。</p></div>
+  <div class="card flat"><h3>流式</h3><p><code>on_stream</code> 将 token 写入异步队列，HTTP 协程持续写 SSE；只有整个 Agent 完成才关闭流。</p></div>
+</div>
+<div class="callout warning"><strong>易错点：</strong>一次 LLM 流结束不等于一次 Agent 请求结束。模型可能暂停输出去调用工具，然后继续下一段模型输出，因此 SSE 不能在第一次 <code>on_stream_end</code> 时关闭。</div>
+
+<h2 id="reading-section-06">你应该能回答</h2><ul class="check-list review-list"><li><span class="review-question">为什么 <code>AgentLoop</code> 放在 <code>request.app</code>，而不是每个请求重新创建？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>AgentLoop</code> 持有 Provider、工具注册表、SessionManager、MCP 连接和会话运行状态，创建成本高且必须跨请求共享。<code>create_app()</code> 将同一个实例放进 <code>request.app</code>，处理函数只取用它。</p></div></details></li><li><span class="review-question">为什么 <code>process_direct()</code> 外面还需要 Session lock？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>HTTP 的 <code>process_direct()</code> 路径绕过了 <code>AgentLoop._dispatch()</code> 的会话串行机制。API 层因此用按 <code>session_key</code> 保存的 <code>asyncio.Lock</code>，防止同一历史被两个请求同时读取和写回。</p></div></details></li><li><span class="review-question">JSON 和 multipart 两条输入路径最终统一成了什么？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>两条路径都归一成用户文本 <code>text</code> 和本地附件路径列表 <code>media_paths</code>，随后连同生成的 <code>session_key</code> 传给 <code>process_direct()</code>。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">01 · Transport boundary</footer>
+</div></main></div></body></html>

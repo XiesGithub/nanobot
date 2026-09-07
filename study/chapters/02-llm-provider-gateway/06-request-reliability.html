@@ -1,0 +1,55 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>02.06 · 请求适配、流式输出与可靠性 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head>
+<body data-study-root="../.." data-chapter="llm-provider-gateway" data-page="request-reliability"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-5" data-original-href="../../../nanobot/providers/base.py" data-source-label="重试源码" title="阅读 nanobot/providers/base.py:48–86 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Provider · transport resilience</p><h1>请求适配、流式输出与可靠性</h1><p class="lead">Provider 不只负责“发 HTTP”。它还要修复消息形状、选择 API、汇总流式工具参数、判断错误是否可重试，并确保 SDK 自带重试不会与 nanobot 的统一策略叠加。</p><div class="meta-row"><span class="chip">request sanitation</span><span class="chip">Responses fallback</span><span class="chip">Retry-After</span><span class="chip">stream idle timeout</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">可靠性管线</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>sanitize</small><b>清洗消息</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>select</small><b>选择 API</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>call</small><b>单次安全调用</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>classify</small><b>错误分类</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>backoff</small><b>等待/重试</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>normalize</small><b>统一响应</b></button>
+</div><div class="step-panels">
+  <div data-step-panel><h3>先修复 Provider 不接受的内容</h3><p>Base 层处理空文本块、内部 <code>_meta</code> 和 dict content；实现层再保留各 API 允许的消息键，必要时转换图片与工具历史。</p></div>
+  <div data-step-panel><h3>OpenAI-compatible 动态选择 Chat 或 Responses</h3><p>直接 OpenAI（及 Copilot 特例）的 GPT-5/o 系列或显式 reasoning 请求优先 Responses；其他兼容 Gateway 不会被误判成原生 OpenAI。</p></div>
+  <div data-step-panel><h3>异常先变成错误响应</h3><p><code>_safe_chat*</code> 捕获普通异常，返回 <code>finish_reason="error"</code>。CancelledError 继续抛出，确保上层取消 Turn 时不会被伪装成模型失败。</p></div>
+  <div data-step-panel><h3>结构化元数据优先于文本猜测</h3><p>错误包含 status、kind、type、code、retry_after 和 should_retry；旧 Provider 缺字段时才回退到 “429/timeout/overloaded” 等文本标记。</p></div>
+  <div data-step-panel><h3>统一重试避免放大</h3><p>Provider SDK 的 max_retries 被设为 0。standard 使用 1/2/4 秒退避后停止；persistent 可继续，但单次等待上限 60 秒，连续 10 次相同瞬态错误也会终止。</p></div>
+  <div data-step-panel><h3>最终仍只返回 LLMResponse</h3><p>同步和流式解析都会汇总 content、tool calls、finish reason、usage 与 reasoning。Runner 不处理 SSE event 或 SDK exception。</p></div>
+</div></section>
+
+<h2 id="reading-section-02">Responses API 的局部熔断</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">适用</div><div class="arch-items"><span class="arch-item">direct OpenAI / Copilot</span><span>且 reasoning 或 GPT-5/o 系列</span></div></div>
+  <div class="arch-layer"><div class="arch-label">失败</div><div class="arch-items"><span class="arch-item">可降级错误</span><span>普通 OpenAI 回退 Chat Completions；Copilot 保留原错</span></div></div>
+  <div class="arch-layer"><div class="arch-label">熔断</div><div class="arch-items"><span class="arch-item">连续 3 次失败</span><span>5 分钟内跳过 Responses，之后半开探测</span></div></div>
+  <div class="arch-layer"><div class="arch-label">成功</div><div class="arch-items"><span class="arch-item">清除计数</span><span>恢复正常 Responses 选择</span></div></div>
+</div>
+
+<div class="code-block"><div class="code-head"><span>providers/base.py · 标准与持续重试</span><span>概念摘录</span></div><pre><code>delays = list(self._CHAT_RETRY_DELAYS)  # (1, 2, 4)
+persistent = retry_mode == "persistent"
+
+if not self._is_transient_response(response):
+    return response
+if persistent and identical_error_count >= 10:
+    return response
+if not persistent and attempt &gt; len(delays):
+    break
+
+delay = self._extract_retry_after_from_response(response) or base_delay
+if persistent:
+    delay = min(delay, self._PERSISTENT_MAX_DELAY)</code></pre></div>
+
+<h2 id="reading-section-03">四个容易忽略的恢复细节</h2><div class="card-grid">
+  <div class="card"><h3>尊重服务端等待时间</h3><p>先读结构化字段和 HTTP <code>Retry-After</code>/<code>retry-after-ms</code>，再从错误文本解析；没有 hint 才使用本地退避。</p></div>
+  <div class="card"><h3>长等待仍提供心跳</h3><p><code>_sleep_with_heartbeat()</code> 最多每 30 秒调用一次 on_retry_wait，让渠道知道 Agent 正在等待而不是失联。</p></div>
+  <div class="card"><h3>图片可做一次文本降级</h3><p>非瞬态错误且请求含图片时，可把图片替换为占位文本再试一次；成功后同步清除原消息中的图片，避免后续循环重复失败。</p></div>
+  <div class="card"><h3>流式有空闲超时</h3><p>原生流式实现通常读取 <code>NANOBOT_STREAM_IDLE_TIMEOUT_S</code>，默认 90 秒；超时返回 error response，而不是永远挂起。</p></div>
+</div>
+
+<div class="callout warning"><strong>persistent 不是无限重试：</strong>它不受 3 次标准退避限制，但仍受相同错误次数和单次等待上限保护；明确的额度不足、计费或不可重试错误会立即返回。</div>
+
+<h2 id="reading-section-04">源码与测试入口</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-5" data-original-href="../../../nanobot/providers/base.py" data-source-label="providers/base.py" title="阅读 nanobot/providers/base.py:48–86 的代表性摘录与讲解">providers/base.py · 站内摘录</a></td><td>错误判定、Retry-After、图片降级和统一重试循环</td></tr>
+  <tr><td><a href="workshop.html#source-7" data-original-href="../../../nanobot/providers/openai_compat_provider.py" data-source-label="openai_compat_provider.py" title="阅读 nanobot/providers/openai_compat_provider.py:470–511 的代表性摘录与讲解">openai_compat_provider.py · 站内摘录</a></td><td>请求参数、Responses 选择/熔断、stream idle timeout</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/openai_responses/converters.py" data-source-label="openai_responses/converters.py" title="nanobot/providers/openai_responses/converters.py 的所属模块讲解；该文件未单独逐行收录">openai_responses/converters.py · 模块讲解</a></td><td>Chat 风格历史到 Responses items</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/openai_responses/parsing.py" data-source-label="openai_responses/parsing.py" title="nanobot/providers/openai_responses/parsing.py 的所属模块讲解；该文件未单独逐行收录">openai_responses/parsing.py · 模块讲解</a></td><td>SSE 工具参数缓冲与 usage 归一化</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/providers/test_provider_retry_after_hints.py" data-source-label="tests/providers/test_provider_retry_after_hints.py" title="tests/providers/test_provider_retry_after_hints.py 的所属模块讲解；该文件未单独逐行收录">tests/providers/test_provider_retry_after_hints.py · 模块讲解</a></td><td>服务端等待提示解析</td></tr>
+</tbody></table>
+<h2 id="reading-section-05">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么要关闭 SDK 自带重试？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>SDK 内建重试与 nanobot 基类重试叠加会造成不可见的等待、重复退避和难以取消。实现关闭 SDK 重试，由 <code>chat_stream_with_retry()</code> 统一识别瞬态错误、Retry-After 和通知。</p></div></details></li><li><span class="review-question">Responses API 失败后何时可以回退 Chat Completions？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>仅当 Responses API 路径因能力/协议不兼容而失败，且回退被允许时，兼容 Provider 才改走 Chat Completions；认证、额度等非兼容性错误不能靠切接口解决。</p></div></details></li><li><span class="review-question">persistent 模式有哪些终止边界？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>persistent 仍会在成功、非瞬态错误、相同瞬态错误达到上限或任务取消时停止；退避也受最大等待限制，并非真正无限循环。</p></div></details></li><li><span class="review-question">为什么 CancelledError 不能转换成普通 LLMResponse？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>CancelledError</code> 表示上层主动取消 Turn。<code>_safe_chat*</code> 明确重新抛出它；若包装成 error 响应，Provider 重试会抵消 <code>/stop</code>，Runner 还可能继续执行工具。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02.06 · 请求适配、流式输出与可靠性</footer></div></main></div></body></html>

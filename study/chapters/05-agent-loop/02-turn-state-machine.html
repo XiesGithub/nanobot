@@ -1,0 +1,77 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>05 · 外层事件循环与 Turn 状态机 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="agent-loop" data-page="turn-state-machine">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Agent Loop · outer loop</p><h1>外层事件循环与 Turn 状态机</h1><p class="lead"><code>run()</code> 是持续工作的事件泵，<code>_dispatch()</code> 是并发与渠道适配边界，<code>_process_message()</code> 则用显式状态机完成一条消息的业务生命周期。</p><div class="meta-row"><span class="chip">MessageBus</span><span class="chip">TurnState</span><span class="chip">TurnContext</span><span class="chip">transition table</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">先区分三个层次</h2><table class="source-table"><thead><tr><th>函数</th><th>生命周期</th><th>主要职责</th></tr></thead><tbody>
+  <tr><td><code>run()</code></td><td>进程级，直到 stop/shutdown</td><td>消费输入、空闲检查、命令快速通道、创建 task 或注入 pending queue</td></tr>
+  <tr><td><code>_dispatch()</code></td><td>一次被调度任务</td><td>Session lock、全局 gate、stream 适配、异常兜底、发布输出、清理 pending queue</td></tr>
+  <tr><td><code>_process_message()</code></td><td>一次 Turn</td><td>驱动 RESTORE→…→DONE 状态机并记录每个阶段耗时</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-02">事件泵为什么创建 task</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:867</span><span>简化后的主循环</span></div><pre><code>while self._running:
+    msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+
+    if self.commands.is_priority(msg.content.strip()):
+        await self._dispatch_command_inline(...)
+        continue
+
+    if effective_key in self._pending_queues:
+        self._pending_queues[effective_key].put_nowait(msg)
+        continue
+
+    task = asyncio.create_task(self._dispatch(msg))
+    self._active_tasks.setdefault(effective_key, []).append(task)</code></pre></div>
+<p>如果主循环直接 <code>await _dispatch()</code>，模型调用期间就无法及时消费后续的 <code>/stop</code>。创建 task 后，主循环仍能读取 Bus；优先命令可直接取消正在运行的 task，同 Session 普通消息则注入当前 Turn。</p>
+
+<h2 id="reading-section-03">Turn 状态图</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>RESTORE</small><b>恢复连续性</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>COMPACT</small><b>空闲归档准备</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>COMMAND</small><b>命令分流</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>BUILD</small><b>构建输入</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>RUN</small><b>执行 Agent</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>SAVE</small><b>落盘</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>RESPOND</small><b>组装响应</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>RESTORE</h3><p>提取文档；获取 Session；恢复 runtime checkpoint 与只有 user、没有 assistant 的未完成 Turn。</p></div>
+  <div data-step-panel><h3>COMPACT</h3><p><code>AutoCompact.prepare_session()</code> 重新加载 Session，并取出需要注入下一轮的 archived summary。</p></div>
+  <div data-step-panel><h3>COMMAND</h3><p>普通命令若被 CommandRouter 处理，返回 <code>shortcut</code> 直接进入 DONE，不构建 Prompt 也不请求 LLM。</p></div>
+  <div data-step-panel><h3>BUILD</h3><p>执行 token consolidation、绑定工具上下文、选取 history、构造 initial messages，并尽早持久化用户输入。</p></div>
+  <div data-step-panel><h3>RUN</h3><p>把 initial messages、工具、Hook、checkpoint 与 injection callback 交给 AgentRunner。</p></div>
+  <div data-step-panel><h3>SAVE</h3><p>补全空响应、提取生成图片、只保存本轮新增消息、清 checkpoint，并后台触发下一轮 consolidation 检查。</p></div>
+  <div data-step-panel><h3>RESPOND</h3><p>处理 MessageTool 抑制、ask_user 按钮、streamed 标志和媒体，生成最终 OutboundMessage。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-04">显式 transition table</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:252</span><span>状态 + 事件 → 下一状态</span></div><pre><code>_TRANSITIONS = {
+    (RESTORE, "ok"): COMPACT,
+    (COMPACT, "ok"): COMMAND,
+    (COMMAND, "dispatch"): BUILD,
+    (COMMAND, "shortcut"): DONE,
+    (BUILD, "ok"): RUN,
+    (RUN, "ok"): SAVE,
+    (SAVE, "ok"): RESPOND,
+    (RESPOND, "ok"): DONE,
+}</code></pre></div>
+<p>处理器不直接修改下一个状态，只返回业务事件；driver 统一查表。缺少 handler 或 transition 时立即抛错，因此新增状态不会因为默认 fall-through 静默跳过。</p>
+
+<h2 id="reading-section-05">TurnContext 是状态机的数据面</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">身份</div><div class="arch-items"><span class="arch-item">msg</span><span class="arch-item">session_key</span><span class="arch-item">turn_id</span><span class="arch-item">state</span></div></div>
+  <div class="arch-layer"><div class="arch-label">模型输入</div><div class="arch-items"><span class="arch-item">session</span><span class="arch-item">history</span><span class="arch-item">initial_messages</span><span class="arch-item">pending_summary</span></div></div>
+  <div class="arch-layer"><div class="arch-label">运行结果</div><div class="arch-items"><span class="arch-item">final_content</span><span class="arch-item">all_messages</span><span class="arch-item">stop_reason</span><span class="arch-item">generated_media</span></div></div>
+  <div class="arch-layer"><div class="arch-label">观测</div><div class="arch-items"><span class="arch-item">on_stream</span><span class="arch-item">on_progress</span><span class="arch-item">trace[]</span></div></div>
+</div>
+
+<h2 id="reading-section-06">每个状态都被计时</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:1228</span><span>事件驱动 driver</span></div><pre><code>while ctx.state is not TurnState.DONE:
+    handler = getattr(self, f"_state_{ctx.state.name.lower()}")
+    t0 = time.perf_counter()
+    event = await handler(ctx)
+    ctx.trace.append(StateTraceEntry(
+        state=ctx.state, duration_ms=(time.perf_counter() - t0) * 1000,
+        event=event,
+    ))
+    ctx.state = self._TRANSITIONS[(ctx.state, event)]</code></pre></div>
+<p><code>turn_id = session_key + time_ns</code> 将日志与一次 Turn 关联；trace 同时记录状态、耗时、事件和异常标记，能区分“LLM 慢”与“Session/Context 阶段慢”。</p>
+
+<div class="callout warning"><strong>system 消息是特殊路径：</strong><code>_process_message()</code> 会把 <code>channel == "system"</code> 的子 Agent 通知交给 <code>_process_system_message()</code>，因为它需要映射回原始渠道/Session，而不是按普通用户消息完整走一遍状态机。</div>
+
+<h2 id="reading-section-07">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:175" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>TurnState、StateTraceEntry、TurnContext</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:252" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>状态转移表</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:867" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>事件泵与优先命令</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:942" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>dispatch 并发、stream 和异常边界</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1228" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1193" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>状态机 driver</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-1398" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1319" title="阅读 nanobot/agent/loop.py:1398–1445 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>七个状态处理器</td></tr></tbody></table>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 priority command 要在创建普通 dispatch task 前处理？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>priority 命令必须能中断已经占锁的 Turn。若先创建普通 dispatch task 或等待 session lock，<code>/stop</code> 会排在被取消任务之后，失去即时控制意义。</p></div></details></li><li><span class="review-question">COMMAND 的 shortcut 为什么直接到 DONE，而不是 RESPOND？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>命令 Handler 已经返回或发布了面向用户的 <code>OutboundMessage</code>，再进 RESPOND 会重复组装/发送；COMMAND 因而把结果放到既定返回路径并直接结束状态机。</p></div></details></li><li><span class="review-question">TurnContext 中哪些字段跨越了 BUILD、RUN 和 SAVE 三个状态？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>session</code>、<code>history</code>、当前 user message、<code>all_messages</code>、<code>user_persisted_early</code> 以及后续的 Runner result/save boundary 共同贯穿这些阶段；它们都集中在 <code>TurnContext</code>。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">05.02 · 外层事件循环与 Turn 状态机</footer></div></main></div></body></html>

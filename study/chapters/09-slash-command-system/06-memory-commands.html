@@ -1,0 +1,54 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>07.06 · Memory 命令 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="slash-command-system" data-page="memory-commands">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Commands · memory operations</p><h1><code>/dream</code>、<code>/dream-log</code>、<code>/dream-restore</code>：Memory 的运维界面</h1><p class="lead">Memory 系统通过三个命令暴露“执行整理—审阅变更—安全恢复”的闭环。命令层没有重新实现 Dream，而是把 AgentLoop 已持有的 Dream、MemoryStore 与 GitStore 组合成用户可操作界面。</p><div class="meta-row"><span class="chip">background Dream</span><span class="chip">Git diff</span><span class="chip">revert commit</span><span class="chip">human review</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">从整理到恢复的闭环</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>/dream</small><b>立即受理</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>background</small><b>Dream.run</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>/dream-log</small><b>审阅 diff</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>/dream-restore</small><b>选择版本</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>GitStore</small><b>revert + 新提交</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>先返回 “Dreaming...”</h3><p>Handler 创建后台 task 后马上返回 OutboundMessage，避免长时间的两阶段 LLM 整理阻塞命令响应。</p></div>
+  <div data-step-panel><h3>后台任务再发送最终结果</h3><p><code>dream.run()</code> 返回是否做了工作；Handler 计算耗时，把 completed/nothing/failed 结果直接发布到 outbound bus。</p></div>
+  <div data-step-panel><h3>日志读取 Git 中的权威版本</h3><p>无参数查看最新 commit diff；带 sha 调用 <code>show_commit_diff</code>。未初始化、无版本、sha 不存在都有独立提示。</p></div>
+  <div data-step-panel><h3>无 sha 时先列候选版本</h3><p><code>/dream-restore</code> 默认列出最近 10 个 commit，并提示先用 dream-log 预览，避免盲目恢复。</p></div>
+  <div data-step-panel><h3>恢复本身仍可审计</h3><p><code>git.revert(sha)</code> 不抹掉历史，而是生成新的安全 commit；响应列出受影响文件和新 sha，之后仍能再次审阅。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02"><code>/dream</code> 是“两次响应”命令</h2><div class="code-block"><div class="code-head"><span>command/builtin.py:195–221</span><span>接受确认 + 完成通知</span></div><pre><code>async def _run_dream():
+    try:
+        did_work = await loop.dream.run()
+        content = "Dream completed ..." if did_work else "Dream: nothing to process."
+    except Exception as e:
+        content = f"Dream failed ...: {e}"
+    await loop.bus.publish_outbound(OutboundMessage(..., content=content))
+
+asyncio.create_task(_run_dream())
+return OutboundMessage(..., content="Dreaming...")</code></pre></div>
+<p>这里的后台 task 使用裸 <code>asyncio.create_task</code>，不像 <code>/new</code> 的归档那样进入 <code>loop._background_tasks</code> 管理。阅读 shutdown 语义时应注意这个生命周期差异。</p>
+
+<h2 id="reading-section-03">日志模式的两个分支</h2><div class="compare-grid"><div class="card"><h3><code>/dream-log</code></h3><p>取 <code>git.log(max_entries=1)</code>，再显示最新 commit 的 diff；输出包含 commit、时间、变更文件和对应 restore 指令。</p></div><div class="card"><h3><code>/dream-log &lt;sha&gt;</code></h3><p>直接 <code>show_commit_diff(sha)</code>；若找不到，提示用裸 restore 列版本或裸 log 看最新，而不是抛 Git 异常给用户。</p></div></div>
+
+<h2 id="reading-section-04">恢复不是 reset</h2><div class="code-block"><div class="code-head"><span>command/builtin.py:361–389</span><span>列举或 revert</span></div><pre><code>if not ctx.args.strip():
+    commits = git.log(max_entries=10)
+    content = _format_dream_restore_list(commits)
+else:
+    sha = ctx.args.split()[0]
+    result = git.show_commit_diff(sha)
+    changed_files = _format_changed_files(result[1]) if result else ...
+    new_sha = git.revert(sha)</code></pre></div>
+<div class="callout"><strong>恢复语义：</strong>用户指定的是“撤销这个 Dream change”，不是“把整个工作区硬重置到某一提交”。使用 revert 生成反向变更和新 commit，保留了操作轨迹，也让恢复动作本身可以被 <code>/dream-log</code> 审计。</div>
+
+<h2 id="reading-section-05">错误与边界矩阵</h2><table class="source-table"><thead><tr><th>情况</th><th>行为</th><th>为什么</th></tr></thead><tbody>
+  <tr><td>Dream 无待处理消息</td><td>完成通知为 nothing to process</td><td>不是错误</td></tr>
+  <tr><td>Dream.run 抛异常</td><td>捕获并发送耗时与错误文本</td><td>后台异常必须对用户可见</td></tr>
+  <tr><td>Git 未初始化且 cursor=0</td><td>提示先运行 /dream</td><td>区分“从未运行”与版本设施异常</td></tr>
+  <tr><td>sha 不存在</td><td>返回引导文本</td><td>避免直接暴露底层 Git 错误</td></tr>
+  <tr><td>revert 成功</td><td>返回新 sha 和文件清单</td><td>构成可审计闭环</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-06">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py:195" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">builtin.py · 站内摘录</a></td><td>/dream 后台运行</td></tr><tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py:224" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">builtin.py · 站内摘录</a></td><td>diff 文件提取与输出格式</td></tr><tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py:296" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">builtin.py · 站内摘录</a></td><td>/dream-log</td></tr><tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py:346" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">builtin.py · 站内摘录</a></td><td>/dream-restore</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/gitstore.py" data-source-label="utils/gitstore.py" title="nanobot/utils/gitstore.py 的所属模块讲解；该文件未单独逐行收录">utils/gitstore.py · 模块讲解</a></td><td>GitStore 版本操作</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/command/test_builtin_dream.py" data-source-label="test_builtin_dream.py" title="tests/command/test_builtin_dream.py 的所属模块讲解；该文件未单独逐行收录">test_builtin_dream.py · 模块讲解</a></td><td>日志与恢复交互测试</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">/dream 为什么需要两条 OutboundMessage？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Dream 可能耗时，Handler 先返回“Dreaming...”让当前命令立即结束，再由后台 task 执行并通过 MessageBus 发布完成/无工作/失败结果；因此用户能看到接收确认和最终结论。</p></div></details></li><li><span class="review-question">/dream-restore 不带 sha 时为什么只列版本？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>恢复是有副作用的版本操作。无 sha 时先列最近提交并提示用 <code>/dream-log</code> 预览，让用户明确选择目标，避免默认回滚错误版本。</p></div></details></li><li><span class="review-question">revert 相比 reset 提供了什么安全属性？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>git revert</code> 创建反向变更的新安全提交，原 Dream 提交和恢复动作都保留在历史中；reset 会移动历史指针并隐藏审计链，也更难同步与再次撤销。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">09.06 · Memory 命令</footer></div></main></div></body></html>

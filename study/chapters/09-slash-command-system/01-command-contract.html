@@ -1,0 +1,65 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>07.01 · 命令契约与元数据 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="slash-command-system" data-page="command-contract">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-command-router-py-15" data-original-href="../../../nanobot/command/router.py" data-source-label="router.py" title="阅读 nanobot/command/router.py:15–55 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Commands · contract</p><h1>命令契约：输入上下文、异步 Handler 与展示元数据</h1><p class="lead">命令系统没有复杂基类。一个 Handler 本质上只是接收 <code>CommandContext</code> 的异步函数；运行所需的消息、Session、key 与 AgentLoop 都通过这个小对象显式传入。</p><div class="meta-row"><span class="chip">dataclass</span><span class="chip">async handler</span><span class="chip">OutboundMessage</span><span class="chip">palette metadata</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">最小执行契约</h2><div class="code-block"><div class="code-head"><span>command/router.py:12–24</span><span>Handler + CommandContext</span></div><pre><code>Handler = Callable[["CommandContext"], Awaitable["OutboundMessage | None"]]
+
+@dataclass
+class CommandContext:
+    msg: InboundMessage
+    session: Session | None
+    key: str
+    raw: str
+    args: str = ""
+    loop: Any = None</code></pre></div>
+
+<h2 id="reading-section-02">六个字段分别解决什么问题</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>routing</small><b>msg</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>state</small><b>session / key</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>parse</small><b>raw / args</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>runtime</small><b>loop</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>response</small><b>Outbound</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3><code>msg</code> 保留传输身份</h3><p>Handler 从中取得 channel、chat_id 和 metadata，因此响应能返回原会话；<code>/restart</code> 也用它跨进程保存通知目标。</p></div>
+  <div data-step-panel><h3><code>session</code> 允许为空，<code>key</code> 不为空</h3><p>Turn 状态机内调用时 Session 已加载；外层快速分流时传入 None，Handler 需要时再通过 <code>loop.sessions.get_or_create(key)</code> 获取。</p></div>
+  <div data-step-panel><h3><code>raw</code> 与 <code>args</code> 分离</h3><p>raw 保留用户输入；prefix 匹配后 Router 按前缀长度切出 args，并保留参数原始大小写供 Handler 自行解释。</p></div>
+  <div data-step-panel><h3><code>loop</code> 是命令的能力入口</h3><p>命令直接访问 sessions、consolidator、dream、bus、tasks 与 provider。它功能强但耦合高，因此 MyTool 明确禁止检查或修改 <code>commands</code>。</p></div>
+  <div data-step-panel><h3>返回值已经是渠道响应</h3><p>Handler 返回 <code>OutboundMessage | None</code>，不再经过 ContextBuilder、Provider 或 AgentRunner；None 表示未处理或无响应。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">展示契约与执行契约是两张表</h2><div class="compare-grid"><div class="card"><h3><code>BuiltinCommandSpec</code></h3><p>保存 command、title、description、icon、arg_hint。它服务于 WebUI palette、帮助文本与用户发现，不含 Handler。</p></div><div class="card"><h3><code>CommandRouter</code></h3><p>保存 command/prefix 到 Handler 的映射。它决定命令是否真的可执行，却不知道标题、图标或参数提示。</p></div></div>
+
+<div class="code-block"><div class="code-head"><span>command/builtin.py:18–33</span><span>UI 元数据</span></div><pre><code>@dataclass(frozen=True)
+class BuiltinCommandSpec:
+    command: str
+    title: str
+    description: str
+    icon: str
+    arg_hint: str = ""
+
+def builtin_command_palette():
+    return [spec.as_dict() for spec in BUILTIN_COMMAND_SPECS]</code></pre></div>
+
+<h2 id="reading-section-04">一个 Handler 的标准形态</h2><div class="code-block"><div class="code-head"><span>command/builtin.py:452–459</span><span>/help</span></div><pre><code>async def cmd_help(ctx: CommandContext) -&gt; OutboundMessage:
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=build_help_text(),
+        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+    )</code></pre></div>
+<p>Handler 负责把原消息的寻址信息带回去，也负责决定渲染提示。错误通常被转换成用户可读内容，而不是进入 LLM 的 tool-error 恢复路径。</p>
+
+<div class="callout warning"><strong>一致性风险：</strong>元数据与 Router 分开维护，渠道还可能维护第三份菜单。新增命令若只改其中一处，就会出现“菜单里有但不能执行”或“能执行但用户发现不了”。Telegram 当前的 <code>/history</code> 就值得在最后一页重点审查。</div>
+
+<h2 id="reading-section-05">与 Tool 契约的差别</h2><table class="source-table"><thead><tr><th>维度</th><th>Slash Command</th><th>Tool</th></tr></thead><tbody>
+  <tr><td>调用者</td><td>用户显式输入命令</td><td>LLM 产生结构化 tool call</td></tr>
+  <tr><td>输入协议</td><td>raw string + 手工解析 args</td><td>JSON Schema + cast/validate</td></tr>
+  <tr><td>执行上下文</td><td>直接持有 AgentLoop</td><td>ToolContext / RequestContext</td></tr>
+  <tr><td>返回协议</td><td>OutboundMessage，直接给用户</td><td>tool result，先返回模型</td></tr>
+  <tr><td>扩展机制</td><td>当前为源码内静态注册</td><td>内置扫描、entry point、MCP</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-06">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-command-router-py-15" data-original-href="../../../nanobot/command/router.py" data-source-label="router.py:12" title="阅读 nanobot/command/router.py:15–55 的代表性摘录与讲解">router.py · 站内摘录</a></td><td>Handler 与 CommandContext</td></tr><tr><td><a href="workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="builtin.py:18" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">builtin.py · 站内摘录</a></td><td>展示元数据</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/bus/events.py" data-source-label="bus/events.py" title="nanobot/bus/events.py 的所属模块讲解；该文件未单独逐行收录">bus/events.py · 模块讲解</a></td><td>Inbound/Outbound 消息协议</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">为什么外层快速分流时 <code>session</code> 必须允许为 None？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>priority 命令在外层 run 循环、Session lock 和 Session 加载之前执行，以便立即停止或查询；因此构造 <code>CommandContext</code> 时可能还没有 Session，Handler 必须能按需加载。</p></div></details></li><li><span class="review-question">args 为什么不直接存进 InboundMessage？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>args 是 Router 匹配 prefix 后从原始命令临时切出的执行参数，不是所有入站消息的通用协议字段。放入 <code>CommandContext</code> 可保持 <code>InboundMessage</code> 渠道无关且不可被入口伪造解析结果。</p></div></details></li><li><span class="review-question">展示元数据和执行注册分离会带来什么维护风险？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>UI palette/help 可能展示已删除或尚未注册的命令，Router 也可能新增命令却不被渠道发现。当前 Telegram <code>/history</code> 漂移就是例子，因此 metadata、Router 和渠道表必须联动测试。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">09.01 · 命令契约与元数据</footer></div></main></div></body></html>

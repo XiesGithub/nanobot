@@ -1,0 +1,66 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>04 · Token 预算与分层压缩 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="context-management" data-page="token-budget">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="../02-llm-provider-gateway/workshop.html#source-8" data-original-href="../../../nanobot/agent/loop.py" data-source-label="AgentLoop 源码" title="阅读 nanobot/agent/loop.py:453–481 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Context · token governance</p><h1>Token 预算与分层压缩</h1><p class="lead">nanobot 不依赖单一截断点。它依次减少长期 Session 压力、限制 replay、压缩旧工具输出，并在每次模型调用前执行最后 snip；每层解决不同时间尺度的问题。</p><div class="meta-row"><span class="chip">context window</span><span class="chip">output reserve</span><span class="chip">four guardrails</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">共同预算公式</h2><div class="data-box"><div class="label">输入安全预算</div><div><code>context_window_tokens - reserved_output_tokens - 1024</code></div></div><p>1024 是 tokenizer 估算漂移和 Provider 封装开销的安全缓冲。若结果不为正，AgentLoop replay 会退到至少 128 token 或 context window 的一半；Runner 的最终 snip 则在 budget≤0 时放弃该轮裁剪。</p>
+
+<h2 id="reading-section-02">四层治理，从长期到即时</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">L1 · Consolidator</div><div class="arch-items"><span class="arch-item">模型调用前</span><span>完整 Prompt 超预算 → 摘要最老 user-turn 前缀 → 推进 last_consolidated</span></div></div>
+  <div class="arch-layer"><div class="arch-label">L2 · Session replay</div><div class="arch-items"><span class="arch-item">每个新回合</span><span>max_messages 粗切 + replay token budget 细切，只传合法近期尾部</span></div></div>
+  <div class="arch-layer"><div class="arch-label">L3 · Microcompact</div><div class="arch-items"><span class="arch-item">每次 Runner iteration</span><span>旧且巨大的常见工具结果替换为一行 omitted summary</span></div></div>
+  <div class="arch-layer"><div class="arch-label">L4 · Final snip</div><div class="arch-items"><span class="arch-item">Provider 请求前</span><span>估算 system + history + tools；保留全部 system 与最近非 system 尾部</span></div></div>
+</div>
+
+<div class="callout"><strong>AutoCompact 是另一条生命周期路径：</strong>它不以 token 溢出为条件，而是在 Session 空闲超过 TTL 时归档旧前缀、保留最多 8 条合法近期消息，并把摘要在下一轮注入 system prompt。</div>
+
+<h2 id="reading-section-03">一轮请求中的准确顺序</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>before build</small><b>AutoCompact 摘要</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>state build</small><b>Consolidator</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>replay</small><b>Session caps</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>each iteration</small><b>Runner governance</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3><code>prepare_session()</code></h3><p>先重新加载可能已被后台压缩的 Session，并取出 hot/cold archived summary。</p></div>
+  <div data-step-panel><h3><code>maybe_consolidate_by_tokens()</code></h3><p>以完整 system prompt、工具定义和未归档历史估算压力；超过预算时最多五轮归档到 ratio target。</p></div>
+  <div data-step-panel><h3><code>get_history()</code></h3><p>即使 Session 尚未触发 Consolidator，也只 replay 配置的最大消息数和 token 尾部，保障正常请求的输入规模。</p></div>
+  <div data-step-panel><h3>每次 LLM/Tool 循环前重新治理</h3><p>工具结果会在本轮不断加入 messages，因此 Runner 每一 iteration 都重新 repair、microcompact、budget 和 snip，而非只在开场处理一次。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-04">Token 估算链</h2><div class="code-block"><div class="code-head"><span>utils/helpers.py:416</span><span>Provider 优先，tiktoken 降级</span></div><pre><code>provider_counter = provider.estimate_prompt_tokens
+if provider_counter returns tokens &gt; 0:
+    return tokens, source
+
+estimated = estimate_prompt_tokens(messages, tools)
+return (estimated, "tiktoken") if estimated &gt; 0 else (0, "none")</code></pre></div>
+<p>回退估算不仅统计 content，还统计 tool_calls、reasoning_content、name、tool_call_id、工具 Schema 和每条消息的 framing overhead。图片的真实 token 成本依赖 Provider，因此 Provider-specific counter 更准确。</p>
+
+<h2 id="reading-section-05">Runner 的 final snip</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>估算完整请求</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>保留 system</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>倒序取尾部</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>恢复 user</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>修复工具边界</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>包含 tools 定义</h3><p>工具 Schema 自身可能很大，必须与 messages 一起计入。</p></div>
+  <div data-step-panel><h3>System 不参与丢弃</h3><p>所有 system messages 完整保留，剩余 budget 才分给非 system 历史。</p></div>
+  <div data-step-panel><h3>从最新消息向前累加</h3><p>至少保留一条；一旦继续加入会超预算就停止。</p></div>
+  <div data-step-panel><h3>确保存在用户起点</h3><p>尾部没有 user 时从被裁区域找最近 user；代码宁可略超预算，也避免部分 Provider 拒绝 system→assistant。</p></div>
+  <div data-step-panel><h3>再找 legal start</h3><p>snip 可能重新制造孤立 tool result，因此切完后还要再次执行 orphan drop 和 missing-result backfill。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-06">Microcompact 的精准范围</h2><table class="source-table"><thead><tr><th>条件</th><th>规则</th><th>目的</th></tr></thead><tbody>
+  <tr><td>工具名称</td><td>read_file、exec、grep、glob、web_search、web_fetch、list_dir</td><td>只处理可通过上下文或重新调用恢复的常见大输出</td></tr>
+  <tr><td>新旧范围</td><td>保留最近 10 个 compactable tool results</td><td>近期工作证据仍完整</td></tr>
+  <tr><td>内容大小</td><td>小于 500 字符不压缩</td><td>避免为小结果付出无意义的信息损失</td></tr>
+  <tr><td>替换文本</td><td><code>[tool-name result omitted from context]</code></td><td>保留协议配对与工具发生过的事实</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-07">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="../09-slash-command-system/workshop.html#guide-nanobot-agent-loop-py-677" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:711" title="阅读 nanobot/agent/loop.py:677–703 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>Replay token budget 公式与极小窗口回退</td></tr>
+  <tr><td><a href="../01-request-lifecycle/workshop.html#source-5" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1360" title="阅读 nanobot/agent/loop.py:1360–1396 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>Consolidator → get_history → build_messages 顺序</td></tr>
+  <tr><td><a href="../03-memory-system/workshop.html#source-4" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:669" title="阅读 nanobot/agent/memory.py:634–667 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td>Consolidator 多轮压缩与 ratio target</td></tr>
+  <tr><td><a href="workshop.html#source-6" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:251" title="阅读 nanobot/agent/runner.py:997–1020 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>每次 iteration 的治理调用顺序</td></tr>
+  <tr><td><a href="workshop.html#source-8" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:1064" title="阅读 nanobot/agent/runner.py:1064–1087 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>Microcompact 条件</td></tr>
+  <tr><td><a href="workshop.html#source-9" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:1110" title="阅读 nanobot/agent/runner.py:1110–1152 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>Final snip 算法</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/helpers.py" data-source-label="helpers.py:333" title="nanobot/utils/helpers.py 的所属模块讲解；该文件未单独逐行收录">helpers.py · 模块讲解</a></td><td>通用 prompt/message token 估算</td></tr>
+</tbody></table>
+<div class="callout warning"><strong>治理副本不回写 Session：</strong>Runner 用 <code>messages_for_model</code> 做 repair/compact/snip，同时保留原 <code>messages</code> 作为真实会话；这些临时治理不会改变后续保存新消息时的 append boundary。</div>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">Consolidator 与 Runner snip 的最大区别是什么？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Consolidator 改变持久化进度，把旧 Session 前缀写入 raw archive；Runner snip 只裁剪本次 Provider 请求的副本，完整轨迹仍用于保存和恢复。</p></div></details></li><li><span class="review-question">为什么工具 Schema 也必须计入 token 估算？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Provider 把 tools definitions 与 messages 一起放进请求上下文，Schema 名称、描述和参数都占 token；遗漏它会让可用消息预算虚高。</p></div></details></li><li><span class="review-question">Runner 为什么每个 iteration 都重新治理 Context？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>每次工具结果都会增长上下文，且注入消息、图片和不同迭代的 tool calls 都会改变协议边界。Runner 因此在每次模型请求前重新复制、估算、修复和裁剪。</p></div></details></li><li><span class="review-question">为什么 final snip 完成后还要再跑一次协议修复？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>最终 snip 可能恰好移除 assistant tool call 或对应 result 的一侧。再次修复会清掉孤立结果或补齐缺失结果，确保送给 Provider 的最终数组合法。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">04.03 · Token 预算与分层压缩</footer></div></main></div></body></html>

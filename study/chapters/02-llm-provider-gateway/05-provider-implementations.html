@@ -1,0 +1,55 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>02.05 · Provider 实现分类 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head>
+<body data-study-root="../.." data-chapter="llm-provider-gateway" data-page="provider-implementations"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-7" data-original-href="../../../nanobot/providers/openai_compat_provider.py" data-source-label="兼容层源码" title="阅读 nanobot/providers/openai_compat_provider.py:470–511 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Provider · backend families</p><h1>Provider 实现分类：品牌很多，协议家族很少</h1><p class="lead">Registry 中有大量 Provider 名称，但 Python 实现并非一品牌一类。理解时应按 wire protocol 与认证方式分组：OpenAI-compatible 是最大公约数，其余类只在协议或认证确实不同的地方分叉。</p><div class="meta-row"><span class="chip">OpenAI-compatible</span><span class="chip">native Anthropic</span><span class="chip">Bedrock Converse</span><span class="chip">OAuth</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">六种实现路径</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>common</small><b>OpenAICompat</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>native</small><b>Anthropic</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>azure</small><b>Azure Responses</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>aws</small><b>Bedrock</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>oauth</small><b>Codex/Copilot</b></button>
+</div><div class="step-panels">
+  <div data-step-panel><h3>OpenAI-compatible 承担大多数品牌</h3><p>基于 <code>AsyncOpenAI</code>，由 ProviderSpec 修正 base URL、模型前缀、max token 字段、thinking 风格和模型级覆盖；云 Gateway 与 Ollama/vLLM 等本地端点都复用它。</p></div>
+  <div data-step-panel><h3>Anthropic 使用原生 Messages SDK</h3><p>独立转换 system/messages、content blocks、tool_use/tool_result、图片、Prompt Cache 与 extended thinking，再规范化 stop reason 和 usage。</p></div>
+  <div data-step-panel><h3>Azure 直接走 Responses API</h3><p><code>AzureOpenAIProvider</code> 要求 endpoint 与 key，把 base 规范化为 <code>/openai/v1/</code>，并复用 <code>openai_responses</code> 的消息、工具和 SSE 转换。</p></div>
+  <div data-step-panel><h3>Bedrock 使用 Converse/ConverseStream</h3><p>它面向 boto3 的同步客户端，普通请求和阻塞 stream 读取通过 <code>asyncio.to_thread()</code> 接入异步 Agent；认证可来自 region/profile/AWS 环境。</p></div>
+  <div data-step-panel><h3>OAuth 后端把令牌生命周期封装起来</h3><p>OpenAI Codex 直接请求 Codex Responses SSE；GitHub Copilot 继承 OpenAICompatProvider，但每次调用前交换并刷新 Copilot access token。</p></div>
+</div></section>
+
+<h2 id="reading-section-02">实现对比</h2><table class="source-table"><thead><tr><th>实现</th><th>底层协议/客户端</th><th>最关键差异</th></tr></thead><tbody>
+  <tr><td><code>OpenAICompatProvider</code></td><td>AsyncOpenAI Chat/Responses</td><td>Spec 驱动多个品牌；本地连接、thinking、extra_body 和兼容字段</td></tr>
+  <tr><td><code>AnthropicProvider</code></td><td>AsyncAnthropic Messages</td><td>内容块、原生工具、Prompt Cache、signed thinking block</td></tr>
+  <tr><td><code>AzureOpenAIProvider</code></td><td>Azure endpoint + Responses</td><td>deployment 作为 model；强制 key/base；复用 Responses converters</td></tr>
+  <tr><td><code>BedrockProvider</code></td><td>boto3 bedrock-runtime Converse</td><td>AWS 认证、同步 SDK 桥接、Bedrock content/tool 格式</td></tr>
+  <tr><td><code>OpenAICodexProvider</code></td><td>httpx + Codex Responses SSE</td><td>oauth-cli-kit token、账户 header、始终消费 SSE</td></tr>
+  <tr><td><code>GitHubCopilotProvider</code></td><td>Copilot token exchange + OpenAI-compatible</td><td>缓存短期 access token，调用前刷新 client key</td></tr>
+</tbody></table>
+
+<div class="code-block"><div class="code-head"><span>openai_compat_provider.py · Spec 驱动差异</span><span>概念摘录</span></div><pre><code>if spec and spec.strip_model_prefix:
+    model_name = model_name.split("/")[-1]
+
+if spec and spec.supports_max_completion_tokens:
+    kwargs["max_completion_tokens"] = max(1, max_tokens)
+else:
+    kwargs["max_tokens"] = max(1, max_tokens)
+
+for pattern, overrides in spec.model_overrides:
+    if pattern in model_name.lower():
+        kwargs.update(overrides)
+        break</code></pre></div>
+
+<h2 id="reading-section-03">OpenAI-compatible 为什么仍然不简单</h2><div class="card-grid">
+  <div class="card"><h3>消息兼容</h3><p>内部消息可能含图片、reasoning_content、thinking blocks 与 Provider-specific tool call 字段；发出前必须过滤或保留正确子集。</p></div>
+  <div class="card"><h3>参数兼容</h3><p>GPT-5/o 系列在启用 reasoning 时拒绝 temperature；某些服务改用 max_completion_tokens；不同 Provider 的 thinking 开关字段不同。</p></div>
+  <div class="card"><h3>连接兼容</h3><p>本地服务器常提前关闭 keepalive，Provider 会为本地 endpoint 创建 keepalive_expiry=0 的 httpx client；云端保留连接池收益。</p></div>
+</div>
+
+<div class="callout warning"><strong>不要把其他能力混进主 Provider：</strong>图像生成和语音转录位于 <code>image_generation.py</code>、<code>transcription.py</code>，有不同输入输出和生命周期。本章聚焦驱动 AgentRunner 的主聊天 Provider。</div>
+
+<h2 id="reading-section-04">源码入口</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-7" data-original-href="../../../nanobot/providers/openai_compat_provider.py" data-source-label="openai_compat_provider.py" title="阅读 nanobot/providers/openai_compat_provider.py:470–511 的代表性摘录与讲解">openai_compat_provider.py · 站内摘录</a></td><td>最大实现族与 Spec 驱动适配</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/anthropic_provider.py" data-source-label="anthropic_provider.py" title="nanobot/providers/anthropic_provider.py 的所属模块讲解；该文件未单独逐行收录">anthropic_provider.py · 模块讲解</a></td><td>原生 content block、thinking 与工具转换</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/azure_openai_provider.py" data-source-label="azure_openai_provider.py" title="nanobot/providers/azure_openai_provider.py 的所属模块讲解；该文件未单独逐行收录">azure_openai_provider.py · 模块讲解</a></td><td>Azure Responses API</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/bedrock_provider.py" data-source-label="bedrock_provider.py" title="nanobot/providers/bedrock_provider.py 的所属模块讲解；该文件未单独逐行收录">bedrock_provider.py · 模块讲解</a></td><td>Converse 与同步 SDK 的异步桥接</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/openai_codex_provider.py" data-source-label="openai_codex_provider.py" title="nanobot/providers/openai_codex_provider.py 的所属模块讲解；该文件未单独逐行收录">openai_codex_provider.py · 模块讲解</a></td><td>Codex OAuth/SSE 请求</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/providers/github_copilot_provider.py" data-source-label="github_copilot_provider.py" title="nanobot/providers/github_copilot_provider.py 的所属模块讲解；该文件未单独逐行收录">github_copilot_provider.py · 模块讲解</a></td><td>Copilot token 交换和兼容层复用</td></tr>
+</tbody></table>
+<h2 id="reading-section-05">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 OpenRouter 和 Ollama 可以共用一个实现类？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>两者都接受 OpenAI Chat Completions 风格的 messages、tools 和响应；差异主要是默认 base URL、鉴权和模型命名，这些由 <code>ProviderSpec</code> 与构造参数表达。</p></div></details></li><li><span class="review-question">Anthropic thinking block 为什么不能只拼进普通文本？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Anthropic 的 thinking block 带类型、签名或 redacted content，后续轮次需要原结构。实现把它放进 <code>LLMResponse.thinking_blocks</code> 并在历史转换时还原，不能降格为普通文本。</p></div></details></li><li><span class="review-question">GitHubCopilotProvider 为什么选择继承 OpenAICompatProvider？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Copilot 最终仍使用 OpenAI 风格的聊天和工具协议；子类主要增加 OAuth/token 获取、刷新和专用端点处理，继承兼容 Provider 可复用消息转换、流解析与错误规范化。</p></div></details></li><li><span class="review-question">Bedrock 的同步客户端如何避免阻塞事件循环？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Bedrock 客户端调用是同步阻塞的，实现通过 <code>asyncio.to_thread()</code>（或等价线程卸载）执行请求，使 AgentLoop 的事件循环仍能服务其他 Session 和取消信号。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02.05 · Provider 实现分类</footer></div></main></div></body></html>

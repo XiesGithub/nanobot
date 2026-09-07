@@ -1,0 +1,59 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>03 · Dream 两阶段记忆整理 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="memory-system" data-page="dream">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-1" data-original-href="../../../nanobot/agent/memory.py" data-source-label="Dream 源码" title="阅读 nanobot/agent/memory.py:235–275 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Memory · heavyweight consolidation</p><h1>Dream：两阶段整理长期记忆</h1><p class="lead">Consolidator 只提取线索；Dream 才负责把新线索与已有长期文件进行比较、去重、纠错和增量编辑。它把“理解”与“执行修改”拆成两个模型阶段。</p><div class="meta-row"><span class="chip">Phase 1 · analyze</span><span class="chip">Phase 2 · edit</span><span class="chip">cursor commit</span><span class="chip">Git audit</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">完整运行流程</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>读取新归档</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>标注陈旧度</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>Phase 1 分析</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>Phase 2 编辑</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>提交进度</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>按 Dream cursor 增量读取</h3><p>读取 <code>cursor &gt; .dream_cursor</code> 的合法条目，每次只取前 <code>max_batch_size</code> 条；没有新条目直接返回 <code>False</code>。</p></div>
+  <div data-step-panel><h3>只给 MEMORY 标注行龄</h3><p>借助 Git blame 计算每行距最后修改的天数；超过 14 天加 <code>← Nd</code>。行数不一致、Git 不可用或开关关闭时原样使用。</p></div>
+  <div data-step-panel><h3>Phase 1：分析但不改文件</h3><p>普通 Provider 调用、无 tools。输入包括本批 history、当前日期、MEMORY/SOUL/USER 预览；输出 <code>[FILE]</code>、<code>[FILE-REMOVE]</code>、<code>[SKILL]</code> 或 <code>[SKIP]</code>。</p></div>
+  <div data-step-panel><h3>Phase 2：最小权限增量编辑</h3><p>把分析结果交给 <code>AgentRunner</code>，只注册 <code>read_file</code>、<code>edit_file</code> 和仅能写入 workspace/skills 的 <code>write_file</code>。</p></div>
+  <div data-step-panel><h3>完成才推进 cursor</h3><p>只有 Runner 的 <code>stop_reason == completed</code> 才将 cursor 推进到本批最后一条；否则保留原值，下个周期重试。最后压缩 history 上限并按需 Git commit。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">为什么要拆成两阶段</h2><div class="compare-grid">
+  <div class="card flat"><h3>Phase 1 · 形成编辑计划</h3><p>同时看“新发生了什么”和“旧 Memory 是否重复或过期”。分析阶段没有工具，因此不能边看边随意写盘。</p></div>
+  <div class="card flat"><h3>Phase 2 · 执行可观察动作</h3><p>Runner 产生 tool events，Dream 从成功事件构建 changelog。提示词要求精确 old_text、同文件批量修改、手术式编辑，禁止整文件重写。</p></div>
+</div>
+
+<h2 id="reading-section-03">三类长期文件的规范归属</h2><table class="source-table"><thead><tr><th>文件</th><th>放什么</th><th>Dream 的处理原则</th></tr></thead><tbody>
+  <tr><td><code>USER.md</code></td><td>用户身份、长期偏好、稳定事实</td><td>用户更正优先；不因“很久没修改”自动删除</td></tr>
+  <tr><td><code>SOUL.md</code></td><td>Agent 行为、语气与沟通方式</td><td>只在行为偏好得到确认或纠正时更新</td></tr>
+  <tr><td><code>memory/MEMORY.md</code></td><td>项目知识、决定、持续有效的工作上下文</td><td>去除与 USER/SOUL 重复的副本，清理客观过期内容</td></tr>
+  <tr><td><code>skills/&lt;name&gt;/SKILL.md</code></td><td>重复出现两次以上、有明确步骤的可复用流程</td><td>先读 skill-creator 格式并检查现有 Skill 去重</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-04">输入上限与工具边界</h2><div class="data-box"><div class="label">Prompt 预览上限</div><div>MEMORY 32,000 字符；SOUL 与 USER 各 16,000；每条 history 预览 4,000。仅预览截断，Phase 2 仍可通过 <code>read_file</code> 查看完整文件。</div></div><div class="data-box"><div class="label">Runner 安全预算</div><div><code>max_iterations</code> 限制工具循环次数，<code>max_tool_result_chars</code> 限制工具结果体积，工具错误不会立即让整个任务抛异常。</div></div><div class="data-box"><div class="label">写入边界</div><div><code>edit_file</code> 可在 workspace 内增量改文件；<code>write_file</code> 的 allowed_dir 只指向 <code>workspace/skills</code>，防止新建任意文件。</div></div>
+
+<h2 id="reading-section-05">Cursor 是 Dream 的提交点</h2><div class="code-block"><div class="code-head"><span>memory.py:1060 · 概念摘录</span><span>at-least-once 重试语义</span></div><pre><code>if result and result.stop_reason == "completed":
+    new_cursor = batch[-1]["cursor"]
+    store.set_last_dream_cursor(new_cursor)
+else:
+    # 不推进：下次周期仍读取同一批 history
+    logger.warning("cursor NOT advanced")</code></pre></div>
+<p>这个顺序避免“文件没改完但归档被标为已消费”的静默丢失。代价是：如果外部文件修改成功、但 Runner 最终没有 completed，下一轮可能再次分析同一批；因此 Phase 1 的去重与 Phase 2 的精确编辑也承担幂等保护。</p>
+
+<h2 id="reading-section-06">Git 审计与用户命令</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">Dream 完成</div><div class="arch-items"><span class="arch-item">tool_events</span><span>只收集 status=ok 的变更</span></div></div>
+  <div class="arch-layer"><div class="arch-label">自动提交</div><div class="arch-items"><span class="arch-item">GitStore.auto_commit()</span><span>只有存在 changelog 且版本库已初始化才提交</span></div></div>
+  <div class="arch-layer"><div class="arch-label">查看</div><div class="arch-items"><span class="arch-item">/dream-log [sha]</span><span>展示选定提交的变更文件和 diff</span></div></div>
+  <div class="arch-layer"><div class="arch-label">恢复</div><div class="arch-items"><span class="arch-item">/dream-restore [sha]</span><span>撤销指定 Dream change，并创建新的安全提交</span></div></div>
+</div>
+
+<h2 id="reading-section-07">核心源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>职责</th><th>关键点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-5" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:831" title="阅读 nanobot/agent/memory.py:987–1032 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td>Dream tools</td><td>独立 FileStates 与最小写入权限</td></tr>
+  <tr><td><a href="workshop.html#source-5" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:888" title="阅读 nanobot/agent/memory.py:987–1032 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td>行龄标注</td><td>14 天只是审查信号，不是自动过期</td></tr>
+  <tr><td><a href="workshop.html#source-5" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:934" title="阅读 nanobot/agent/memory.py:987–1032 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td><code>Dream.run</code></td><td>批处理、两阶段、cursor 和 commit</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/templates/agent/dream_phase1.md" data-source-label="dream_phase1.md" title="nanobot/templates/agent/dream_phase1.md 的所属模块讲解；该文件未单独逐行收录">dream_phase1.md · 模块讲解</a></td><td>分析规则</td><td>原子事实、去重、陈旧性和 Skill 判定</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/templates/agent/dream_phase2.md" data-source-label="dream_phase2.md" title="nanobot/templates/agent/dream_phase2.md 的所属模块讲解；该文件未单独逐行收录">dream_phase2.md · 模块讲解</a></td><td>编辑规则</td><td>手术式修改与 Skill 去重</td></tr>
+  <tr><td><a href="../09-slash-command-system/workshop.html#guide-nanobot-command-builtin-py-415" data-original-href="../../../nanobot/command/builtin.py" data-source-label="command/builtin.py:195" title="阅读 nanobot/command/builtin.py:415–449 的代表性摘录与讲解">command/builtin.py · 站内摘录</a></td><td>用户命令</td><td>后台触发、日志预览和恢复</td></tr>
+</tbody></table>
+<div class="callout warning"><strong>两种“成功”要区分：</strong><code>Dream.run()</code> 最后返回 <code>True</code> 表示本次确实读到了工作；只有 <code>stop_reason=completed</code> 才表示消费 cursor 已提交。Phase 2 不完整时仍会 compact history，但未消费条目只要在保留上限内就会重试。</div>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">行龄超过 14 天是否会自动删除这条 Memory？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>不会。14 天行龄是整理 prompt 中帮助模型判断陈旧性的信号；是否删除或合并由 Dream Agent 通过受限文件工具修改 MEMORY.md，代码没有按日期直接删除长期记忆。</p></div></details></li><li><span class="review-question">为什么 Phase 2 使用 AgentRunner，而 Phase 1 只做普通 chat？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Phase 1 只需让模型从 raw history 生成候选摘要，普通 chat 足够；Phase 2 要读取并编辑记忆文件、遵循工具结果继续迭代，所以复用带受限 ToolRegistry 的 <code>AgentRunner</code>。</p></div></details></li><li><span class="review-question">Dream 工具已经改了文件，但 Runner 未 completed，会产生什么重试语义？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>文件副作用可能已经发生，但 cursor 不推进；下一次 Dream 会重放同一批候选，因此工具操作必须尽量幂等，GitStore 版本也为重复或错误修改提供审计与恢复点。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">03.04 · Dream 两阶段记忆整理</footer></div></main></div></body></html>

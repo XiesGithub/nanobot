@@ -1,0 +1,81 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08 · CronTool、Agent 执行与回注 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="automation-system" data-page="cron-agent-delivery">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-tools-cron-py-134" data-original-href="../../../nanobot/agent/tools/cron.py" data-source-label="CronTool 源码" title="阅读 nanobot/agent/tools/cron.py:134–155 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Automation · agent bridge</p><h1>从“提醒我”到执行结果回到原聊天</h1><p class="lead">CronTool 负责创建 Job；CronService 只负责到点调用回调；Gateway 再把 Job 转成一次完整 Agent 请求，并把值得通知的结果投递回原渠道与原 Session。</p><div class="meta-row"><span class="chip">ContextAware tool</span><span class="chip">isolated cron session</span><span class="chip">evaluation</span><span class="chip">channel context bridge</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">创建阶段数据流</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>模型选 cron</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>校验参数</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>构造 Schedule</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>捕获路由</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>保存 Job</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>工具由模型调用</h3><p>Agent 根据 cron Skill 把自然语言时间转换成 <code>every_seconds</code>、<code>cron_expr + tz</code> 或 ISO <code>at</code>。</p></div>
+  <div data-step-panel><h3>根 Schema 保持简单</h3><p>顶层只 required <code>action</code>，避免部分 Provider 拒绝 oneOf/anyOf；<code>validate_params()</code> 再按 action 要求 message 或 job_id。</p></div>
+  <div data-step-panel><h3>时间归一</h3><p>优先级是 every → cron → at。naive ISO 使用 Agent 配置时区；tz 只允许和 cron_expr 一起使用。</p></div>
+  <div data-step-panel><h3>ContextVar 保存当前请求</h3><p><code>set_context()</code> 捕获 channel、chat_id、metadata 和 session_key；每次并发 Agent turn 拥有独立上下文，不用共享可变字段。</p></div>
+  <div data-step-panel><h3>写入 CronService</h3><p>Job payload 保存 message、deliver、channel/to、channel metadata 和原 session key，并返回简短 id 给用户。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="code-block"><div class="code-head"><span>agent/tools/cron.py · 创建核心</span><span>概念摘录</span></div><pre><code>job = cron_service.add_job(
+    name=name or message[:30],
+    schedule=schedule,
+    message=message,
+    deliver=deliver,
+    channel=current_channel,
+    to=current_chat_id,
+    channel_meta=current_metadata,
+    session_key=current_session_key,
+)</code></pre></div>
+
+<h2 id="reading-section-02">触发阶段完整链路</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">CronService</div><div class="arch-items"><span class="arch-item">_execute_job</span><span>→</span><span class="arch-item">on_cron_job(job)</span></div></div>
+  <div class="arch-layer"><div class="arch-label">执行隔离</div><div class="arch-items"><span class="arch-item">cron context = True</span><span class="arch-item">message record = True</span><span class="arch-item">progress = silent</span></div></div>
+  <div class="arch-layer"><div class="arch-label">Agent</div><div class="arch-items"><span class="arch-item">process_direct(reminder_note)</span><span>session=<code>cron:{job.id}</code></span></div></div>
+  <div class="arch-layer"><div class="arch-label">通知</div><div class="arch-items"><span class="arch-item">MessageTool 已发送？</span><span>否则 evaluate_response → deliver_to_channel</span></div></div>
+  <div class="arch-layer"><div class="arch-label">上下文回注</div><div class="arch-items"><span class="arch-item">原 channel Session</span><span>追加 assistant + <code>_channel_delivery=True</code></span></div></div>
+</div>
+
+<h2 id="reading-section-03">触发时为何再次进入 Agent Loop</h2><p>Job 的 message 是“要做什么”，不一定是固定提醒文本。例如“检查 GitHub stars 并报告”需要网络工具和推理。因此 Gateway 构造 reminder preamble，通过 <code>process_direct()</code> 运行完整上下文、模型与工具循环，而不是让 CronService 直接把 message 发给渠道。</p>
+
+<div class="code-block"><div class="code-head"><span>cli/commands.py:730 · Agent bridge</span><span>概念摘录</span></div><pre><code>reminder_note = "The scheduled time has arrived..." + job.payload.message
+
+resp = await agent.process_direct(
+    reminder_note,
+    session_key=f"cron:{job.id}",
+    channel=job.payload.channel or "cli",
+    chat_id=job.payload.to or "direct",
+    on_progress=_silent,
+)</code></pre></div>
+
+<h2 id="reading-section-04">三个防重复/防失控机制</h2><div class="compare-grid">
+  <div class="card flat"><h3>禁止 Cron 内再创建 Cron</h3><p>执行前设置 <code>_in_cron_context=True</code>。若任务中的 Agent 再调用 <code>cron(action="add")</code>，工具返回错误，避免自动任务递归扩散。</p></div>
+  <div class="card flat"><h3>MessageTool 已发送就不再补发</h3><p>如果 Agent 在本轮主动调用 message 工具完成投递，<code>_sent_in_turn</code> 为真；Gateway 不再把 final response 发送一次。</p></div>
+  <div class="card flat"><h3>后台结果先评估</h3><p>没有主动 message 时，<code>evaluate_response()</code> 用结构化 tool-call 判断结果是否值得通知。评估异常时默认通知，避免重要结果被静默丢弃。</p></div>
+</div>
+
+<h2 id="reading-section-05">为什么有两个 Session</h2><table class="source-table"><thead><tr><th>Session</th><th>写入内容</th><th>目的</th></tr></thead><tbody>
+  <tr><td><code>cron:{job.id}</code></td><td>这个 Job 每次运行的完整 Agent 历史</td><td>不同 Job 互不污染，并让周期任务保留自己的工作上下文</td></tr>
+  <tr><td>原始 <code>channel:chat_id</code></td><td>真正送达用户的 assistant 文本</td><td>用户回复“继续”“好的”时，普通对话能看到刚才的自动消息</td></tr>
+</tbody></table>
+
+<div class="code-block"><div class="code-head"><span>cli/commands.py:680 · 渠道上下文桥</span><span>概念摘录</span></div><pre><code>session = session_manager.get_or_create(original_session_key)
+session.add_message(
+    "assistant",
+    delivered_content,
+    _channel_delivery=True,
+)
+session_manager.save(session)
+await bus.publish_outbound(message)</code></pre></div>
+
+<h2 id="reading-section-06">核心源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#guide-nanobot-agent-tools-cron-py-134" data-original-href="../../../nanobot/agent/tools/cron.py" data-source-label="agent/tools/cron.py:20" title="阅读 nanobot/agent/tools/cron.py:134–155 的代表性摘录与讲解">agent/tools/cron.py · 站内摘录</a></td><td>Provider 兼容的参数 Schema</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-agent-tools-cron-py-134" data-original-href="../../../nanobot/agent/tools/cron.py" data-source-label="agent/tools/cron.py:58" title="阅读 nanobot/agent/tools/cron.py:134–155 的代表性摘录与讲解">agent/tools/cron.py · 站内摘录</a></td><td>ContextVar、ContextAware 和 cron context</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-agent-tools-cron-py-134" data-original-href="../../../nanobot/agent/tools/cron.py" data-source-label="agent/tools/cron.py:128" title="阅读 nanobot/agent/tools/cron.py:134–155 的代表性摘录与讲解">agent/tools/cron.py · 站内摘录</a></td><td>action 分派与递归创建保护</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="cli/commands.py:680" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">cli/commands.py · 模块讲解</a></td><td>投递并写回原 Session</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/cli/commands.py" data-source-label="cli/commands.py:716" title="nanobot/cli/commands.py 的所属模块讲解；该文件未单独逐行收录">cli/commands.py · 模块讲解</a></td><td>Cron Job → Agent → evaluator → channel</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/evaluator.py" data-source-label="utils/evaluator.py:42" title="nanobot/utils/evaluator.py 的所属模块讲解；该文件未单独逐行收录">utils/evaluator.py · 模块讲解</a></td><td>后台结果的结构化通知判断</td></tr>
+</tbody></table>
+<div class="callout warning"><strong>deliver=false 的含义：</strong>任务仍会运行并更新 Cron run history，只是 Gateway 不把 final response 自动发回用户渠道。</div>
+<h2 id="reading-section-07">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么创建 Job 时必须记录原 session_key？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>创建时当前 RequestContext 中的 session key 最准确，尤其涉及 unified session 和 thread。触发时仅凭 channel/to 重算可能写到另一历史，所以 payload 持久保存原键。</p></div></details></li><li><span class="review-question">Job 自己的执行历史为什么不直接写进普通聊天 Session？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>提醒可能反复运行并产生工具轨迹；写入普通聊天会污染用户上下文和预算。独立 <code>cron:{job.id}</code> 保存任务自身连续性，只把最终已投递文本镜像进用户 Session。</p></div></details></li><li><span class="review-question">Agent 已用 MessageTool 发过消息后，Gateway 如何避免二次投递？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Gateway 在调用前为 MessageTool 设置本轮投递记录上下文；返回后检查 <code>message_tool._sent_in_turn</code>，若工具已经发过消息就跳过自动 Outbound 投递。</p></div></details></li><li><span class="review-question">为什么通知评估失败时选择 fail-open？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>evaluate_response()</code> 出错、无合法 tool call 或无法解析时返回 True。后台结果可能包含重要告警，误发尚可见并可纠正，误抑制则会静默丢失信息。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">08.04 · CronTool、Agent 执行与回注</footer></div></main></div></body></html>

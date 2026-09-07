@@ -1,0 +1,48 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>02.04 · Provider 统一契约 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head>
+<body data-study-root="../.." data-chapter="llm-provider-gateway" data-page="provider-contract"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-5" data-original-href="../../../nanobot/providers/base.py" data-source-label="接口源码" title="阅读 nanobot/providers/base.py:48–86 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Provider · anti-corruption layer</p><h1>Provider 统一契约：隔离 Agent 与厂商协议</h1><p class="lead">AgentRunner 只发送统一的 messages/tools，并只接收 <code>LLMResponse</code>。Provider 层像一层防腐层：外侧面对不同 SDK 和 wire format，内侧稳定输出文本、工具调用、结束原因、用量与错误语义。</p><div class="meta-row"><span class="chip">LLMProvider</span><span class="chip">LLMResponse</span><span class="chip">ToolCallRequest</span><span class="chip">normalized semantics</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">一次统一调用的边界</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>runner</small><b>messages + tools</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>base</small><b>默认生成参数</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>backend</small><b>协议转换</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>response</small><b>统一 LLMResponse</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>runner</small><b>文本或执行工具</b></button>
+</div><div class="step-panels">
+  <div data-step-panel><h3>Runner 使用 OpenAI 风格的内部消息</h3><p>历史、assistant tool_calls 和 tool result 都以统一 dict 传入；具体 Provider 负责转成 Anthropic content block、Bedrock Converse 或 Responses input item。</p></div>
+  <div data-step-panel><h3>Base 补齐可变默认值</h3><p><code>chat_with_retry()</code> 和流式版本用 sentinel 区分“调用者没传”与显式值，并从 <code>provider.generation</code> 取得 max_tokens、temperature 与 reasoning_effort。</p></div>
+  <div data-step-panel><h3>Backend 处理 wire-format 差异</h3><p>实现类清洗消息、转换多模态与工具 schema、选择 API，再把 SDK 异常变成结构化错误响应。</p></div>
+  <div data-step-panel><h3>响应字段跨 Provider 保持稳定</h3><p><code>content</code>、<code>tool_calls</code>、<code>finish_reason</code> 和 <code>usage</code> 是主路径；reasoning/thinking 与错误字段保留必要的扩展语义。</p></div>
+  <div data-step-panel><h3>是否执行工具由统一规则决定</h3><p><code>should_execute_tools</code> 要求既有调用，又要求 finish reason 为 <code>tool_calls</code> 或 <code>stop</code>。refusal、content_filter 和 error 即使夹带调用也不会执行。</p></div>
+</div></section>
+
+<h2 id="reading-section-02">三个核心数据对象</h2><div class="card-grid">
+  <div class="card"><h3><code>ToolCallRequest</code></h3><p>稳定字段是 id、name、arguments；额外保存顶层与 function 级 Provider-specific fields，回放时可避免丢失某些协议签名。<code>to_openai_tool_call()</code> 负责写回内部历史格式。</p></div>
+  <div class="card"><h3><code>LLMResponse</code></h3><p>不仅包含回答，还统一 finish reason、token usage、reasoning content、Anthropic thinking blocks、Retry-After 与结构化错误分类。</p></div>
+  <div class="card"><h3><code>GenerationSettings</code></h3><p>冻结的默认生成参数附着在 Provider 上。Agent 主循环、Heartbeat、Dream 等调用者可复用同一套默认值，也能按调用显式覆盖。</p></div>
+</div>
+
+<div class="code-block"><div class="code-head"><span>providers/base.py · 安全工具判定</span><span>核心源码</span></div><pre><code>@property
+def should_execute_tools(self) -> bool:
+    if not self.has_tool_calls:
+        return False
+    return self.finish_reason in ("tool_calls", "stop")
+
+async def chat_stream(...):
+    response = await self.chat(...)
+    if on_content_delta and response.content:
+        await on_content_delta(response.content)
+    return response</code></pre></div>
+
+<h2 id="reading-section-03">默认流式实现是一次能力降级</h2><p><code>LLMProvider.chat_stream()</code> 并不强制每个后端原生流式：默认调用非流式 <code>chat()</code>，再把完整文本作为一个 delta 发给 Hook。原生支持流式的 Provider 覆盖它。这样 Runner 永远可以走同一个流式接口，而能力较弱的后端仍保持功能正确。</p>
+
+<h2 id="reading-section-04">AgentRunner 看见的唯一 Provider 分支</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">需要 UI 流式</div><div class="arch-items"><span class="arch-item">chat_stream_with_retry()</span><span>delta → hook.on_stream</span></div></div>
+  <div class="arch-layer"><div class="arch-label">只需进度文本</div><div class="arch-items"><span class="arch-item">chat_stream_with_retry()</span><span>清洗增量 → progress callback</span></div></div>
+  <div class="arch-layer"><div class="arch-label">不流式</div><div class="arch-items"><span class="arch-item">chat_with_retry()</span><span>返回同一种 LLMResponse</span></div></div>
+</div><p>这里的分支是“消费方式”，不是“厂商类型”。<code>AgentRunner</code> 中没有 <code>if anthropic</code> 或 <code>if bedrock</code>。</p>
+
+<h2 id="reading-section-05">源码与测试入口</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-5" data-original-href="../../../nanobot/providers/base.py" data-source-label="providers/base.py" title="阅读 nanobot/providers/base.py:48–86 的代表性摘录与讲解">providers/base.py · 站内摘录</a></td><td>统一数据类、抽象方法、流式 fallback 与 retry wrapper</td></tr>
+  <tr><td><a href="../05-agent-loop/workshop.html#guide-nanobot-agent-runner-py-56" data-original-href="../../../nanobot/agent/runner.py" data-source-label="agent/runner.py" title="阅读 nanobot/agent/runner.py:56–97 的代表性摘录与讲解">agent/runner.py · 站内摘录</a></td><td>Runner 如何只依赖统一响应和 ToolCallRequest</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/providers/test_provider_error_metadata.py" data-source-label="tests/providers/test_provider_error_metadata.py" title="tests/providers/test_provider_error_metadata.py 的所属模块讲解；该文件未单独逐行收录">tests/providers/test_provider_error_metadata.py · 模块讲解</a></td><td>不同 Provider 错误如何归一化</td></tr>
+</tbody></table>
+<h2 id="reading-section-06">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 <code>has_tool_calls</code> 为真仍不一定执行工具？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>has_tool_calls</code> 只说明列表非空；实际执行看 <code>should_execute_tools</code>，它还要求 <code>finish_reason</code> 为 <code>tool_calls</code> 或 <code>stop</code>，从而阻止 refusal、content_filter、error 中夹带的调用。</p></div></details></li><li><span class="review-question">默认 chat_stream 如何让不支持原生流式的后端保持兼容？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>基类 <code>chat_stream()</code> 调用普通 <code>chat()</code>，然后把完整 content 作为一个 delta 交给回调并返回同一 <code>LLMResponse</code>。因此不支持原生流的实现仍满足 Runner 的流式契约。</p></div></details></li><li><span class="review-question">Provider-specific tool-call 字段为什么要进入历史？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>thinking block、reasoning 内容等 Provider 专用字段可能是下一次请求验证连续思考或重建消息所需的数据。把它们保存在 assistant 历史中，Provider 才能无损转换回原协议。</p></div></details></li><li><span class="review-question">AgentRunner 依赖统一 finish reason 带来了什么好处？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Runner 只判断标准化的 <code>stop/tool_calls/length/error</code> 等原因，就能统一决定执行工具、保留截断文本、重试或结束，不需要理解每家 SDK 的枚举值。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02.04 · Provider 统一契约</footer></div></main></div></body></html>

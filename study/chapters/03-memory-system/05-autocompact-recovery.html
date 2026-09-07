@@ -1,0 +1,60 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>03 · AutoCompact 与恢复机制 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="memory-system" data-page="autocompact-recovery">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-7" data-original-href="../../../nanobot/agent/autocompact.py" data-source-label="AutoCompact 源码" title="阅读 nanobot/agent/autocompact.py:40–72 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Memory · lifecycle safety</p><h1>AutoCompact 与恢复机制</h1><p class="lead">Token Consolidator 解决“Prompt 太大”，AutoCompact 解决“会话闲置后仍拖着大量实时消息”。SessionManager 则负责把这些状态可靠地写盘、修复和重新加载。</p><div class="meta-row"><span class="chip">TTL</span><span class="chip">recent legal suffix</span><span class="chip">metadata summary</span><span class="chip">atomic session save</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">AutoCompact 的触发</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">AgentLoop idle tick</div><div class="arch-items"><span class="arch-item">consume_inbound timeout = 1s</span><span>没有新消息时检查 Session 列表</span></div></div>
+  <div class="arch-layer"><div class="arch-label">TTL 条件</div><div class="arch-items"><span class="arch-item">now - updated_at ≥ ttl</span><span>TTL ≤ 0 表示关闭</span></div></div>
+  <div class="arch-layer"><div class="arch-label">并发过滤</div><div class="arch-items"><span class="arch-item">not _archiving</span><span class="arch-item">not active_session_keys</span><span>同一会话不重复安排、不碰正在运行的 Agent</span></div></div>
+  <div class="arch-layer"><div class="arch-label">后台执行</div><div class="arch-items"><span class="arch-item">schedule_background(_archive)</span><span>主收消息循环继续响应</span></div></div>
+</div>
+
+<h2 id="reading-section-02">为什么保留“合法近期后缀”</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>失效缓存</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>拆前缀/后缀</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>归档前缀</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>替换 Session</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>下轮注入摘要</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>从磁盘重新加载</h3><p>先 <code>invalidate(key)</code> 再 <code>get_or_create(key)</code>，避免后台任务继续使用过期缓存快照。</p></div>
+  <div data-step-panel><h3>最多 8 条只是硬上限</h3><p>用临时 Session 调用 <code>retain_recent_legal_suffix(8)</code>：优先从 user turn 开始，并去掉开头孤立的 tool result，所以实际可能少于 8 条。</p></div>
+  <div data-step-panel><h3>只归档未 Consolidated 的旧前缀</h3><p>切分基于 <code>messages[last_consolidated:]</code>，已归档区域不会重复交给 Consolidator。</p></div>
+  <div data-step-panel><h3>会话瘦身</h3><p>用 kept suffix 替换 <code>session.messages</code>，把 <code>last_consolidated</code> 重置为 0，更新时间并原子保存。</p></div>
+  <div data-step-panel><h3>保持语义连续</h3><p>摘要同时放入进程内 <code>_summaries</code> 和持久化 <code>metadata._last_summary</code>；下一次请求由 <code>prepare_session()</code> 格式化为 Archived Context Summary。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="callout"><strong>合法后缀的含义：</strong>不是简单的 <code>messages[-8:]</code>。它要尽量从 user 消息开始，还会调用 <code>find_legal_message_start()</code>，避免让模型看到一个没有对应 assistant tool_call 的孤儿 tool result。</div>
+
+<h2 id="reading-section-03">热路径与冷路径</h2><div class="compare-grid">
+  <div class="card flat"><h3>同一进程：hot path</h3><p>从 <code>_summaries.pop(key)</code> 取得刚生成的摘要和 last_active，立即交给本轮上下文。</p></div>
+  <div class="card flat"><h3>进程重启：cold path</h3><p>从 Session JSONL 的 metadata 恢复 <code>_last_summary</code>，因此服务重启不会让已经裁掉的上下文突然失联。</p></div>
+</div>
+
+<h2 id="reading-section-04">Session JSONL 如何保存</h2><div class="code-block"><div class="code-head"><span>session/manager.py:423 · 文件模型</span><span>第一行 metadata，随后每行一条消息</span></div><pre><code>{"_type":"metadata", "key":"web:42", "last_consolidated":12,
+ "metadata":{"_last_summary":{"text":"...", "last_active":"..."}}}
+{"role":"user", "content":"继续刚才的问题", "timestamp":"..."}
+{"role":"assistant", "content":"...", "timestamp":"..."}</code></pre></div>
+<p><code>save()</code> 先完整写入 <code>.jsonl.tmp</code>，再用 <code>os.replace</code> 原子替换。日常保存默认不 fsync；优雅关闭的 <code>flush_all()</code> 使用 fsync，把缓存中的所有 Session 尽量刷到持久存储。</p>
+
+<h2 id="reading-section-05">四道可靠性防线</h2><table class="source-table"><thead><tr><th>风险</th><th>处理</th><th>结果</th></tr></thead><tbody>
+  <tr><td>JSONL 中一行损坏</td><td><code>SessionManager._repair()</code> 逐行解析并跳过坏行</td><td>尽量恢复其余消息和 metadata</td></tr>
+  <tr><td>单个 Session 文件无限增长</td><td><code>enforce_file_cap()</code> 保留合法尾部；未归档的被删前缀先 raw archive</td><td>文件有界且保留有限线索</td></tr>
+  <tr><td>AutoCompact 摘要调用失败</td><td>Consolidator 内部 raw archive；仍保存 recent suffix</td><td>不因 Provider 故障卡死会话瘦身</td></tr>
+  <tr><td>Dream 写错长期记忆</td><td>GitStore + <code>/dream-log</code> + <code>/dream-restore</code></td><td>变更可检查，撤销会形成新的安全提交</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-06">清空、新会话与摘要</h2><p><code>Session.clear()</code> 不只清空消息和重置 <code>last_consolidated</code>，还会删除 <code>metadata._last_summary</code>。因此 <code>/new</code> 建立新对话语义时，不会继续注入上一段被压缩会话的摘要。</p>
+
+<h2 id="reading-section-07">源码阅读地图</h2><table class="source-table"><thead><tr><th>位置</th><th>职责</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-7" data-original-href="../../../nanobot/agent/autocompact.py" data-source-label="autocompact.py:40" title="阅读 nanobot/agent/autocompact.py:40–72 的代表性摘录与讲解">autocompact.py · 站内摘录</a></td><td>拆分旧前缀与近期后缀</td><td>为什么借用 Session 的合法裁剪逻辑</td></tr>
+  <tr><td><a href="workshop.html#source-7" data-original-href="../../../nanobot/agent/autocompact.py" data-source-label="autocompact.py:61" title="阅读 nanobot/agent/autocompact.py:40–72 的代表性摘录与讲解">autocompact.py · 站内摘录</a></td><td>扫描过期会话</td><td>active 与 duplicate archive 过滤</td></tr>
+  <tr><td><a href="workshop.html#source-7" data-original-href="../../../nanobot/agent/autocompact.py" data-source-label="autocompact.py:75" title="阅读 nanobot/agent/autocompact.py:40–72 的代表性摘录与讲解">autocompact.py · 站内摘录</a></td><td>后台归档</td><td>缓存失效、摘要、替换与保存顺序</td></tr>
+  <tr><td><a href="workshop.html#source-7" data-original-href="../../../nanobot/agent/autocompact.py" data-source-label="autocompact.py:109" title="阅读 nanobot/agent/autocompact.py:40–72 的代表性摘录与讲解">autocompact.py · 站内摘录</a></td><td>准备下一次请求</td><td>hot/cold summary 恢复</td></tr>
+  <tr><td><a href="workshop.html#source-8" data-original-href="../../../nanobot/session/manager.py" data-source-label="session/manager.py:87" title="阅读 nanobot/session/manager.py:423–470 的代表性摘录与讲解">session/manager.py · 站内摘录</a></td><td>合法历史重放</td><td>user turn、tool call 与 token 尾部</td></tr>
+  <tr><td><a href="workshop.html#source-8" data-original-href="../../../nanobot/session/manager.py" data-source-label="session/manager.py:423" title="阅读 nanobot/session/manager.py:423–470 的代表性摘录与讲解">session/manager.py · 站内摘录</a></td><td>Session 原子保存</td><td>tmp replace 与可选 fsync</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-08">测试覆盖的关键行为</h2><ul class="check-list"><li>TTL 关闭、边界时刻、字符串时间戳、活动会话跳过与完成后再归档。</li><li>重复调度防护、空 Session 更新时间刷新、归档失败仍保留近期后缀。</li><li>摘要写入 metadata，重启后恢复，<code>/new</code> 后清理。</li><li>Session fsync 默认关闭、flush_all 强制开启、单个失败不阻断其他 Session。</li></ul>
+<h2 id="reading-section-09">自测</h2><ul class="check-list review-list"><li><span class="review-question">AutoCompact 为什么先 invalidate Session cache？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>AutoCompact 会直接改写 Session 文件。先使 SessionManager 缓存失效，下一次访问才会从压缩后的文件重载，避免内存里的旧 messages 随后保存并覆盖归档结果。</p></div></details></li><li><span class="review-question">为什么 recent suffix 可能少于 8 条？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>保留算法还要维持合法对话边界和 tool-call/result 配对；若尾部不足、边界不安全或 Session 本来很短，最终可保留少于配置目标的 8 条。</p></div></details></li><li><span class="review-question">如果服务在 AutoCompact 后立即重启，摘要从哪里恢复？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>摘要写在 Session metadata 的 <code>_last_summary</code> 中，并随 Session 原子保存。重启后 SessionManager 读取 metadata，ContextBuilder 再把它作为先前上下文摘要注入。</p></div></details></li><li><span class="review-question"><code>/new</code> 为什么必须删除 <code>_last_summary</code>？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>/new</code> 表示显式开始新会话；若留下旧 <code>_last_summary</code>，清空 messages 后旧主题仍会回到新 Turn，违背用户要求的上下文重置。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">03.05 · AutoCompact 与恢复机制</footer></div></main></div></body></html>

@@ -1,0 +1,64 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08.03 · Subagent 隔离运行环境 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="subagent-system" data-page="isolated-runtime">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Subagent · isolation</p><h1>隔离的不是 workspace，而是认知上下文和能力集合</h1><p class="lead">每次子任务只收到聚焦 System Prompt 和 task，不复制父对话；同时创建新 ToolRegistry 与 FileStates。但所有子任务仍在同一进程、同一 workspace 上工作，因此文件副作用是共享的。</p><div class="meta-row"><span class="chip">fresh messages</span><span class="chip">scope=subagent</span><span class="chip">fresh FileStates</span><span class="chip">shared workspace</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">每次执行重新组装四件东西</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>tools</small><b>新 Registry</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>prompt</small><b>专用模板</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>messages</small><b>system + task</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>runner</small><b>AgentRunSpec</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>effects</small><b>共享 workspace</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3><code>_build_tools()</code> 每次返回新实例</h3><p>ToolLoader 以 subagent scope 加载工具，并给文件工具注入新的 <code>FileStates()</code>，防止一个子任务的“已读/已改”缓存污染另一个。</p></div>
+  <div data-step-panel><h3>System Prompt 只描述子任务身份</h3><p>包含当前时间、workspace、可用 Skills 摘要和外部内容不可信规则；没有父 Agent 的完整 bootstrap、Memory 和渠道对话历史。</p></div>
+  <div data-step-panel><h3>初始消息固定为两条</h3><p><code>[system_prompt, {role: user, content: task}]</code>。父 Agent 必须在 task 中写清背景、目标和期望输出，否则子 Agent 无从推断。</p></div>
+  <div data-step-panel><h3>执行循环与主 Agent 同源</h3><p>AgentRunner 仍会向 Provider 发送 Tool definitions、执行多轮工具调用并治理工具结果；隔离来自 Spec，而不是另一份 Runner 代码。</p></div>
+  <div data-step-panel><h3>文件系统并未复制</h3><p>workspace 路径与主 Agent相同。子 Agent 写入文件后主 Agent立即可见；多个子任务若写同一文件仍可能发生业务级冲突。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">工具 Registry 的构建</h2><div class="code-block"><div class="code-head"><span>agent/subagent.py:103–120</span><span>只加载 subagent scope</span></div><pre><code>def _subagent_tools_config(self):
+    return ToolsConfig(
+        exec=self.tools_config.exec,
+        web=self.tools_config.web,
+        restrict_to_workspace=self.restrict_to_workspace,
+    )
+
+def _build_tools(self):
+    registry = ToolRegistry()
+    ctx = ToolContext(
+        config=self._subagent_tools_config(),
+        workspace=str(self.workspace),
+        file_state_store=FileStates(),
+    )
+    ToolLoader().load(ctx, registry, scope="subagent")
+    return registry</code></pre></div>
+
+<h2 id="reading-section-03">默认能力白名单</h2><table class="source-table"><thead><tr><th>可用</th><th>用途</th><th>明确不可用</th></tr></thead><tbody>
+  <tr><td>read_file / write_file / edit_file / list_dir</td><td>读取与交付 workspace 文件</td><td>notebook_edit</td></tr>
+  <tr><td>glob / grep</td><td>代码与文件检索</td><td>message / ask_user</td></tr>
+  <tr><td>exec</td><td>命令、测试、构建</td><td>spawn（禁止递归）</td></tr>
+  <tr><td>web_search / web_fetch</td><td>外部资料访问</td><td>cron / image_generation</td></tr>
+  <tr><td>声明 subagent scope 的第三方 Tool</td><td>可被 ToolLoader 发现</td><td>MyTool、主 Registry 的 MCP wrappers</td></tr>
+</tbody></table>
+<p>这里的白名单由各 Tool 类的 <code>_scopes</code> 决定，而不是 Manager 硬编码名称。插件也可声明 subagent scope，但它创建时只能依赖当前 ToolContext 已提供的 workspace、config 和 FileStates。</p>
+
+<h2 id="reading-section-04">专用 Prompt</h2><div class="code-block"><div class="code-head"><span>templates/agent/subagent_system.md</span><span>聚焦而非继承</span></div><pre><code># Subagent
+
+{{ time_ctx }}
+
+You are a subagent spawned by the main agent to complete a specific task.
+Stay focused on the assigned task. Your final response will be reported back to the main agent.
+
+## Workspace
+{{ workspace }}
+
+## Skills
+Read SKILL.md with read_file to use a skill.</code></pre></div>
+<p>SkillsLoader 只生成摘要，真正使用某项 Skill 时需要 read_file 渐进加载；disabled_skills 与主配置保持一致。Prompt 还 include 不可信外部内容规则，提醒 web_search/web_fetch 结果不能作为指令执行。</p>
+
+<div class="callout warning"><strong>“隔离”不是安全沙箱：</strong>子 Agent 与主进程共享 Python 进程、Provider 凭据和 workspace。安全性依赖文件路径限制、ExecTool 配置、Web SSRF 规则和受限 Tool scope；新 Registry 主要解决状态污染与能力最小化，不能隔离恶意本地代码。</div>
+
+<h2 id="reading-section-05">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py:103" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">subagent.py · 站内摘录</a></td><td>工具配置裁剪和 Registry 构建</td></tr><tr><td><a href="../06-tools-mcp-extensions/workshop.html#guide-nanobot-agent-tools-loader-py-86" data-original-href="../../../nanobot/agent/tools/loader.py" data-source-label="tools/loader.py:76" title="阅读 nanobot/agent/tools/loader.py:86–116 的代表性摘录与讲解">tools/loader.py · 站内摘录</a></td><td>scope 过滤与插件加载</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/templates/agent/subagent_system.md" data-source-label="subagent_system.md" title="nanobot/templates/agent/subagent_system.md 的所属模块讲解；该文件未单独逐行收录">subagent_system.md · 模块讲解</a></td><td>专用 Prompt</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/templates/agent/_snippets/untrusted_content.md" data-source-label="untrusted_content.md" title="nanobot/templates/agent/_snippets/untrusted_content.md 的所属模块讲解；该文件未单独逐行收录">untrusted_content.md · 模块讲解</a></td><td>外部数据边界</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/test_subagent.py" data-source-label="test_subagent.py" title="tests/agent/test_subagent.py 的所属模块讲解；该文件未单独逐行收录">test_subagent.py · 模块讲解</a></td><td>ToolLoader 与 FileStates 隔离测试</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">子 Agent 隔离了哪些状态，却共享了哪些副作用？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它隔离 messages、Runner 迭代、ToolRegistry、FileState 和请求上下文；但仍共享进程、workspace 文件系统、Provider/外部服务，因此文件与网络副作用并非安全沙箱。</p></div></details></li><li><span class="review-question">为什么没有 spawn Tool 能防止递归爆炸？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>子 Registry 采用 subagent scope，不注册 SpawnTool；模型即使生成 <code>spawn</code> 名称也无法解析执行，从能力层阻断递归委派树爆炸。</p></div></details></li><li><span class="review-question">父 Agent 为什么必须把必要背景写进 task？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>子 Agent 不读取父对话历史，只收到专用 system prompt 和 task 文本。Manager 无法猜测隐含指代，所以父模型必须在 task 中包含目标、约束、路径和必要上下文。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">07.03 · Subagent 隔离运行环境</footer></div></main></div></body></html>

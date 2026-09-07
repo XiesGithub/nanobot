@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="nanobot 项目 40 道技术面试题，八类递进主题，答案默认折叠，每题关联手册模块讲解。">
+  <title>11 · 项目面试题库 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css">
+  <link rel="stylesheet" href="../../assets/navigation.css">
+  <link rel="stylesheet" href="../../assets/interview.css">
+  <script defer src="../../assets/catalog.js"></script>
+  <script defer src="../../assets/navigation.js"></script>
+  <script defer src="../../assets/study.js"></script>
+</head>
+<body data-study-root="../.." data-chapter="interview" data-page="overview">
+  <header class="site-header">
+    <a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a>
+    <div class="header-actions"><a class="button" href="#catalog">开始练习</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" data-study-sidebar></aside>
+    <main class="content" id="top"><div class="content-inner">
+      <select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select>
+      <div class="breadcrumb" data-study-breadcrumb></div>
+      <section class="hero">
+        <p class="eyebrow">Chapter 11 · Project interview</p>
+        <h1>项目面试题库：<br>从讲清业务，到讲透机制</h1>
+        <p class="lead">40 道主问题，按八类主题由浅入深。先尝试独立回答，再展开答案；遇到不熟悉的机制，沿每题的“相关模块讲解”回到手册学习。</p>
+        <div class="meta-row"><span class="chip">40 道主问题</span><span class="chip">8 类递进主题</span><span class="chip">80 个条件式追问</span><span class="chip">每题 2—3 个学习入口</span></div>
+        <div class="learning-links"><a class="button primary" href="#catalog">开始答题</a><a class="button" href="#evidence" id="evidence-link">实现核验与简历差异</a></div>
+      </section>
+      <div class="interview-reader">
+        {{INTRO}}
+        <p class="reading-guide">学习链接在本页直接可见。进入讲解页后，可点击“返回面试题”回到原题；模块讲解提供项目机制基础，扩展方案仍以题目中的事实边界为准。</p>
+        <nav class="category-nav" aria-label="按问题类型筛选">
+          <button class="category-button" data-category="all" aria-pressed="true"><span class="nav-number">◎</span><span>全部问题</span><span class="nav-count">40</span></button>
+          {{NAVIGATION}}
+        </nav>
+        <div class="toolbar" aria-label="搜索和阅读控制">
+          <div class="filters">
+            <label class="search"><span class="sr-only">搜索题目和答案</span><input id="search" type="search" placeholder="搜索题目、答案或模块，如：记忆、幂等、重试" autocomplete="off"></label>
+            <label><span class="sr-only">筛选难度</span><select id="difficulty"><option value="all">全部难度</option><option value="1">基础</option><option value="2">进阶</option><option value="3">深入</option><option value="4">压力</option></select></label>
+          </div>
+          <div class="toolbar-bottom"><span id="match-status" role="status" aria-live="polite">全部问题 · 40 / 40 题</span><div class="toolbar-actions"><button class="button" id="expand-all" type="button">展开答案</button><button class="button" id="collapse-all" type="button">收起答案</button><button class="button" id="print" type="button">打印</button></div></div>
+        </div>
+        <noscript><p class="callout">全部题目与学习链接均可离线阅读；点击折叠区可展开答案。搜索与筛选需要启用 JavaScript。</p></noscript>
+        <div id="catalog" tabindex="-1">{{QUESTIONS}}</div>
+        <section class="empty-state" id="empty-state" hidden><h2>没有找到匹配的问题</h2><p>试试更短的关键词，或清除分类与难度条件。</p><button class="button" id="reset-filters" type="button">清除全部筛选</button></section>
+        <details class="evidence" id="evidence"><summary>实现核验与简历差异 · 备考参考附录</summary><div class="evidence-body"><p class="reading-guide">本附录以文件名标明证据来源，不依赖仓库文件。相关原理与源码摘录请使用每题附带的手册内讲解链接。</p>{{EVIDENCE}}</div></details>
+      </div>
+      <div class="page-nav" data-study-page-nav></div>
+      <footer class="footer">nanobot 学习手册 · 第11章 · 个人贡献、已有机制与扩展推演需分别说明。</footer>
+    </div></main>
+  </div>
+  <script>
+{{SCRIPT}}
+  </script>
+</body>
+</html>

@@ -6,6 +6,12 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 nanobot is a lightweight, open-source AI agent framework written in Python with a React/TypeScript WebUI. It centers around a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.
 
+## Environment and LLM Constraints
+
+- Use the Conda environment named `nanobot` for all project dependencies and project commands, including installation, development, testing, linting, and runtime operations.
+- Use `deepseek-v4-flash` for every LLM call made by the project. The exact model ID is `deepseek-v4-flash`.
+- The LLM API credential is stored in `./api.txt`. Read it from that file when needed; never hard-code, print, log, or expose its contents.
+
 ## Development Commands
 
 ```bash

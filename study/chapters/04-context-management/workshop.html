@@ -1,0 +1,311 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="把杂乱历史编译成合法且可控的模型上下文：数据契约、真实源码逐步讲解、状态演算与从零实现"><title>把杂乱历史编译成合法且可控的模型上下文 · 源码精讲与设计实作</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script><style>
+.learning-diagram{width:100%;height:auto;min-width:650px;color:var(--text,#243247)}.diagram-panel{overflow-x:auto;margin:24px 0;padding:12px;border:1px solid var(--border,#cbd5e1);border-radius:14px}.learning-diagram rect{fill:var(--surface,#f1f5f9);stroke:currentColor;stroke-width:1.3}.learning-diagram text{fill:currentColor;font:17px system-ui,sans-serif}.learning-diagram .sub{font-size:13px}.learning-diagram path{stroke:currentColor;stroke-width:2;fill:none}.learning-diagram .arrowhead{fill:currentColor;stroke:none}.learning-diagram .failure{stroke:#b86b43}.learning-diagram .error-line{stroke:#b86b43;stroke-dasharray:5 4}.source-caption{font-size:.88rem;opacity:.82}article{scroll-margin-top:90px}pre{max-height:900px;overflow:auto}details{margin:20px 0;padding:18px;border:1px solid var(--border,#cbd5e1);border-radius:12px}summary{font-weight:650;cursor:pointer}section{scroll-margin-top:90px}td{vertical-align:top}figcaption{line-height:1.8;margin-top:12px}
+</style></head><body data-study-root="../.." data-chapter="context-management" data-page="workshop"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>Agent 学习手册</span></span></a><div class="header-actions"><a class="button" href="index.html">本章总览</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div><section class="hero"><p class="eyebrow">源码精讲与设计实作</p><h1>把杂乱历史编译成合法且可控的模型上下文</h1><p class="lead">Context 管理同时解决语义、预算与协议三件事。删掉最多字符并不是目标：必须保留最近用户意图、工具调用与结果的关联，以及模型需要的系统信息。下面逐层还原原始 Session 怎样变成最终 messages。</p><div class="meta-row"><span class="chip">当前源码连续摘录</span><span class="chip">离线阅读</span><span class="chip">手工演算 + 设计实作</span></div></section><p>阅读顺序：<a href="#contract">输入输出契约</a> → <a href="#dataflow">模块数据流图</a> → <a href="#source-walkthrough">核心源码精讲</a> → <a href="#trace">手工演算</a> → <a href="#build-it">动手设计与验收</a>。本页所有原文均按当前本地文件行号提取；演算中的固定输出由假 Provider 提供，不需要模型账户。</p><section id="contract"><h2>先确定数据与责任的交接</h2><div class="table-wrap"><table><thead><tr><th>交接点 / 输入</th><th>输出与状态</th><th>约束、失败和所有者</th></tr></thead><tbody><tr><td>身份模板 + AGENTS/SOUL/USER/TOOLS + Memory + Skills</td><td>system.content</td><td>模板占位 Memory 会跳过；Recent History 最多50条且限制32000字符；system 本身也可能很大。</td></tr><tr><td>Session.messages[last_consolidated:]</td><td>可回放 messages[]</td><td>先按条数选尾部、找用户/合法工具边界，再清理内容、按 token 预算选尾部。返回的是回放表示。</td></tr><tr><td>当前文本 + media + channel/chat_id/sender/time</td><td>当前 user 文本或多模态 content blocks</td><td>运行元数据加上 metadata-only 标签；同 role 末尾合并，避免相邻同角色被部分 Provider 拒绝。</td></tr><tr><td>图片 bytes</td><td>image_url(data:...) + 内部 _meta.path</td><td>不存在/非图片文件会跳过；无有效图片返回纯文本。读取权限错误在本函数里不统一吞掉。</td></tr><tr><td>旧工具结果 + prompt 估算 + tools schema</td><td>微压缩 / snip 后消息列表</td><td>历史预算是软目标；必要时恢复最近用户轮，允许超过预算以避免非法或无来由的 assistant 尾部。</td></tr><tr><td>assistant.tool_calls[].id 与 tool.tool_call_id</td><td>删除孤立结果 / 为缺失结果补错误占位</td><td>协议修复不执行工具；补位表示结果缺失，不能伪造执行成功。</td></tr></tbody></table></div></section><section id="dataflow"><h2>沿箭头追踪数据与失败去向</h2><figure class="diagram-panel"><svg class="learning-diagram" viewBox="0 0 900 320" role="img" aria-labelledby="flow-title flow-description" xmlns="http://www.w3.org/2000/svg"><title id="flow-title">本章数据流程与失败路径</title><desc id="flow-description">文本等价：Session 回放先选择可用的最近历史，ContextBuilder 加入系统来源、运行元数据和本轮多模态输入。Runner 在发送前控制旧工具结果与历史规模，删除没有声明的工具结果，为声明后缺失的结果补错误占位。Provider 最后适配具体协议。预算过紧时保留最近用户轮可能超预算，这并不保证任何大小的输入都能发给模型。</desc><defs><marker id="flow-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" class="arrowhead"/></marker></defs><rect x="20" y="60" width="170" height="86" rx="12"/><text x="105" y="94" text-anchor="middle">事实与指令源</text><text x="105" y="123" text-anchor="middle" class="sub">Session / Memory / Skills</text><rect x="250" y="60" width="170" height="86" rx="12"/><text x="335" y="94" text-anchor="middle">回放 + 构建</text><text x="335" y="123" text-anchor="middle" class="sub">system + history + user</text><rect x="480" y="60" width="170" height="86" rx="12"/><text x="565" y="94" text-anchor="middle">预算与协议治理</text><text x="565" y="123" text-anchor="middle" class="sub">压缩 / 截断 / 修复</text><rect x="710" y="60" width="170" height="86" rx="12"/><text x="795" y="94" text-anchor="middle">Provider 输入</text><text x="795" y="123" text-anchor="middle" class="sub">messages[] + tools[]</text><path d="M190 103 H250" marker-end="url(#flow-arrow)"/><text x="220" y="48" text-anchor="middle" class="sub">有限历史</text><path d="M420 103 H480" marker-end="url(#flow-arrow)"/><text x="450" y="48" text-anchor="middle" class="sub">content blocks</text><path d="M650 103 H710" marker-end="url(#flow-arrow)"/><text x="680" y="48" text-anchor="middle" class="sub">合法序列</text><rect x="250" y="225" width="400" height="65" rx="12" class="failure"/><text x="450" y="250" text-anchor="middle">孤立结果删除；缺失结果补“未取得结果”</text><text x="450" y="276" text-anchor="middle" class="sub">无法同时满足预算与合法性时保留最近用户轮</text><path d="M565 146 V207 H510 V225" class="error-line" marker-end="url(#flow-arrow)"/><text x="582" y="180" class="sub">失败 / 未完成</text></svg><figcaption>文本等价：Session 回放先选择可用的最近历史，ContextBuilder 加入系统来源、运行元数据和本轮多模态输入。Runner 在发送前控制旧工具结果与历史规模，删除没有声明的工具结果，为声明后缺失的结果补错误占位。Provider 最后适配具体协议。预算过紧时保留最近用户轮可能超预算，这并不保证任何大小的输入都能发给模型。</figcaption></figure></section><section id="source-walkthrough"><h2>把源码读成可执行的因果链</h2><article id="source-1"><h3>1. ContextBuilder.build_system_prompt</h3><p>system 是多种来源的显式组合；来源顺序、是否加载全文和长度上限都会改变模型行为。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/context.py</code> · <code>ContextBuilder.build_system_prompt</code> · 第 37–76 行（连续摘录）</p><pre id="excerpt-1" data-source="nanobot/agent/context.py" data-start="37" data-end="76" data-symbol="ContextBuilder.build_system_prompt"><code class="language-python">    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        channel: str | None = None,
+        session_summary: str | None = None,
+    ) -&gt; str:
+        &quot;&quot;&quot;Build the system prompt from identity, bootstrap files, memory, and skills.&quot;&quot;&quot;
+        parts = [self._get_identity(channel=channel)]
+
+        bootstrap = self._load_bootstrap_files()
+        if bootstrap:
+            parts.append(bootstrap)
+
+        memory = self.memory.get_memory_context()
+        if memory and not self._is_template_content(self.memory.read_memory(), &quot;memory/MEMORY.md&quot;):
+            parts.append(f&quot;# Memory\n\n{memory}&quot;)
+
+        always_skills = self.skills.get_always_skills()
+        if always_skills:
+            always_content = self.skills.load_skills_for_context(always_skills)
+            if always_content:
+                parts.append(f&quot;# Active Skills\n\n{always_content}&quot;)
+
+        skills_summary = self.skills.build_skills_summary(exclude=set(always_skills))
+        if skills_summary:
+            parts.append(render_template(&quot;agent/skills_section.md&quot;, skills_summary=skills_summary))
+
+        entries = self.memory.read_unprocessed_history(since_cursor=self.memory.get_last_dream_cursor())
+        if entries:
+            capped = entries[-self._MAX_RECENT_HISTORY:]
+            history_text = &quot;\n&quot;.join(
+                f&quot;- [{e[&#x27;timestamp&#x27;]}] {e[&#x27;content&#x27;]}&quot; for e in capped
+            )
+            history_text = truncate_text(history_text, self._MAX_HISTORY_CHARS)
+            parts.append(&quot;# Recent History\n\n&quot; + history_text)
+
+        if session_summary:
+            parts.append(f&quot;[Archived Context Summary]\n\n{session_summary}&quot;)
+
+        return &quot;\n\n---\n\n&quot;.join(parts)</code></pre><ol><li>先 identity，再存在的 bootstrap 文件，再非默认模板的 Memory。Memory 空或与内置模板相同则不插入，避免占位文字污染回答。</li><li>always skills 加载全文；其余技能做摘要索引，并在 summary 中排除 always 项，避免重复付费。签名里的 skill_names 在当前函数体没有被直接使用，不能把传参当成实际已加载。</li><li>未被 Dream 消费的历史只取末50条，拼接时间与内容后再按32000字符截断；session_summary 另作为 Archived Context Summary 附加。</li><li>最终用分隔线连接 parts。这里没有对整个 system 统一 token 截断，因此单个大 bootstrap 文件仍可能成为总预算压力来源。</li></ol></article><article id="source-2"><h3>2. Session.get_history：选择与净化回放</h3><p>磁盘消息包含持久化字段，不应直接作为 SDK 请求。第一段先得到合法的回放候选，再投影成模型字段。</p><p class="source-caption">当前源码原文 · <code>nanobot/session/manager.py</code> · <code>Session.get_history：选择与净化回放</code> · 第 87–144 行（连续摘录）</p><pre id="excerpt-2" data-source="nanobot/session/manager.py" data-start="87" data-end="144" data-symbol="Session.get_history：选择与净化回放"><code class="language-python">    def get_history(
+        self,
+        max_messages: int = 120,
+        *,
+        max_tokens: int = 0,
+        include_timestamps: bool = False,
+    ) -&gt; list[dict[str, Any]]:
+        &quot;&quot;&quot;Return unconsolidated messages for LLM input.
+
+        History is sliced by message count first (``max_messages``), then by
+        token budget from the tail (``max_tokens``) when provided.
+        &quot;&quot;&quot;
+        unconsolidated = self.messages[self.last_consolidated:]
+        max_messages = max_messages if max_messages &gt; 0 else 120
+        sliced = unconsolidated[-max_messages:]
+
+        # Avoid starting mid-turn when possible, except for proactive
+        # assistant deliveries that the user may be replying to.
+        for i, message in enumerate(sliced):
+            if message.get(&quot;role&quot;) == &quot;user&quot;:
+                start = i
+                if i &gt; 0 and sliced[i - 1].get(&quot;_channel_delivery&quot;):
+                    start = i - 1
+                sliced = sliced[start:]
+                break
+
+        # Drop orphan tool results at the front.
+        start = find_legal_message_start(sliced)
+        if start:
+            sliced = sliced[start:]
+
+        out: list[dict[str, Any]] = []
+        for message in sliced:
+            content = message.get(&quot;content&quot;, &quot;&quot;)
+            role = message.get(&quot;role&quot;)
+            if role == &quot;assistant&quot; and isinstance(content, str):
+                content = _sanitize_assistant_replay_text(content)
+            # Synthesize an ``[image: path]`` breadcrumb from the persisted
+            # ``media`` kwarg so LLM replay still sees *something* where the
+            # image used to be. Without this, an image-only user turn
+            # replays as an empty user message — the assistant&#x27;s reply then
+            # looks like it&#x27;s responding to nothing.
+            media = message.get(&quot;media&quot;)
+            if role == &quot;user&quot; and isinstance(media, list) and media and isinstance(content, str):
+                breadcrumbs = &quot;\n&quot;.join(
+                    image_placeholder_text(p) for p in media if isinstance(p, str) and p
+                )
+                content = f&quot;{content}\n{breadcrumbs}&quot; if content else breadcrumbs
+            if include_timestamps:
+                content = self._annotate_message_time(message, content)
+            if role == &quot;assistant&quot; and isinstance(content, str) and not content.strip():
+                if not any(key in message for key in (&quot;tool_calls&quot;, &quot;reasoning_content&quot;, &quot;thinking_blocks&quot;)):
+                    continue
+            entry: dict[str, Any] = {&quot;role&quot;: message[&quot;role&quot;], &quot;content&quot;: content}
+            for key in (&quot;tool_calls&quot;, &quot;tool_call_id&quot;, &quot;name&quot;, &quot;reasoning_content&quot;, &quot;thinking_blocks&quot;):
+                if key in message:
+                    entry[key] = message[key]
+            out.append(entry)</code></pre><ol><li>从 last_consolidated 开始取未归档后缀，max_messages<=0 会回退120，再按条数取尾部。首次 user 之前尽量剔除，但紧邻 user 的主动渠道投递可保留。</li><li>find_legal_message_start 修剪前端孤立工具结果。assistant 文字先清理回放噪声，纯空 assistant 且无调用/推理字段时跳过。</li><li>用户图片用 media 合成文字 breadcrumb，避免历史图像输入变成空问句；include_timestamps 决定是否附加时间。</li><li>只复制 role/content 与 tool_calls、tool_call_id、name、reasoning_content、thinking_blocks 等白名单字段。Session metadata 不会通过字典全量扩散到模型。</li></ol></article><article id="source-3"><h3>3. Session.get_history：token 尾部选择</h3><p>从新到旧保留历史可以保护最近意图，但只取最后 assistant 可能失去它回答的问题。</p><p class="source-caption">当前源码原文 · <code>nanobot/session/manager.py</code> · <code>Session.get_history：token 尾部选择</code> · 第 146–177 行（连续摘录）</p><pre id="excerpt-3" data-source="nanobot/session/manager.py" data-start="146" data-end="177" data-symbol="Session.get_history：token 尾部选择"><code class="language-python">        if max_tokens &gt; 0 and out:
+            kept: list[dict[str, Any]] = []
+            used = 0
+            for message in reversed(out):
+                tokens = estimate_message_tokens(message)
+                if kept and used + tokens &gt; max_tokens:
+                    break
+                kept.append(message)
+                used += tokens
+            kept.reverse()
+
+            # Keep history aligned to the first visible user turn.
+            first_user = next((i for i, m in enumerate(kept) if m.get(&quot;role&quot;) == &quot;user&quot;), None)
+            if first_user is not None:
+                kept = kept[first_user:]
+            else:
+                # Tight token budgets can otherwise leave assistant-only tails.
+                # If a user turn exists in the unsliced output, recover the
+                # nearest one even if it slightly exceeds the token budget.
+                recovered_user = next(
+                    (i for i in range(len(out) - 1, -1, -1) if out[i].get(&quot;role&quot;) == &quot;user&quot;),
+                    None,
+                )
+                if recovered_user is not None:
+                    kept = out[recovered_user:]
+
+            # And keep a legal tool-call boundary at the front.
+            start = find_legal_message_start(kept)
+            if start:
+                kept = kept[start:]
+            out = kept
+        return out</code></pre><ol><li>反向累计估算 token。只有 kept 已非空且再加一条会超预算时才 break，因此至少保留一个候选，即使它单条已超预算。</li><li>有 user 时把开头对齐到第一个可见 user；没有 user 时回到 out 查找最近 user 并恢复整个后缀，明确允许略超预算。</li><li>最后再找合法工具边界。该函数返回新列表，不把裁剪结果直接写回 Session；不要把一次 prompt 限制误当成删除用户存档。</li></ol></article><article id="source-4"><h3>4. ContextBuilder.build_messages</h3><p>把当前用户文本和运行元数据合为一次输入，并保持多模态列表结构。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/context.py</code> · <code>ContextBuilder.build_messages</code> · 第 140–172 行（连续摘录）</p><pre id="excerpt-4" data-source="nanobot/agent/context.py" data-start="140" data-end="172" data-symbol="ContextBuilder.build_messages"><code class="language-python">    def build_messages(
+        self,
+        history: list[dict[str, Any]],
+        current_message: str,
+        skill_names: list[str] | None = None,
+        media: list[str] | None = None,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        current_role: str = &quot;user&quot;,
+        sender_id: str | None = None,
+        session_summary: str | None = None,
+    ) -&gt; list[dict[str, Any]]:
+        &quot;&quot;&quot;Build the complete message list for an LLM call.&quot;&quot;&quot;
+        runtime_ctx = self._build_runtime_context(channel, chat_id, self.timezone, sender_id=sender_id)
+        user_content = self._build_user_content(current_message, media)
+
+        # Merge runtime context and user content into a single user message
+        # to avoid consecutive same-role messages that some providers reject.
+        if isinstance(user_content, str):
+            merged = f&quot;{runtime_ctx}\n\n{user_content}&quot;
+        else:
+            merged = [{&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: runtime_ctx}] + user_content
+        messages = [
+            {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: self.build_system_prompt(skill_names, channel=channel, session_summary=session_summary)},
+            *history,
+        ]
+        if messages[-1].get(&quot;role&quot;) == current_role:
+            last = dict(messages[-1])
+            last[&quot;content&quot;] = self._merge_message_content(last.get(&quot;content&quot;), merged)
+            messages[-1] = last
+            return messages
+        messages.append({&quot;role&quot;: current_role, &quot;content&quot;: merged})
+        return messages</code></pre><ol><li>_build_runtime_context 产生带 metadata-only 标签的时间、渠道和用户标识；_build_user_content 产生文本或图片块。标签区分语义，但不是程序级权限隔离。</li><li>纯文本前加 runtime 块，多模态则先放一个 runtime text block，再保留全部 user_content。构造 system+history 后再处理当前角色。</li><li>若最后一条 role 等于 current_role，浅复制该消息字典，合并 content 并替换末项；不是再 append 一个同角色消息。str+str 用空行连接，有列表时规范成 blocks 拼接。</li><li>否则 append 当前角色消息。浅复制保护了本函数修改的顶层 content，不能据此宣称整个嵌套历史已深拷贝。</li></ol></article><article id="source-5"><h3>5. ContextBuilder._build_user_content</h3><p>二进制图片只在本轮请求时编码；工具/持久化阶段还需要保留可以识别来源的元信息。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/context.py</code> · <code>ContextBuilder._build_user_content</code> · 第 174–197 行（连续摘录）</p><pre id="excerpt-5" data-source="nanobot/agent/context.py" data-start="174" data-end="197" data-symbol="ContextBuilder._build_user_content"><code class="language-python">    def _build_user_content(self, text: str, media: list[str] | None) -&gt; str | list[dict[str, Any]]:
+        &quot;&quot;&quot;Build user message content with optional base64-encoded images.&quot;&quot;&quot;
+        if not media:
+            return text
+
+        images = []
+        for path in media:
+            p = Path(path)
+            if not p.is_file():
+                continue
+            raw = p.read_bytes()
+            mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+            if not mime or not mime.startswith(&quot;image/&quot;):
+                continue
+            b64 = base64.b64encode(raw).decode()
+            images.append({
+                &quot;type&quot;: &quot;image_url&quot;,
+                &quot;image_url&quot;: {&quot;url&quot;: f&quot;data:{mime};base64,{b64}&quot;},
+                &quot;_meta&quot;: {&quot;path&quot;: str(p)},
+            })
+
+        if not images:
+            return text
+        return images + [{&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: text}]</code></pre><ol><li>没有 media 直接返回 text；遍历路径时先检查 is_file，读取 bytes，用实际图片探测优先于文件扩展名猜测。</li><li>MIME 必须以 image/ 开头才编码为 data URL；同时添加内部 _meta.path，供后续处理追踪本地来源。它不应作为厂商协议字段直传。</li><li>所有附件均无效时仍返回纯文本；有图片则返回 images + 最后文本块。文件读异常会传播，这段不是通用文档抽取器，也没有重新执行 allowed_dir 安全判定。</li></ol></article><article id="source-6"><h3>6. AgentRunner._drop_orphan_tool_results</h3><p>历史截断或异常中断可能留下有结果而没有声明的消息。发送给模型之前先删掉这种没有依据的结果。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/runner.py</code> · <code>AgentRunner._drop_orphan_tool_results</code> · 第 997–1020 行（连续摘录）</p><pre id="excerpt-6" data-source="nanobot/agent/runner.py" data-start="997" data-end="1020" data-symbol="AgentRunner._drop_orphan_tool_results"><code class="language-python">    def _drop_orphan_tool_results(
+        messages: list[dict[str, Any]],
+    ) -&gt; list[dict[str, Any]]:
+        &quot;&quot;&quot;Drop tool results that have no matching assistant tool_call earlier in the history.&quot;&quot;&quot;
+        declared: set[str] = set()
+        updated: list[dict[str, Any]] | None = None
+        for idx, msg in enumerate(messages):
+            role = msg.get(&quot;role&quot;)
+            if role == &quot;assistant&quot;:
+                for tc in msg.get(&quot;tool_calls&quot;) or []:
+                    if isinstance(tc, dict) and tc.get(&quot;id&quot;):
+                        declared.add(str(tc[&quot;id&quot;]))
+            if role == &quot;tool&quot;:
+                tid = msg.get(&quot;tool_call_id&quot;)
+                if tid and str(tid) not in declared:
+                    if updated is None:
+                        updated = [dict(m) for m in messages[:idx]]
+                    continue
+            if updated is not None:
+                updated.append(dict(msg))
+
+        if updated is None:
+            return messages
+        return updated</code></pre><ol><li>顺序扫描 assistant.tool_calls，把有效 id 放进 declared。只有前面已经出现的声明才能为后面的结果提供依据。</li><li>遇 tool 且有 tid 但不在 declared，就从该条开始构建 updated 副本并跳过；原序列前半段只在首次需要修改时复制。</li><li>没有修改则返回原列表，减少分配；本函数不验证所有复杂顺序，也不删除缺失/空 tid 的结果，因此它只是协议治理的一道防线。</li></ol></article><article id="source-7"><h3>7. AgentRunner._backfill_missing_tool_results</h3><p>声明存在而结果缺失时，删掉声明会丢失已发生的意图；补错误结果让模型知道该次调用没有可用输出。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/runner.py</code> · <code>AgentRunner._backfill_missing_tool_results</code> · 第 1023–1061 行（连续摘录）</p><pre id="excerpt-7" data-source="nanobot/agent/runner.py" data-start="1023" data-end="1061" data-symbol="AgentRunner._backfill_missing_tool_results"><code class="language-python">    def _backfill_missing_tool_results(
+        messages: list[dict[str, Any]],
+    ) -&gt; list[dict[str, Any]]:
+        &quot;&quot;&quot;Insert synthetic error results for orphaned tool_use blocks.&quot;&quot;&quot;
+        declared: list[tuple[int, str, str]] = []  # (assistant_idx, call_id, name)
+        fulfilled: set[str] = set()
+        for idx, msg in enumerate(messages):
+            role = msg.get(&quot;role&quot;)
+            if role == &quot;assistant&quot;:
+                for tc in msg.get(&quot;tool_calls&quot;) or []:
+                    if isinstance(tc, dict) and tc.get(&quot;id&quot;):
+                        name = &quot;&quot;
+                        func = tc.get(&quot;function&quot;)
+                        if isinstance(func, dict):
+                            name = func.get(&quot;name&quot;, &quot;&quot;)
+                        declared.append((idx, str(tc[&quot;id&quot;]), name))
+            elif role == &quot;tool&quot;:
+                tid = msg.get(&quot;tool_call_id&quot;)
+                if tid:
+                    fulfilled.add(str(tid))
+
+        missing = [(ai, cid, name) for ai, cid, name in declared if cid not in fulfilled]
+        if not missing:
+            return messages
+
+        updated = list(messages)
+        offset = 0
+        for assistant_idx, call_id, name in missing:
+            insert_at = assistant_idx + 1 + offset
+            while insert_at &lt; len(updated) and updated[insert_at].get(&quot;role&quot;) == &quot;tool&quot;:
+                insert_at += 1
+            updated.insert(insert_at, {
+                &quot;role&quot;: &quot;tool&quot;,
+                &quot;tool_call_id&quot;: call_id,
+                &quot;name&quot;: name,
+                &quot;content&quot;: _BACKFILL_CONTENT,
+            })
+            offset += 1
+        return updated</code></pre><ol><li>第一遍记录声明的 assistant 下标、call_id、工具名，同时收集已返回结果的 fulfilled 集合。缺失列表取 declared 中不在 fulfilled 的项。</li><li>没有缺失时原样返回；否则在原 assistant 后定位插入处，跳过紧邻现有 tool 消息，再插入 _BACKFILL_CONTENT。offset 校正之前新增条目引起的下标变化。</li><li>补的是协议占位，绝不再次执行工具。算法按 id 匹配，因此 call_id 全局唯一是调用方的重要前提；错误复用 id 会让另一次结果误被当作 fulfilled。</li></ol></article><article id="source-8"><h3>8. AgentRunner._microcompact</h3><p>对较旧、较长、可重新读取的工具结果换成短占位，减少反复发送大段内容。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/runner.py</code> · <code>AgentRunner._microcompact</code> · 第 1064–1087 行（连续摘录）</p><pre id="excerpt-8" data-source="nanobot/agent/runner.py" data-start="1064" data-end="1087" data-symbol="AgentRunner._microcompact"><code class="language-python">    def _microcompact(messages: list[dict[str, Any]]) -&gt; list[dict[str, Any]]:
+        &quot;&quot;&quot;Replace old compactable tool results with one-line summaries.&quot;&quot;&quot;
+        compactable_indices: list[int] = []
+        for idx, msg in enumerate(messages):
+            if msg.get(&quot;role&quot;) == &quot;tool&quot; and msg.get(&quot;name&quot;) in _COMPACTABLE_TOOLS:
+                compactable_indices.append(idx)
+
+        if len(compactable_indices) &lt;= _MICROCOMPACT_KEEP_RECENT:
+            return messages
+
+        stale = compactable_indices[: len(compactable_indices) - _MICROCOMPACT_KEEP_RECENT]
+        updated: list[dict[str, Any]] | None = None
+        for idx in stale:
+            msg = messages[idx]
+            content = msg.get(&quot;content&quot;)
+            if not isinstance(content, str) or len(content) &lt; _MICROCOMPACT_MIN_CHARS:
+                continue
+            name = msg.get(&quot;name&quot;, &quot;tool&quot;)
+            summary = f&quot;[{name} result omitted from context]&quot;
+            if updated is None:
+                updated = [dict(m) for m in messages]
+            updated[idx][&quot;content&quot;] = summary
+
+        return updated if updated is not None else messages</code></pre><ol><li>只收集 role=tool 且 name 在 _COMPACTABLE_TOOLS 的位置，不对所有工具结果一刀切。最近 _MICROCOMPACT_KEEP_RECENT 个保留。</li><li>旧结果还必须是字符串且达到长度阈值才被替换；结构化列表与短结果不会在本段被改写。</li><li>替换保留 role/name/tool_call_id，只缩小 content 为 result omitted from context。消息协议的关联仍存在；这不是知识归档，也没有生成一段语义摘要。</li></ol></article><article id="source-9"><h3>9. AgentRunner._snip_history：总预算计算</h3><p>历史片段预算之后，还要把系统消息和工具定义纳入请求级估算。此摘录展示决定是否需要 snip 和尾部候选选择。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/runner.py</code> · <code>AgentRunner._snip_history：总预算计算</code> · 第 1110–1152 行（连续摘录）</p><pre id="excerpt-9" data-source="nanobot/agent/runner.py" data-start="1110" data-end="1152" data-symbol="AgentRunner._snip_history：总预算计算"><code class="language-python">    def _snip_history(
+        self,
+        spec: AgentRunSpec,
+        messages: list[dict[str, Any]],
+    ) -&gt; list[dict[str, Any]]:
+        if not messages or not spec.context_window_tokens:
+            return messages
+
+        provider_max_tokens = getattr(getattr(self.provider, &quot;generation&quot;, None), &quot;max_tokens&quot;, 4096)
+        max_output = spec.max_tokens if isinstance(spec.max_tokens, int) else (
+            provider_max_tokens if isinstance(provider_max_tokens, int) else 4096
+        )
+        budget = spec.context_block_limit or (
+            spec.context_window_tokens - max_output - _SNIP_SAFETY_BUFFER
+        )
+        if budget &lt;= 0:
+            return messages
+
+        estimate, _ = estimate_prompt_tokens_chain(
+            self.provider,
+            spec.model,
+            messages,
+            spec.tools.get_definitions(),
+        )
+        if estimate &lt;= budget:
+            return messages
+
+        system_messages = [dict(msg) for msg in messages if msg.get(&quot;role&quot;) == &quot;system&quot;]
+        non_system = [dict(msg) for msg in messages if msg.get(&quot;role&quot;) != &quot;system&quot;]
+        if not non_system:
+            return messages
+
+        system_tokens = sum(estimate_message_tokens(msg) for msg in system_messages)
+        remaining_budget = max(128, budget - system_tokens)
+        kept: list[dict[str, Any]] = []
+        kept_tokens = 0
+        for message in reversed(non_system):
+            msg_tokens = estimate_message_tokens(message)
+            if kept and kept_tokens + msg_tokens &gt; remaining_budget:
+                break
+            kept.append(message)
+            kept_tokens += msg_tokens
+        kept.reverse()</code></pre><ol><li>没有 messages 或窗口上限时直接返回。max_output 优先取 spec.max_tokens 的整数，否则取 Provider generation 或4096。</li><li>budget 使用 context_block_limit 或窗口减输出预留与安全缓冲；非正预算也直接返回，不能把这个分支解释为已经消除了超限风险。</li><li>estimate_prompt_tokens_chain 同时接收 messages 与 tools.get_definitions；只有估算超预算才裁剪。system 消息完整复制保留，非 system 从新到旧累计。</li><li>remaining_budget 至少128，至少保留一条候选。函数后半段恢复最近 user 并处理合法工具边界，因此最终值仍可能超预算；这是避免无效协议的明确取舍。</li></ol></article></section><section id="trace"><h2>用一组具体数据推演全部变化</h2><p>先固定一个手算 Session：<code>[u1,a1,u2,a2(c1,c2),t(c1),a3]</code>。每条估算成本依次为 <code>[20,30,20,10,40,15]</code>，last_consolidated=0，max_messages=6，max_tokens=70。a2 声明两个工具调用，但中断只留下 c1 结果。</p><div class="table-wrap"><table><thead><tr><th>阶段</th><th>计算过程</th><th>结果</th></tr></thead><tbody><tr><td>条数与净化</td><td>全部6条；从u1开始；字段投影</td><td>候选不变；原 Session 不被修改。</td></tr><tr><td>token 反向扫描</td><td>a3=15；加t(c1)=55；加a2=65；再加u2=85>70停止</td><td>候选 [a2,t(c1),a3]，尚无 user。</td></tr><tr><td>恢复用户边界</td><td>回到完整 out 找最近 user=u2</td><td>恢复 [u2,a2,t(c1),a3]，85 token；合法性优先于70软预算。</td></tr><tr><td>构建当前输入</td><td>current="继续，把遗漏的也说明"，末尾a3是assistant</td><td>增加 system 与一个合并 runtime+text 的 user；共有6条。</td></tr><tr><td>孤立结果处理</td><td>c1 已由a2声明</td><td>不删除 t(c1)。若额外有 t(x) 且 x 从未声明，则删除 t(x)。</td></tr><tr><td>补缺失结果</td><td>declared={c1,c2}，fulfilled={c1}</td><td>在a2后现有t(c1)之后补t(c2,错误占位)，然后保留a3与当前user；不执行c2。</td></tr><tr><td>发给Provider</td><td>system,u2,a2,t(c1),t(c2),a3,user当前</td><td>有合法关联；Provider 进一步适配内容格式。</td></tr></tbody></table></div><p>另一个必须手算的合并分支：历史仅 <code>[user("旧输入")]</code>，当前消息含一张有效图片。结果为 <code>[system,user([text("旧输入"),text(runtime),image_url(...),text("看这张图")])]</code>，不是 system,user,user。原历史字典的 content 仍是“旧输入”。当前轮可有图片 data URL；回放时由持久化 media 生成 breadcrumb，两种表示服务不同阶段。</p></section><section id="build-it"><h2>独立搭建本章最小模块</h2><p>从零实现纯函数 <code>compile_context(history,current,system,budget)</code>，返回合法消息列表和诊断信息 <code>{estimated_tokens, over_budget, dropped_ids, backfilled_ids}</code>。仅使用固定 token 计数器与虚拟图片块；不读取真实图片、不调用 Provider。实现回放投影、角色合并、尾部预算、孤立结果删除和缺失结果补位。</p><details><summary>展开参考方案：结构、算法与错误处理</summary><ol><li>输入深复制用于练习，role 限定为 system/user/assistant/tool；只把批准的协议字段复制到输出。不要把任意 Session metadata 带进请求。</li><li>先选尾部预算，再恢复最近用户轮。诊断里保留 over_budget=True，不能以返回了列表冒充满足硬预算。</li><li>合并当前输入时，str+str 用空行；任何一边是 blocks 就把字符串转换成 text block。图片块保持字典结构，不用 str(list) 破坏协议。</li><li>扫描声明集合，删除有 id 却未声明的结果；再次扫描找缺失，紧跟同一 assistant 的已有工具结果插入错误占位。用已占用 id 校验拒绝重复调用标识。</li><li>参考教学算法：candidate=tail_by_budget(project(history)); candidate=recover_user(candidate,history); messages=merge_current([system,*candidate],current); messages=drop_orphans(messages); messages=backfill_missing(messages); return messages,diagnostics。该算法用于练习，不声称完整复刻生产前处理的调用顺序。</li></ol></details><h3>验收条件</h3><ol><li>按上面的70预算样例输出85 token的最近完整轮，并显式 over_budget=True；原 history 逐字段不变。</li><li>t(x) 被删且 dropped_ids=[x]；c2补的是错误文本且 backfilled_ids=[c2]；FakeTool 执行次数为0。</li><li>历史以 user 结尾时合并为单个 user；图片字典仍是 image_url block，原字符串未被就地改写。</li><li>连续运行 compile_context 不再重复补同一个结果；重复 call_id 输入得到明确诊断。</li><li>极大 system 与极小预算不能标成“已经完全满足窗口”；诊断指出系统开销无法靠历史截断解决。</li></ol></section><section id="boundaries"><h2>边界、不变量与容易写错的地方</h2><ol><li>预算估算不等于模型实际计费 token，且图片、工具 schema、厂商消息包装会影响成本。用“字符数/4”只能做粗略教学估算。</li><li>系统 prompt、历史、当前消息和工具定义是不同成本来源；只压缩 history 无法解决无限增大的 system 或 schema。</li><li>Runtime Context 的 metadata-only 标签表达来源语义，不是代码沙箱，也不能把不可信内容自动提升为系统指令。</li><li>上下文删除、持久化删除和长期归档是不同操作；_microcompact 和 _snip_history 针对本轮请求，不直接代表用户消息被永久删除。</li><li>工具声明与结果按 call_id 配对，缺失结果补位不是工具成功；工具名相同也不能替代 id。</li><li>ContextBuilder 处理图片不等于拥有任意路径访问权限；路径授权应在上游文件/媒体边界落实，不能因存在本函数就绕过工作区规则。</li></ol></section><div class="page-nav" data-study-page-nav></div><footer class="footer">nanobot Agent 学习手册 · 源码精讲与设计实作 · 本页为学习材料，不改动生产运行逻辑</footer></div></main></div></body></html>

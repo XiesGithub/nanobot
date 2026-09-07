@@ -1,0 +1,50 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>03 · Consolidator 会话归档 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="memory-system" data-page="consolidator">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-1" data-original-href="../../../nanobot/agent/memory.py" data-source-label="Consolidator 源码" title="阅读 nanobot/agent/memory.py:235–275 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Memory · lightweight consolidation</p><h1>Consolidator：在模型溢出前压缩会话</h1><p class="lead">Consolidator 的目标不是写好最终 Memory，而是让下一次模型请求仍能放进上下文窗口，同时把被移出的对话留下可追溯的“面包屑”。</p><div class="meta-row"><span class="chip">token triggered</span><span class="chip">user-turn boundary</span><span class="chip">最多 5 轮</span><span class="chip">RAW fallback</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">预算公式</h2><div class="data-box"><div class="label">可用输入预算</div><div><code>budget = context_window_tokens - max_completion_tokens - 1024</code></div></div><div class="data-box"><div class="label">压缩目标</div><div><code>target = int(budget × consolidation_ratio)</code>，默认比例来自配置；它是压缩后的目标水位，不是触发阈值。</div></div><div class="data-box"><div class="label">触发条件</div><div>估算 Prompt 小于 <code>budget</code> 时不做 token 压缩；达到或超过 budget 后，循环归档直到估算值不高于 target、没有安全边界、失败或最多 5 轮。</div></div>
+
+<div class="callout"><strong>为什么有两条线？</strong>budget 是“再不处理就可能装不下”的上限；target 是压缩后希望回落到的水位。两者之间的余量避免每增加一两条消息就频繁摘要。</div>
+
+<h2 id="reading-section-02">主算法</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>归档重放溢出</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>估算 Prompt</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>选边界</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>调用摘要</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>推进并复算</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>先处理 replay window</h3><p>即使 token 尚未超限，只要未压缩历史比 <code>replay_max_messages</code> 更长，未来不会被重放的前缀也先归档，避免它悄悄消失。</p></div>
+  <div data-step-panel><h3>估算真实 Prompt 链</h3><p>不是只数 Session 文本，而是调用 <code>build_messages()</code>，连 system prompt、长期 Memory、会话摘要和工具定义一起估算。</p></div>
+  <div data-step-panel><h3>只在 user-turn 前切开</h3><p>从 <code>last_consolidated</code> 开始累计 token，遇到下一条 user 消息时才形成候选边界，避免把一个用户回合的工具调用链切成两半。</p></div>
+  <div data-step-panel><h3>提取值得保留的信息</h3><p>摘要提示词只允许用户事实、决定、已验证方案、事件与偏好；若没有重要信息，要求输出 <code>(nothing)</code>。</p></div>
+  <div data-step-panel><h3>保存进度后重新估算</h3><p>归档后将 <code>last_consolidated=end_idx</code> 并保存 Session，再用新的未压缩尾部重建 Prompt，决定是否继续下一轮。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">安全切分示例</h2><div class="code-block"><div class="code-head"><span>Session.messages</span><span>边界落在下一条 user 之前</span></div><pre><code>[0] user       “帮我排查 A”        ┐
+[1] assistant  tool_call(read)     │ 被归档 chunk
+[2] tool       file content        │
+[3] assistant  “原因是 …”          ┘
+[4] user       “那继续改 B”        ← end_idx / 新尾部开始
+[5] assistant  ...</code></pre></div>
+<p>如果未压缩区只有一个很长的 user 回合而没有后续 user 边界，<code>pick_consolidation_boundary()</code> 会返回 <code>None</code>。系统宁愿暂时不切，也不制造孤立 tool result 或不完整回合。</p>
+
+<h2 id="reading-section-04"><code>archive()</code> 的成功与失败路径</h2><div class="compare-grid">
+  <div class="card flat"><h3>成功</h3><p>格式化带时间和 tools_used 的消息，在 Consolidator 自身输入预算内截断，调用 Provider，不携带 tools。摘要最多 8,000 字符，追加到 <code>history.jsonl</code>。</p></div>
+  <div class="card flat"><h3>Provider 异常或 error finish</h3><p>写入最多 16,000 字符的 <code>[RAW] N messages</code> 记录。调用返回 <code>None</code>，但 Session 进度仍推进，以免下次重复归档同一块。</p></div>
+</div><div class="callout warning"><strong>重要的“有损但不静默”策略：</strong>失败降级的 RAW 也会截断，所以不是完整备份；它的目标是在极端情况下保留有限线索，并阻止无限重试、重复条目和文件爆炸。</div>
+
+<h2 id="reading-section-05">为什么需要 Session 锁</h2><p><code>get_lock(session.key)</code> 为每个会话返回共享 <code>asyncio.Lock</code>。这样 token consolidation、AutoCompact 或并发请求不会同时对同一 Session 选择边界并推进进度。锁保存在弱引用字典中，不再使用后可回收。</p>
+
+<h2 id="reading-section-06">核心源码分析</h2><table class="source-table"><thead><tr><th>位置</th><th>职责</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-3" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:491" title="阅读 nanobot/agent/memory.py:491–511 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td><code>pick_consolidation_boundary</code></td><td>为何只在下一 user turn 前切分</td></tr>
+  <tr><td><a href="workshop.html#source-3" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:529" title="阅读 nanobot/agent/memory.py:491–511 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td>replay overflow boundary</td><td>消息数窗口与合法 tool-call 起点</td></tr>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:590" title="阅读 nanobot/agent/memory.py:634–667 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td>Prompt token 估算</td><td>使用完整 context 构造器与工具定义</td></tr>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:634" title="阅读 nanobot/agent/memory.py:634–667 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td><code>archive</code></td><td>摘要、输入截断与 RAW fallback</td></tr>
+  <tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/memory.py" data-source-label="memory.py:669" title="阅读 nanobot/agent/memory.py:634–667 的代表性摘录与讲解">memory.py · 站内摘录</a></td><td><code>maybe_consolidate_by_tokens</code></td><td>预算、循环、保存进度和摘要持久化</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/templates/agent/consolidator_archive.md" data-source-label="consolidator_archive.md" title="nanobot/templates/agent/consolidator_archive.md 的所属模块讲解；该文件未单独逐行收录">consolidator_archive.md · 模块讲解</a></td><td>摘要语义</td><td>哪些信息允许进入归档</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-07">测试告诉我们的边界</h2><ul class="check-list"><li>Prompt 低于预算不压缩；但 replay message window 溢出仍会归档。</li><li>LLM 失败会 raw archive、推进 <code>last_consolidated</code>，并终止本次多轮压缩。</li><li>没有中间 user 边界时不会强行切分。</li><li>巨大输入、巨大摘要和 RAW 内容分别受 token/字符上限约束。</li></ul>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question"><code>consolidation_ratio=0.5</code> 表示何时触发，还是表示压缩到哪里？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它表示触发阈值：估算的 prompt token 达到 context window 的该比例时开始整理。真正保留/归档边界还要服从 replay message window、用户边界和最小近期后缀，不是简单压缩到 50%。</p></div></details></li><li><span class="review-question">为什么 Provider 失败后仍要推进 <code>last_consolidated</code>？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>失败批次会以 RAW 形式写入 durable archive，信息并未丢失；推进 <code>last_consolidated</code> 可阻止同一超大前缀每轮再次触发并卡住主流程，之后 Dream 仍能消费 RAW。</p></div></details></li><li><span class="review-question">为什么估算必须包含 tools 定义，而不能只统计历史消息？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>模型请求的真实占用还包括工具 JSON Schema。若只算消息，工具很多时会严重低估 prompt，等 Provider 拒绝超窗才发现，因此 Consolidator 使用与 Runner 一致的整体估算。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">03.03 · Consolidator 会话归档</footer></div></main></div></body></html>

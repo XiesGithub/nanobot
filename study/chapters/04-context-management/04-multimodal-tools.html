@@ -1,0 +1,77 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>04 · 多模态、工具结果与持久化 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="context-management" data-page="multimodal-tools">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-1" data-original-href="../../../nanobot/agent/context.py" data-source-label="多模态源码" title="阅读 nanobot/agent/context.py:37–76 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Context · payload lifecycle</p><h1>多模态、工具结果与持久化</h1><p class="lead">当前模型调用需要丰富数据，但长期 Session 需要轻量稳定。nanobot 在“发送给模型的形态”和“保存到磁盘的形态”之间做显式转换。</p><div class="meta-row"><span class="chip">image_url</span><span class="chip">document extraction</span><span class="chip">tool-result reference</span><span class="chip">persistence sanitization</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">图片的三种形态</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>input</small><b>本地文件路径</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>current turn</small><b>Base64 image_url</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>session</small><b>media path</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>replay</small><b>文本面包屑</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>Channel/API 先落地媒体</h3><p>ContextBuilder 接收路径列表，不直接负责网络下载。</p></div>
+  <div data-step-panel><h3>当前轮让模型看见真实图片</h3><p>读取 bytes，优先检测真实 MIME、回退文件名猜测，只接受 <code>image/*</code>；构造 data URL 与 path 元数据。</p></div>
+  <div data-step-panel><h3>持久层不保存 Base64</h3><p>用户消息提前保存时仅记录 <code>media=[paths]</code>；Runner 返回的 image_url block 在保存阶段也被替换。</p></div>
+  <div data-step-panel><h3>后续只保留发生过的事实</h3><p>Session replay 合成 <code>[image: path]</code>。这样不会让每个后续请求重复携带图片体积。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="code-block"><div class="code-head"><span>agent/context.py:174 · 图片内容</span><span>核心源码</span></div><pre><code>raw = path.read_bytes()
+mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+images.append({
+    "type": "image_url",
+    "image_url": {"url": f"data:{mime};base64,{b64}"},
+    "_meta": {"path": str(path)},
+})
+return images + [{"type": "text", "text": user_text}]</code></pre></div>
+
+<h2 id="reading-section-02">文档与图片走不同路径</h2><div class="compare-grid">
+  <div class="card flat"><h3>图片</h3><p>保留在 media 中，由 ContextBuilder 编码为视觉 block。</p></div>
+  <div class="card flat"><h3>PDF/Office/文本等文档</h3><p>AgentLoop 的 state restore 先调用 <code>extract_documents()</code>，把提取文本并入当前 message，剩余 image-only 路径再交给 ContextBuilder。</p></div>
+</div><p>这个分层让 ContextBuilder 只处理 Provider 通用的图片格式，不承担每种文档解析器的职责。</p>
+
+<h2 id="reading-section-03">大工具结果的两阶段治理</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">工具刚执行</div><div class="arch-items"><span class="arch-item">_normalize_tool_result</span><span>确保非空 → 尝试外置 → 字符上限兜底</span></div></div>
+  <div class="arch-layer"><div class="arch-label">完整结果</div><div class="arch-items"><span class="arch-item">.nanobot/tool-results/&lt;session&gt;/&lt;call-id&gt;.*</span><span>原子写入磁盘</span></div></div>
+  <div class="arch-layer"><div class="arch-label">模型 Context</div><div class="arch-items"><span class="arch-item">reference + 1200-char preview</span><span>需要时可让 Agent 再读完整文件</span></div></div>
+  <div class="arch-layer"><div class="arch-label">旧结果</div><div class="arch-items"><span class="arch-item">microcompact</span><span>满足工具/新旧/长度条件后缩成 omitted 一行</span></div></div>
+</div>
+
+<div class="code-block"><div class="code-head"><span>utils/helpers.py:235 · 工具输出外置</span><span>概念摘录</span></div><pre><code>if len(text_payload) &gt; max_chars:
+    path = workspace / ".nanobot/tool-results" / safe_session / call_id
+    atomic_write(path, full_output)
+    return (
+        "[tool output persisted]\n"
+        f"Full output saved to: {path}\n"
+        f"Preview:\n{text_payload[:1200]}"
+    )</code></pre></div>
+
+<h2 id="reading-section-04">外置文件的生命周期</h2><table class="source-table"><thead><tr><th>设计</th><th>具体行为</th><th>目的</th></tr></thead><tbody>
+  <tr><td>Session bucket</td><td>用 safe_filename(session_key) 分目录</td><td>不同会话结果隔离</td></tr>
+  <tr><td>Call id 文件名</td><td>字符串用 txt，纯文本 block list 用 json</td><td>路径稳定、可再次读取</td></tr>
+  <tr><td>原子写</td><td>随机 tmp → replace</td><td>避免半份工具输出</td></tr>
+  <tr><td>时间保留</td><td>其他 bucket 超过 7 天清理</td><td>限制磁盘长期增长</td></tr>
+  <tr><td>数量保留</td><td>最多 32 个 bucket，包括当前 bucket</td><td>即使活跃度高也有目录上限</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-05">保存 Session 前剥离哪些东西</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>user</small><b>删 Runtime Context</b></button><span class="flow-arrow">·</span><button class="flow-node" data-step><small>image</small><b>Base64 → path</b></button><span class="flow-arrow">·</span><button class="flow-node" data-step><small>tool</small><b>再次截断</b></button><span class="flow-arrow">·</span><button class="flow-node" data-step><small>assistant</small><b>跳过无效空消息</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>Runtime 每轮重建</h3><p>识别开始/结束标记，只保留标记后的真实用户内容；多模态 list 则删除对应 text block。</p></div>
+  <div data-step-panel><h3>图片变成占位</h3><p>识别 <code>data:image/</code> URL，使用 block 的 <code>_meta.path</code> 生成文本占位。</p></div>
+  <div data-step-panel><h3>工具结果有持久层硬上限</h3><p>字符串超过 <code>max_tool_result_chars</code> 时稳定截断；list 中每个 text block 也分别受限。</p></div>
+  <div data-step-panel><h3>空 Assistant 不入库</h3><p>没有 content 且没有 tool_calls 的 assistant 会污染后续 replay，因此直接跳过；合法的纯 tool-call assistant 仍保留。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-06">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-5" data-original-href="../../../nanobot/agent/context.py" data-source-label="context.py:174" title="阅读 nanobot/agent/context.py:174–197 的代表性摘录与讲解">context.py · 站内摘录</a></td><td>图片校验、Base64 和多模态 block 顺序</td></tr>
+  <tr><td><a href="../01-request-lifecycle/workshop.html#source-5" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1319" title="阅读 nanobot/agent/loop.py:1360–1396 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>文档提取与 image-only 分流</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/helpers.py" data-source-label="helpers.py:185" title="nanobot/utils/helpers.py 的所属模块讲解；该文件未单独逐行收录">helpers.py · 模块讲解</a></td><td>工具结果 reference 文本</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/helpers.py" data-source-label="helpers.py:235" title="nanobot/utils/helpers.py 的所属模块讲解；该文件未单独逐行收录">helpers.py · 模块讲解</a></td><td>外置、预览和 bucket 清理</td></tr>
+  <tr><td><a href="workshop.html#source-6" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:969" title="阅读 nanobot/agent/runner.py:997–1020 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>工具结果 normalization</td></tr>
+  <tr><td><a href="../01-request-lifecycle/workshop.html#source-6" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1460" title="阅读 nanobot/agent/loop.py:1398–1445 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>持久化 block 清理</td></tr>
+  <tr><td><a href="../07-subagent-system/workshop.html#guide-nanobot-agent-loop-py-1544" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1499" title="阅读 nanobot/agent/loop.py:1544–1566 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>只保存本轮新增的合法消息</td></tr>
+</tbody></table>
+<div class="callout warning"><strong>外置失败仍可继续：</strong>Runner 捕获磁盘写入异常并使用原始结果，随后字符上限仍会兜底截断。系统优先保证 Agent turn 不因缓存文件失败而中止。</div>
+<h2 id="reading-section-07">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么当前轮图片和历史图片采用两种表示？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>当前轮图片仍需供模型视觉理解，所以 BUILD 生成 image_url/Base64 block；历史只保留路径占位文本，replay 不重新编码，二者分别服务即时推理与长期可控存储。</p></div></details></li><li><span class="review-question">文档文本为什么在 AgentLoop 提取，而不是 ContextBuilder？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>文档提取依赖附件类型、请求媒体路径和失败处理，是当前输入规范化的一部分。ContextBuilder 只组合已准备好的文本/图片上下文，不负责 I/O 型文档解析。</p></div></details></li><li><span class="review-question">大工具输出外置后，模型怎样知道去哪里读取完整内容？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>工具结果消息留下截断摘要和完整内容文件的路径，并提示可调用 <code>read_file</code>。模型先看到足够的概览，需要细节时按路径局部读取。</p></div></details></li><li><span class="review-question">Runtime Context 如果被永久保存，会产生什么问题？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>每轮都会把新的时间、sender、message id 等再次追加，导致历史重复和过期；更严重的是外部可控 metadata 会在后续轮次持续伪装成可信指令。SAVE 因此移除该 block。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">04.04 · 多模态、工具结果与持久化</footer></div></main></div></body></html>

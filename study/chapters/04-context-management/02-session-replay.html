@@ -1,0 +1,51 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>04 · Session 历史重放 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="context-management" data-page="session-replay">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-2" data-original-href="../../../nanobot/session/manager.py" data-source-label="Session 源码" title="阅读 nanobot/session/manager.py:87–144 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Context · replay selection</p><h1>Session 历史重放：从持久记录到合法模型消息</h1><p class="lead">Session 文件保存的是运行历史，模型 replay 则是经过筛选的视图。<code>get_history()</code> 同时处理 consolidation 偏移、消息数、token、工具协议、时间与媒体。</p><div class="meta-row"><span class="chip">unconsolidated tail</span><span class="chip">message + token caps</span><span class="chip">legal boundary</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">历史选择流水线</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>去已归档前缀</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>消息数切尾部</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>对齐 user turn</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>规范化内容</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>token 再切尾部</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3><code>messages[last_consolidated:]</code></h3><p>Consolidator 已归档的消息仍可保留在 Session 文件中，但不会再次进入 replay。</p></div>
+  <div data-step-panel><h3>先按 max_messages</h3><p>从未归档尾部取最后 N 条；非正值回退到 120。消息数窗口是第一道粗粒度上限。</p></div>
+  <div data-step-panel><h3>尽量从用户回合开始</h3><p>找到第一个 user 并丢弃更早内容；若 user 前一条是主动渠道投递 <code>_channel_delivery</code>，则连同它一起保留，支持“好的/继续”这种回复。</p></div>
+  <div data-step-panel><h3>转成 Provider 可见字段</h3><p>清理 assistant replay artifact；用户图片变成 <code>[image: path]</code>；按需只给 user turn 添加 Message Time；保留工具与 reasoning 字段。</p></div>
+  <div data-step-panel><h3>再按 max_tokens</h3><p>反向累加每条消息 token，至少保留一条；随后再次寻找 user 起点和合法 tool boundary。必要时宁可略超预算，也恢复最近 user，避免 assistant-only 序列。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="code-block"><div class="code-head"><span>session/manager.py:87 · replay 骨架</span><span>概念摘录</span></div><pre><code>unconsolidated = self.messages[self.last_consolidated:]
+sliced = unconsolidated[-max_messages:]
+sliced = align_to_first_user(sliced)
+sliced = sliced[find_legal_message_start(sliced):]
+out = normalize_for_provider(sliced)
+out = keep_tail_within_token_budget(out, max_tokens)
+return out</code></pre></div>
+
+<h2 id="reading-section-02">为什么不能直接 <code>messages[-N:]</code></h2><div class="code-block"><div class="code-head"><span>危险切片</span><span>assistant tool_call 已被切掉</span></div><pre><code>[被切掉] assistant: tool_calls=[{id:"call_7", name:"read_file"}]
+[窗口开头] tool: tool_call_id="call_7", content="..."
+[下一条]   assistant: "文件内容说明..."</code></pre></div><p>Provider 看到 tool result 却找不到此前声明它的 assistant tool_call，通常会拒绝请求。<code>find_legal_message_start()</code> 扫描已声明 call id，一旦遇到孤立结果，就把合法起点移动到它之后并清空声明集合。</p>
+
+<h2 id="reading-section-03">时间标注为什么只加在 user turn</h2><div class="compare-grid">
+  <div class="card flat"><h3>给用户消息加时间</h3><p><code>[Message Time: timestamp]</code> 让模型理解“昨天”“过两天”等相对时间，也能给相邻 assistant 回复提供时间锚点。</p></div>
+  <div class="card flat"><h3>不给 Assistant/Tool 加</h3><p>若每个 assistant 历史都带前缀，模型会从 in-context examples 学会在新回复中复刻该元数据，最终泄漏给用户。</p></div>
+</div>
+
+<h2 id="reading-section-04">图片 replay 采用“面包屑”</h2><div class="data-box"><div class="label">当前轮</div><div>真实图片文件会 Base64 编码成 image_url block，模型可以直接看图。</div></div><div class="data-box"><div class="label">持久 Session</div><div>只保存 media 路径，不保存巨大的 data URL。</div></div><div class="data-box"><div class="label">后续 replay</div><div>用户历史恢复为 <code>[image: 原路径]</code> 文本；模型知道曾有图片，但不会每轮重复传输二进制。</div></div>
+
+<h2 id="reading-section-05">Token 尾部保留的特殊选择</h2><p>反向累计时，如果第一条消息本身就超预算，仍会保留它；如果最终只剩 assistant/tool 而原输出中存在 user，则找回最近 user 及其后续消息。代码明确选择“略超预算但角色合法”，而不是生成某些 Provider 拒绝的 <code>system → assistant</code> 序列。</p>
+
+<h2 id="reading-section-06">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-2" data-original-href="../../../nanobot/session/manager.py" data-source-label="session/manager.py:58" title="阅读 nanobot/session/manager.py:87–144 的代表性摘录与讲解">session/manager.py · 站内摘录</a></td><td>只给 user turn 暴露持久时间</td></tr>
+  <tr><td><a href="workshop.html#source-2" data-original-href="../../../nanobot/session/manager.py" data-source-label="session/manager.py:87" title="阅读 nanobot/session/manager.py:87–144 的代表性摘录与讲解">session/manager.py · 站内摘录</a></td><td>完整 replay 选择算法</td></tr>
+  <tr><td><a href="workshop.html#source-2" data-original-href="../../../nanobot/session/manager.py" data-source-label="session/manager.py:124" title="阅读 nanobot/session/manager.py:87–144 的代表性摘录与讲解">session/manager.py · 站内摘录</a></td><td>用户图片占位恢复</td></tr>
+  <tr><td><a href="workshop.html#source-3" data-original-href="../../../nanobot/session/manager.py" data-source-label="session/manager.py:146" title="阅读 nanobot/session/manager.py:146–177 的代表性摘录与讲解">session/manager.py · 站内摘录</a></td><td>token 尾部与 user 恢复</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/helpers.py" data-source-label="utils/helpers.py:153" title="nanobot/utils/helpers.py 的所属模块讲解；该文件未单独逐行收录">utils/helpers.py · 模块讲解</a></td><td>合法 tool-result 起点算法</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/test_session_manager_history.py" data-source-label="test_session_manager_history.py" title="tests/agent/test_session_manager_history.py 的所属模块讲解；该文件未单独逐行收录">test_session_manager_history.py · 模块讲解</a></td><td>窗口、工具边界、时间、图片和 token 回归测试</td></tr>
+</tbody></table>
+<div class="callout warning"><strong>Session ≠ Prompt：</strong>Session 可以保留时间戳、media 路径和内部标记；<code>get_history()</code> 只挑选并转换 Provider 允许看到的字段。</div>
+<h2 id="reading-section-07">自测</h2><ul class="check-list review-list"><li><span class="review-question"><code>last_consolidated</code> 为什么不是删除消息的索引？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它是“归档完成到这里”的逻辑 offset，原 messages 仍可能暂时存在或被文件容量策略管理。replay 从 offset 后取内容，而不是把 offset 当作对列表执行删除的命令。</p></div></details></li><li><span class="review-question">用户只回复“好的”时，为什么可能要保留它前面的主动 assistant 消息？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>极短回复依赖上一条问题或主动通知。回溯算法会把前面的 assistant 上下文一并纳入，而不是仅从最后一个 user 文本机械开始，避免“好的”失去指代。</p></div></details></li><li><span class="review-question">token 很紧时，为什么代码可能主动超出估算预算？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>协议完整性优先于估算精度：为了不拆开 tool call/result 或关键 user-assistant 边界，选择器可能保留整个原子组，即使略超目标 token，也比发送非法消息序列更可靠。</p></div></details></li><li><span class="review-question">历史图片为什么不再次编码成 Base64？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>持久化历史已经把图片转成包含路径的文本占位；replay 直接使用该占位，不读取文件重新 Base64 编码，防止每次请求重复大对象。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">04.02 · Session 历史重放</footer></div></main></div></body></html>

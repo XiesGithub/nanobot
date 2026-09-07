@@ -1,0 +1,70 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08.07 · Subagent 配置、安全与限制 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="subagent-system" data-page="config-safety">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="../02-llm-provider-gateway/workshop.html#source-2" data-original-href="../../../nanobot/config/schema.py" data-source-label="配置源码" title="阅读 nanobot/config/schema.py:263–326 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Subagent · guardrails</p><h1>配置、安全边界、当前限制与测试地图</h1><p class="lead">Subagent 的风险不只是 token 成本，还包括递归、权限扩散、文件冲突、结果错投和后台 task 泄漏。nanobot 主要用单层工具 scope、默认单并发、session 归属和共享安全配置控制这些风险。</p><div class="meta-row"><span class="chip">default concurrency 1</span><span class="chip">max iterations 200</span><span class="chip">workspace policy</span><span class="chip">source review</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">配置如何流到子执行器</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>schema</small><b>AgentDefaults</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>factory</small><b>AgentLoop.from_config</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>manager</small><b>构造参数</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>spawn</small><b>执行限制</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>runtime</small><b>Tool/Runner 策略</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>Schema 声明统一默认值</h3><p>max_tool_iterations=200、max_concurrent_subagents=1、max_tool_result_chars=16000；ToolsConfig 还控制 exec/web 和 workspace 限制。</p></div>
+  <div data-step-panel><h3>AgentLoop 从用户配置取多数值</h3><p>max iterations、result chars、disabled skills、tools config、workspace policy 与模型信息都传给 Manager。</p></div>
+  <div data-step-panel><h3>Manager 保存未来 spawn 的运行参数</h3><p>Provider 热切换会调用 set_provider；MyTool 修改主 max_iterations 时也会同步到 subagents.max_iterations。</p></div>
+  <div data-step-panel><h3>SpawnTool 先执行全局并发检查</h3><p>当前 running 数达到 limit 就拒绝。该上限跨 session 共享，避免多个用户各自耗尽 Provider 配额。</p></div>
+  <div data-step-panel><h3>Runner 与具体 Tool 各守一层</h3><p>迭代/结果长度由 AgentRunSpec 控制；路径、Shell、环境变量、网络和 SSRF 由对应 Tool 配置与安全模块控制。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">主要安全边界</h2><table class="source-table"><thead><tr><th>风险</th><th>当前控制</th><th>仍需理解的边界</th></tr></thead><tbody>
+  <tr><td>递归爆炸</td><td>subagent Registry 不含 spawn</td><td>主 Agent仍可在多个 iteration 连续 spawn</td></tr>
+  <tr><td>并发成本</td><td>默认全局最大 1</td><td>并发检查在 Tool 层；配置传递存在下述缺口</td></tr>
+  <tr><td>权限扩散</td><td>scope=subagent 白名单，无 message/cron/MyTool/MCP</td><td>文件、Exec、Web 仍是高权限能力</td></tr>
+  <tr><td>路径越界</td><td>沿用 restrict_to_workspace 与文件解析</td><td>false 时子 Agent与主 Agent一样可访问更广路径</td></tr>
+  <tr><td>外部指令注入</td><td>Prompt 声明 Web 内容不可信</td><td>这是模型层规则，不代替网络/命令安全</td></tr>
+  <tr><td>结果错投</td><td>ContextVar + effective session override + task id</td><td>新增渠道必须保持 thread/session 语义</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-03">失败处理矩阵</h2><div class="compare-grid"><div class="card"><h3>可预期失败</h3><p>并发已满返回 Tool error 文本；tool_error 汇总部分进度；max_iterations 返回替代结果；父等待 300 秒超时后允许当前 Turn 结束。</p></div><div class="card"><h3>异常与取消</h3><p>普通 Exception 被 Manager 捕获并回注 “Error: ...”；CancelledError 传播并走 done cleanup；晚到结果仍可触发独立 system Turn。</p></div></div>
+
+<h2 id="reading-section-04">源码审阅发现：并发配置没有完整接线</h2><div class="code-block"><div class="code-head"><span>config/schema.py:88–90 + agent/subagent.py:83–98</span><span>声明存在，传递缺失</span></div><pre><code># AgentDefaults
+max_tool_iterations: int = 200
+max_concurrent_subagents: int = Field(default=1, ge=1)
+max_tool_result_chars: int = 16_000
+
+# SubagentManager.__init__
+defaults = AgentDefaults()
+self.max_concurrent_subagents = defaults.max_concurrent_subagents</code></pre></div>
+<p><code>AgentLoop.from_config()</code> 会把 configured max_tool_iterations 传入 AgentLoop，再传给 Manager；但 AgentLoop 构造函数与 SubagentManager 构造函数都没有 max_concurrent_subagents 参数。Manager 重新创建 <code>AgentDefaults()</code>，因此当前路径只得到默认值 1。测试也只断言它等于新建 defaults，没有覆盖非默认配置。</p>
+<div class="callout warning"><strong>结论：</strong>配置文件中把 maxConcurrentSubagents 改成非 1 值，在当前源码中可能不会影响实际 SpawnTool 上限。这是本章记录的实现缺口，不是手册对代码做出的修复。</div>
+
+<h2 id="reading-section-05">其他实现限制</h2><ul class="check-list">
+  <li>Subagent 没有父对话历史；任务描述遗漏背景时无法自动补齐。</li>
+  <li>workspace 共享但没有文件级事务或自动冲突合并，多任务写同一文件需由主 Agent协调。</li>
+  <li>完成后的 SubagentStatus 被立即删除，没有内置已完成任务列表。</li>
+  <li>Manager 没有独立的全局 shutdown/close API；明确的细粒度取消入口是 <code>cancel_by_session</code>。</li>
+  <li>没有专门的模型选择、预算分账或每个 task timeout；等待父注入的 300 秒不是子任务执行超时。</li>
+  <li>Subagent 不能 ask_user；遇到缺失信息只能返回问题或失败，由父 Agent重新与用户交互。</li>
+</ul>
+
+<h2 id="reading-section-06">测试地图</h2><table class="source-table"><thead><tr><th>测试</th><th>验证重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/test_subagent.py" data-source-label="tests/agent/test_subagent.py" title="tests/agent/test_subagent.py 的所属模块讲解；该文件未单独逐行收录">tests/agent/test_subagent.py · 模块讲解</a></td><td>ToolLoader scope、可用/禁用工具、FileStates 隔离</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/tools/test_subagent_tools.py" data-source-label="tests/agent/tools/test_subagent_tools.py" title="tests/agent/tools/test_subagent_tools.py 的所属模块讲解；该文件未单独逐行收录">tests/agent/tools/test_subagent_tools.py · 模块讲解</a></td><td>Exec 配置、max iterations、并发拒绝、300 秒等待分支</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/test_tool_contextvars.py" data-source-label="tests/test_tool_contextvars.py" title="tests/test_tool_contextvars.py 的所属模块讲解；该文件未单独逐行收录">tests/test_tool_contextvars.py · 模块讲解</a></td><td>不同 asyncio 请求的 origin 隔离</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/test_loop_save_turn.py" data-source-label="tests/agent/test_loop_save_turn.py:612" title="tests/agent/test_loop_save_turn.py 的所属模块讲解；该文件未单独逐行收录">tests/agent/test_loop_save_turn.py · 模块讲解</a></td><td>结果持久化、去重、effective key、Slack thread</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/tools/test_search_tools.py" data-source-label="tests/tools/test_search_tools.py:320" title="tests/tools/test_search_tools.py 的所属模块讲解；该文件未单独逐行收录">tests/tools/test_search_tools.py · 模块讲解</a></td><td>搜索工具注册与 disabled skills Prompt</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/tools/test_self_tool_runtime_sync.py" data-source-label="test_self_tool_runtime_sync.py" title="tests/agent/tools/test_self_tool_runtime_sync.py 的所属模块讲解；该文件未单独逐行收录">test_self_tool_runtime_sync.py · 模块讲解</a></td><td>运行期 max_iterations 同步</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-07">扩展 Subagent 时的检查清单</h2><ol class="number-list">
+  <li>新 Tool 是否真的需要 subagent scope？它能否在没有 bus、cron、provider loader 的 ToolContext 下创建？</li>
+  <li>任务结果是否始终携带 effective session key、task id 和必要的原始消息关联？</li>
+  <li>新增并发是否会造成共享 workspace 写冲突、Provider 限流或共享 Runner 状态问题？</li>
+  <li>错误、取消、等待超时和父 Turn 已结束四种路径是否都有测试？</li>
+  <li>不要把“独立 Registry”误认为进程沙箱；副作用边界必须由 Tool 自己守住。</li>
+</ol>
+
+<h2 id="reading-section-08">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="../02-llm-provider-gateway/workshop.html#source-2" data-original-href="../../../nanobot/config/schema.py" data-source-label="config/schema.py:77" title="阅读 nanobot/config/schema.py:263–326 的代表性摘录与讲解">config/schema.py · 站内摘录</a></td><td>AgentDefaults</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-770" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:404" title="阅读 nanobot/agent/loop.py:770–833 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>from_config 接线</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py:71" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">subagent.py · 站内摘录</a></td><td>Manager 实际配置</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/tools/self.py" data-source-label="tools/self.py:414" title="nanobot/agent/tools/self.py 的所属模块讲解；该文件未单独逐行收录">tools/self.py · 模块讲解</a></td><td>运行期迭代上限同步</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">300 秒等待为什么不是 Subagent timeout？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>这是 AgentLoop 等待 pending/announcement 的一次超时窗口，超时后只是让当前父 Runner 继续或结束；Subagent task 仍在 Manager 中运行，完成后可走晚到结果的新 system Turn。</p></div></details></li><li><span class="review-question">独立 ToolRegistry 为什么不能等同于进程级隔离？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Registry 隔离只限制模型可见和可调用的工具集合；所有任务仍在同一 Python 进程并共享 workspace、Provider 和操作系统权限，恶意或有副作用的 Tool 仍可影响彼此。</p></div></details></li><li><span class="review-question">max_concurrent_subagents 的配置断点出现在哪两层之间？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>字段定义在 <code>AgentDefaults.max_concurrent_subagents</code>，但 <code>AgentLoop.from_config()</code> 没把该值传进运行期 Manager；<code>SubagentManager</code> 因而从自己的默认 <code>AgentDefaults()</code> 读取，形成 schema 到装配层的断点。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">07.07 · Subagent 配置、安全与限制</footer></div></main></div></body></html>

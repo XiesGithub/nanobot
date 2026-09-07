@@ -1,0 +1,70 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>05 · 内层模型—工具循环 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="agent-loop" data-page="model-tool-loop">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-runner-py-56" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py" title="阅读 nanobot/agent/runner.py:56–97 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Agent Loop · inner loop</p><h1>内层模型—工具循环</h1><p class="lead"><code>AgentRunner.run()</code> 把一轮“思考—行动—观察”实现成受限的 <code>for iteration in range(max_iterations)</code>：模型选择行动，运行时执行行动，结果成为下一次模型输入。</p><div class="meta-row"><span class="chip">Provider</span><span class="chip">ToolRegistry</span><span class="chip">max_iterations</span><span class="chip">stop_reason</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">一次 iteration 的准确顺序</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>治理输入副本</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>调用 Provider</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>判断工具调用</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>执行并回填</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>继续或结束</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>只治理 <code>messages_for_model</code></h3><p>修复孤儿 tool result、补齐缺失结果、压缩旧工具输出和裁剪历史；真实 <code>messages</code> 不受合成修改影响，保存边界保持稳定。</p></div>
+  <div data-step-panel><h3>Hook 决定流式或普通请求</h3><p><code>_request_model()</code> 按能力选择 <code>chat_stream_with_retry</code> 或 <code>chat_with_retry</code>，默认 300 秒超时避免 Session lock 被无限占用。</p></div>
+  <div data-step-panel><h3><code>should_execute_tools</code> 才执行</h3><p>仅有 tool_calls 但 finish_reason 不允许执行时会告警并忽略；遇到 ask_user 时截断其后的工具，防止先执行尚未获批的动作。</p></div>
+  <div data-step-panel><h3>assistant(tool_calls) 与 tool results 成对追加</h3><p>工具前写 awaiting_tools checkpoint，执行后逐条规范化结果并写 tools_completed checkpoint，然后让下一次 iteration 读取这些观察。</p></div>
+  <div data-step-panel><h3>分支决定控制流</h3><p>工具成功通常 <code>continue</code>；正常文本 <code>break</code>；空输出、length、错误、ask_user 和 max_iterations 各有独立恢复或停止策略。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">核心循环骨架</h2><div class="code-block"><div class="code-head"><span>agent/runner.py:251</span><span>省略异常与治理细节</span></div><pre><code>for iteration in range(spec.max_iterations):
+    messages_for_model = govern(messages)
+    response = await self._request_model(spec, messages_for_model, hook, context)
+
+    if response.should_execute_tools:
+        messages.append(build_assistant_message(..., tool_calls=...))
+        results = await self._execute_tools(spec, tool_calls, ...)
+        messages.extend(tool_result_messages(results))
+        continue
+
+    clean = hook.finalize_content(context, response.content)
+    messages.append(build_assistant_message(clean))
+    final_content = clean
+    break
+else:
+    stop_reason = "max_iterations"</code></pre></div>
+
+<h2 id="reading-section-03">工具调用如何执行</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">预处理</div><div class="arch-items"><span class="arch-item">重复外部查询保护</span><span class="arch-item">prepare_call</span><span class="arch-item">参数校验</span></div></div>
+  <div class="arch-layer"><div class="arch-label">调度</div><div class="arch-items"><span class="arch-item">_partition_tool_batches</span><span>→ 仅标记 <code>concurrency_safe</code> 的相邻调用组成并发批次；其他工具各自顺序执行</span></div></div>
+  <div class="arch-layer"><div class="arch-label">执行</div><div class="arch-items"><span class="arch-item">tool.execute</span><span>或</span><span class="arch-item">registry.execute</span><span>→ 捕获取消以外异常</span></div></div>
+  <div class="arch-layer"><div class="arch-label">归一化</div><div class="arch-items"><span class="arch-item">max chars / externalize</span><span class="arch-item">event status</span><span class="arch-item">retry hint</span></div></div>
+</div>
+<div class="code-block"><div class="code-head"><span>agent/runner.py:701</span><span>批次内并发</span></div><pre><code>for batch in self._partition_tool_batches(spec, tool_calls):
+    if spec.concurrent_tools and len(batch) &gt; 1:
+        batch_results = await asyncio.gather(*(
+            self._run_tool(spec, call, ...) for call in batch
+        ))
+    else:
+        for call in batch:
+            result = await self._run_tool(spec, call, ...)
+            if isinstance(result.error, AskUserInterrupt):
+                break</code></pre></div>
+
+<h2 id="reading-section-04">终止与恢复语义</h2><table class="source-table"><thead><tr><th>情形</th><th>行为</th><th>stop_reason</th></tr></thead><tbody>
+  <tr><td>模型返回非空最终文本</td><td>追加 assistant，写 final_response checkpoint，结束</td><td><code>completed</code></td></tr>
+  <tr><td>ask_user 抛出受控中断</td><td>以 question 作为最终内容，不写虚假的 tool result</td><td><code>ask_user</code></td></tr>
+  <tr><td>严格工具错误</td><td>追加可见错误，允许先吸收一次 injection，否则结束</td><td><code>tool_error</code></td></tr>
+  <tr><td>Provider 错误</td><td>生成错误占位，尝试吸收 injection</td><td><code>error</code></td></tr>
+  <tr><td>空文本</td><td>先重试；耗尽后做一次无 tools 的 finalization retry</td><td><code>empty_final_response</code></td></tr>
+  <tr><td><code>finish_reason=length</code></td><td>追加已生成片段和“继续”消息，最多恢复 3 次</td><td>成功后通常 <code>completed</code></td></tr>
+  <tr><td>iteration 用尽</td><td>追加固定的最大迭代提示，并清空剩余 injection</td><td><code>max_iterations</code></td></tr>
+</tbody></table>
+
+<h2 id="reading-section-05">为什么需要多种 retry</h2><div class="compare-grid"><div class="card"><h3>Provider retry</h3><p>由 Provider 层处理网络、限流等可重试错误；Runner 只传入 retry mode 和等待通知回调。</p></div><div class="card"><h3>语义 retry</h3><p>Runner 处理“请求成功但结果不可用”：空答案、输出截断或工具报错后的重新推理。这些不是 HTTP 重试。</p></div></div>
+
+<div class="callout warning"><strong>不要把一次 iteration 当成一次用户请求：</strong>一个用户 Turn 可能经历多次 Provider 调用和多个工具批次；usage、tools_used 和 messages 都在整个 Runner 生命周期内累计。</div>
+
+<h2 id="reading-section-06">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-251" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:234" title="阅读 nanobot/agent/runner.py:251–312 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>主迭代循环与所有停止分支</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-316" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:591" title="阅读 nanobot/agent/runner.py:316–378 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>流式/非流式 Provider 请求与超时</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-316" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:701" title="阅读 nanobot/agent/runner.py:316–378 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>工具批次并发执行</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-316" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:742" title="阅读 nanobot/agent/runner.py:316–378 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>单工具校验、执行与错误分类</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-1179" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:1179" title="阅读 nanobot/agent/runner.py:1179–1202 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>工具批次分区规则</td></tr></tbody></table>
+<h2 id="reading-section-07">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 tool result 必须进入下一次 Provider 请求，而不是直接返回用户？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>工具结果是模型观察，不一定能直接解释给用户。它以 tool role 和原调用 ID 加入下一次 Provider 请求，让模型基于结果继续规划或形成最终自然语言答案。</p></div></details></li><li><span class="review-question">空响应重试和 Provider 网络重试有什么区别？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>空响应重试发生在 Runner 语义层：请求成功但没有可用文本/工具，需要提示模型继续；网络、限流和服务错误重试在 Provider 基类，根据结构化错误、退避和 Retry-After 处理。</p></div></details></li><li><span class="review-question">Runner 为什么同时维护 messages 与 messages_for_model？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>逻辑 <code>messages</code> 保存完整可恢复轨迹；每轮的 <code>messages_for_model</code> 是深拷贝后做 token snip、图片降级和协议修复的请求视图，预算治理不能删掉待保存事实。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">05.03 · 内层模型—工具循环</footer></div></main></div></body></html>

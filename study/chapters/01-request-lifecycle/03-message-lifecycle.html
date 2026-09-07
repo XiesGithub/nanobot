@@ -1,0 +1,52 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>01 · 消息完整生命周期 | nanobot Agent 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head><body data-study-root="../.." data-chapter="request-lifecycle" data-page="message-lifecycle">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>Agent 学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="打开源码" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside>
+<main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select>
+<div class="breadcrumb" data-study-breadcrumb></div><section class="hero"><p class="eyebrow">Turn orchestration</p><h1>一条消息怎样经过完整生命周期</h1><p class="lead"><code>AgentLoop._process_message()</code> 用显式状态机组织一次 Turn。状态负责阶段，<code>TurnContext</code> 负责携带数据。</p><div class="meta-row"><span class="chip">编排对象：AgentLoop</span><span class="chip">状态载体：TurnContext</span><span class="chip">8 个状态</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<div class="callout"><strong>先区分两个“循环”：</strong><code>AgentLoop</code> 的状态机管理整条消息；其中 RUN 状态内部再进入 <code>AgentRunner</code> 的 LLM ↔ Tool 迭代循环。</div>
+
+<h2 id="reading-section-01">八状态单步浏览</h2><section data-stepper>
+<div class="flow"><button class="flow-node" data-step><small>1</small><b>RESTORE</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>COMPACT</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>COMMAND</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>BUILD</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>RUN</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>6</small><b>SAVE</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>7</small><b>RESPOND</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>8</small><b>DONE</b></button></div>
+<div class="card flat step-detail">
+  <div data-step-panel><h3>RESTORE · 恢复</h3><p>提取附件文档；取得 Session；恢复崩溃或取消前的 runtime checkpoint；补回尚未闭合的用户轮次。</p><code>产物：ctx.session、规范化后的 ctx.msg</code></div>
+  <div data-step-panel><h3>COMPACT · 会话整理</h3><p>调用 AutoCompact 检查 TTL 和历史状态，必要时准备归档摘要供本轮 system prompt 使用。</p><code>产物：ctx.pending_summary</code></div>
+  <div data-step-panel><h3>COMMAND · 命令短路</h3><p>尝试分发 <code>/new</code>、<code>/status</code> 等命令。命中返回 <code>shortcut</code>，直接转到 DONE；普通消息返回 <code>dispatch</code>。</p></div>
+  <div data-step-panel><h3>BUILD · 构建输入</h3><p>按消息数和 token 预算读取历史、设置工具请求上下文、拼装系统提示词与用户消息，并提前持久化用户输入。</p><code>产物：ctx.history、ctx.initial_messages</code></div>
+  <div data-step-panel><h3>RUN · 执行 Agent</h3><p>创建 AgentRunSpec，交给 AgentRunner。它可能调用模型一次，也可能在模型和工具之间循环多次。</p><code>产物：final_content、tools_used、all_messages、stop_reason</code></div>
+  <div data-step-panel><h3>SAVE · 保存</h3><p>只截取本轮新增消息，处理生成媒体，写入 Session，清理 checkpoint，并后台触发记忆整理。</p></div>
+  <div data-step-panel><h3>RESPOND · 组装响应</h3><p>根据 stop_reason、ask_user、流式标记和生成媒体构造 <code>OutboundMessage</code>。</p><code>产物：ctx.outbound</code></div>
+  <div data-step-panel><h3>DONE · 完成</h3><p>状态机退出并返回 <code>ctx.outbound</code>。总线路径会发布到 outbound queue；直接路径会把对象返回给 API/SDK。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">状态机是怎样驱动的</h2>
+<div class="code-block"><div class="code-head"><span>nanobot/agent/loop.py · _process_message()</span><span>核心结构</span></div><pre><code>ctx = <span class="type">TurnContext</span>(state=TurnState.RESTORE, ...)
+
+<span class="kw">while</span> ctx.state <span class="kw">is not</span> TurnState.DONE:
+    handler_name = <span class="str">f"_state_{ctx.state.name.lower()}"</span>
+    handler = <span class="fn">getattr</span>(self, handler_name)
+    event = <span class="kw">await</span> handler(ctx)
+    next_state = self._TRANSITIONS[(ctx.state, event)]
+    ctx.state = next_state
+
+<span class="kw">return</span> ctx.outbound</code></pre></div>
+<p>每个 handler 不直接决定下一个状态，而是返回事件字符串，例如 <code>"ok"</code>、<code>"dispatch"</code> 或 <code>"shortcut"</code>。转移表集中决定下一状态，使流程可追踪、可测试。</p>
+
+<h2 id="reading-section-03"><code>TurnContext</code> 如何承载数据</h2>
+<div class="architecture">
+  <div class="arch-layer"><div class="arch-label">输入身份</div><div class="arch-items"><span class="arch-item">msg</span><span class="arch-item">session_key</span><span class="arch-item">turn_id</span></div></div>
+  <div class="arch-layer"><div class="arch-label">上下文阶段</div><div class="arch-items"><span class="arch-item">session</span><span class="arch-item">history</span><span class="arch-item">initial_messages</span><span class="arch-item">pending_summary</span></div></div>
+  <div class="arch-layer"><div class="arch-label">执行结果</div><div class="arch-items"><span class="arch-item">final_content</span><span class="arch-item">tools_used</span><span class="arch-item">all_messages</span><span class="arch-item">stop_reason</span></div></div>
+  <div class="arch-layer"><div class="arch-label">输出与诊断</div><div class="arch-items"><span class="arch-item">outbound</span><span class="arch-item">generated_media</span><span class="arch-item">trace</span></div></div>
+</div>
+
+<h2 id="reading-section-04">并发模型</h2><div class="compare-grid"><div class="card flat"><h3>同一 Session</h3><p><code>asyncio.Lock</code> 保证串行。执行期间的新消息优先进入 pending queue，供 Runner 在安全检查点注入。</p></div><div class="card flat"><h3>不同 Session</h3><p><code>asyncio.create_task</code> 允许并行；全局 Semaphore 限制总并发，环境变量默认上限为 3。</p></div></div>
+<div class="callout warning"><strong>取消也属于生命周期：</strong><code>/stop</code> 取消任务时，代码会恢复已经写下的 runtime checkpoint，把已完成的 assistant/tool 片段保留到 Session，避免下一轮失忆。</div>
+
+<h2 id="reading-section-05">核心源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>符号</th><th>作用</th></tr></thead><tbody>
+<tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:175" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td><code>TurnState</code></td><td>状态枚举</td></tr><tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:196" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td><code>TurnContext</code></td><td>单轮数据载体</td></tr><tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:254" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td><code>_TRANSITIONS</code></td><td>事件驱动转移表</td></tr><tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:867" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td><code>run</code></td><td>长期消费消息</td></tr><tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:942" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td><code>_dispatch</code></td><td>任务与并发控制</td></tr><tr><td><a href="workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1193" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td><code>_process_message</code></td><td>状态机驱动器</td></tr><tr><td><a href="workshop.html#source-5" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1319" title="阅读 nanobot/agent/loop.py:1360–1396 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td><code>_state_restore</code></td><td>第一个状态 handler</td></tr></tbody></table>
+
+<h2 id="reading-section-06">你应该能回答</h2><ul class="check-list review-list"><li><span class="review-question">为什么用 <code>TurnContext</code>，而不让每个状态返回一大组变量？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>RESTORE、COMPACT、BUILD、RUN 等状态共享 Session、history、消息数组、Runner 结果和保存边界。<code>TurnContext</code> 把这些跨状态数据集中保存，使每个状态只返回下一个 <code>TurnState</code>。</p></div></details></li><li><span class="review-question">COMMAND 为什么可以绕过 BUILD、RUN、SAVE 和 RESPOND？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>命令 Handler 自己产生并发布/返回结果，不需要模型上下文、Runner、普通 Turn 保存和再次组装响应。<code>_state_command()</code> 完成后把状态直接置为 <code>DONE</code>。</p></div></details></li><li><span class="review-question">外层状态机和内层 Runner 循环分别负责什么？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>外层 <code>AgentLoop</code> 状态机负责 Session、压缩、命令、保存、取消和渠道响应；RUN 内的 <code>AgentRunner</code> 只负责一次运行中的“请求模型—执行工具—回填结果”迭代。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">03 · Turn orchestration</footer>
+</div></main></div></body></html>

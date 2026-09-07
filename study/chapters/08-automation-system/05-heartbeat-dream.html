@@ -1,0 +1,80 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08 · Heartbeat、Dream 与可靠性 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="automation-system" data-page="heartbeat-dream">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-heartbeat-service-py-87" data-original-href="../../../nanobot/heartbeat/service.py" data-source-label="Heartbeat 源码" title="阅读 nanobot/heartbeat/service.py:87–116 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle>☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Automation · semantic wake-up</p><h1>Heartbeat、Dream 与可靠性</h1><p class="lead">Heartbeat 用模型判断“这一轮是否有任务”；Dream 用 Cron 只决定“何时整理记忆”。一个是独立周期服务，一个是受保护的系统 Job。</p><div class="meta-row"><span class="chip">decision then execution</span><span class="chip">notification filter</span><span class="chip">protected Dream job</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">Heartbeat 两阶段流程</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>tick</small><b>读取任务文件</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>phase 1</small><b>skip / run</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>phase 2</small><b>完整 Agent</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>filter</small><b>可投递检查</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>notify</small><b>评估后发送</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>固定 interval 唤醒</h3><p>独立协程先 sleep <code>interval_s</code>（默认 1800 秒），再读取 workspace 根目录的 <code>HEARTBEAT.md</code>；缺失或空文件直接返回。</p></div>
+  <div data-step-panel><h3>Phase 1 只做决策</h3><p>一次轻量 Provider 调用提供虚拟 <code>heartbeat</code> 工具，模型必须返回 <code>action=skip|run</code> 和可选 tasks，避免解析自由文本标记。</p></div>
+  <div data-step-panel><h3>Phase 2 才做真实工作</h3><p>action=run 时 Gateway 调用 <code>agent.process_direct()</code>，使用固定 <code>heartbeat</code> Session；执行后保留配置数量的合法近期消息。</p></div>
+  <div data-step-panel><h3>先做确定性过滤</h3><p>空响应不通知；Runner canned fallback、提到 HEARTBEAT.md/AWARENESS.md 或泄漏内部决策文字的结果被压制。</p></div>
+  <div data-step-panel><h3>再做语义评估</h3><p><code>evaluate_response()</code> 判断结果是否重要、可行动。通过后 on_notify 投递，并把 assistant 文本写回目标渠道 Session。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<div class="code-block"><div class="code-head"><span>heartbeat/service.py:184 · 单次 tick</span><span>概念摘录</span></div><pre><code>content = read(HEARTBEAT.md)
+action, tasks = await self._decide(content)
+
+if action == "run":
+    response = await on_execute(tasks)
+    if self._is_deliverable(response):
+        if await evaluate_response(response, tasks, provider, model):
+            await on_notify(response)</code></pre></div>
+
+<h2 id="reading-section-02">为什么 Phase 1 使用虚拟 Tool Call</h2><div class="compare-grid">
+  <div class="card flat"><h3>结构化决策</h3><p>模型必须生成 <code>{action, tasks}</code>，代码只看 tool arguments，不依赖“HEARTBEAT_OK”等容易漂移的自由文本。</p></div>
+  <div class="card flat"><h3>保守跳过</h3><p>若 Provider 没有给出可执行 tool call，即使 response 中带 tool_calls 但 finish reason 不允许执行，也返回 skip，避免误触发后台工作。</p></div>
+</div>
+
+<h2 id="reading-section-03">Heartbeat 配置与 Session</h2><div class="data-box"><div class="label">enabled</div><div>关闭时 <code>start()</code> 直接返回，不创建循环任务。</div></div><div class="data-box"><div class="label">interval_s</div><div>控制两次检查之间的 sleep，默认 30 分钟；第一次检查发生在首次 sleep 之后。</div></div><div class="data-box"><div class="label">keep_recent_messages</div><div>每次 Agent 执行后裁剪 heartbeat Session，既保持短期连续性，又避免后台历史无限增长。</div></div>
+
+<h2 id="reading-section-04">Dream 如何复用 Cron</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">配置</div><div class="arch-items"><span class="arch-item">DreamConfig</span><span>intervalH → every schedule；legacy cron → cron schedule + timezone</span></div></div>
+  <div class="arch-layer"><div class="arch-label">注册</div><div class="arch-items"><span class="arch-item">id/name = dream</span><span class="arch-item">payload.kind = system_event</span></div></div>
+  <div class="arch-layer"><div class="arch-label">调度</div><div class="arch-items"><span class="arch-item">CronService</span><span>照常计算 next run、记录 last status 与 run history</span></div></div>
+  <div class="arch-layer"><div class="arch-label">执行</div><div class="arch-items"><span class="arch-item">on_cron_job</span><span>识别 name=dream，直接 await <code>agent.dream.run()</code></span></div></div>
+  <div class="arch-layer"><div class="arch-label">保护</div><div class="arch-items"><span class="arch-item">list 可见</span><span class="arch-item">remove/update → protected</span><span>重启按固定 id 幂等替换</span></div></div>
+</div>
+
+<div class="code-block"><div class="code-head"><span>cli/commands.py:923 · Dream 注册</span><span>核心源码</span></div><pre><code>cron.register_system_job(CronJob(
+    id="dream",
+    name="dream",
+    schedule=dream_cfg.build_schedule(agent_timezone),
+    payload=CronPayload(kind="system_event"),
+))</code></pre></div>
+
+<h2 id="reading-section-05">三机制最终对比</h2><table class="source-table"><thead><tr><th>维度</th><th>用户 Cron</th><th>Heartbeat</th><th>Dream</th></tr></thead><tbody>
+  <tr><td>谁创建</td><td>用户意图 → CronTool</td><td>服务配置 + HEARTBEAT.md</td><td>Gateway 自动注册</td></tr>
+  <tr><td>何时触发</td><td>at/every/cron next run</td><td>固定 interval tick</td><td>DreamConfig schedule</td></tr>
+  <tr><td>是否先问模型该不该做</td><td>否，到点直接执行 message</td><td>是，Phase 1 决定 skip/run</td><td>否，到点直接 Dream.run</td></tr>
+  <tr><td>是否进入 AgentLoop</td><td>是，cron:{job.id}</td><td>是，heartbeat</td><td>否，进入 Dream 自己的两阶段流程</td></tr>
+  <tr><td>是否面向用户通知</td><td>由 deliver + evaluator 决定</td><td>过滤 + evaluator 决定</td><td>默认不通知</td></tr>
+  <tr><td>持久任务定义</td><td>cron/jobs.json</td><td>HEARTBEAT.md</td><td>cron/jobs.json 的受保护 Job</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-06">故障策略对比</h2><table class="source-table"><thead><tr><th>故障</th><th>策略</th><th>偏向</th></tr></thead><tbody>
+  <tr><td>Heartbeat 决策无有效 tool call</td><td>skip</td><td>避免误执行</td></tr>
+  <tr><td>Heartbeat/ Cron 通知评估异常</td><td>notify=true</td><td>避免重要结果静默丢失</td></tr>
+  <tr><td>Heartbeat Agent 输出泄漏内部逻辑</td><td>确定性 suppress</td><td>避免把内部提示暴露给用户</td></tr>
+  <tr><td>Cron Job 执行异常</td><td>记录 error/duration，周期任务继续计算下一次</td><td>任务故障不摧毁调度器</td></tr>
+  <tr><td>Dream 执行异常</td><td>回调内记录日志，不向用户投递</td><td>后台维护失败不干扰聊天</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-07">源码与测试地图</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#guide-nanobot-heartbeat-service-py-87" data-original-href="../../../nanobot/heartbeat/service.py" data-source-label="heartbeat/service.py:87" title="阅读 nanobot/heartbeat/service.py:87–116 的代表性摘录与讲解">heartbeat/service.py · 站内摘录</a></td><td>虚拟 tool-call 决策</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-heartbeat-service-py-184" data-original-href="../../../nanobot/heartbeat/service.py" data-source-label="heartbeat/service.py:138" title="阅读 nanobot/heartbeat/service.py:184–226 的代表性摘录与讲解">heartbeat/service.py · 站内摘录</a></td><td>独立 sleep loop</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-heartbeat-service-py-184" data-original-href="../../../nanobot/heartbeat/service.py" data-source-label="heartbeat/service.py:150" title="阅读 nanobot/heartbeat/service.py:184–226 的代表性摘录与讲解">heartbeat/service.py · 站内摘录</a></td><td>可投递性过滤</td></tr>
+  <tr><td><a href="workshop.html#guide-nanobot-heartbeat-service-py-184" data-original-href="../../../nanobot/heartbeat/service.py" data-source-label="heartbeat/service.py:184" title="阅读 nanobot/heartbeat/service.py:184–226 的代表性摘录与讲解">heartbeat/service.py · 站内摘录</a></td><td>tick 主流程</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/evaluator.py" data-source-label="utils/evaluator.py:42" title="nanobot/utils/evaluator.py 的所属模块讲解；该文件未单独逐行收录">utils/evaluator.py · 模块讲解</a></td><td>结构化通知评估与 fail-open</td></tr>
+  <tr><td><a href="../02-llm-provider-gateway/workshop.html#source-2" data-original-href="../../../nanobot/config/schema.py" data-source-label="config/schema.py:185" title="阅读 nanobot/config/schema.py:263–326 的代表性摘录与讲解">config/schema.py · 站内摘录</a></td><td>Heartbeat 配置默认值</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/cron/test_cron_service.py" data-source-label="tests/cron/test_cron_service.py" title="tests/cron/test_cron_service.py 的所属模块讲解；该文件未单独逐行收录">tests/cron/test_cron_service.py · 模块讲解</a></td><td>运行记录、外部更新、系统 Job 和并发加载边界</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/heartbeat/test_heartbeat_context_bridge.py" data-source-label="tests/heartbeat/test_heartbeat_context_bridge.py" title="tests/heartbeat/test_heartbeat_context_bridge.py 的所属模块讲解；该文件未单独逐行收录">tests/heartbeat/test_heartbeat_context_bridge.py · 模块讲解</a></td><td>通知写回渠道 Session 后的对话连续性</td></tr>
+</tbody></table>
+<div class="callout"><strong>整体设计取向：</strong>时间调度尽量确定、持久化尽量可恢复；是否执行与是否通知这两个语义问题则交给结构化模型判断，并为“误执行”和“漏通知”选择不同的保守方向。</div>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">为什么 Heartbeat 无有效决策时 skip，而 evaluator 异常时却 notify？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Heartbeat 决策器没有可执行的合法 tool call 时按“没有任务”返回 skip，避免周期噪声；任务已执行后的 evaluator 面对异常则返回 notify，避免真正重要结果被静默吞掉。两处风险方向不同。</p></div></details></li><li><span class="review-question">Heartbeat 的第一次 tick 是启动后立即发生吗？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>不是。<code>start()</code> 创建 <code>_run_loop()</code> 后，循环先 <code>sleep(interval_s)</code> 再调用 <code>_tick()</code>；只有显式 <code>trigger_now()</code> 才会立即检查。</p></div></details></li><li><span class="review-question">Dream 使用了 CronService 的哪些能力，又绕开了普通 Cron 的哪些路径？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它复用 CronJob 的固定 ID、schedule、持久化、next-run 和 run history；触发时 Gateway 按 name 特判，直接调用 <code>Dream.run()</code>，绕过 <code>process_direct()</code>、cron Session、evaluator 和用户投递。</p></div></details></li><li><span class="review-question">为什么投递 Heartbeat 结果后还要写回目标渠道 Session？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Heartbeat 推理保存在独立 <code>heartbeat</code> Session。若只向渠道发消息，用户随后回复会进入渠道 Session，却看不到刚才的主动通知；镜像 assistant turn 保持对话指代连续。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">08.05 · Heartbeat、Dream 与可靠性</footer></div></main></div></body></html>

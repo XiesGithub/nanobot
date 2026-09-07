@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="nanobot 内部 Agent 流程可视化学习手册">
+  <title>nanobot Agent 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css">
+  <script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head>
+<body data-study-root="../.." data-chapter="request-lifecycle" data-page="overview">
+  <header class="site-header">
+    <a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>Agent 学习手册</span></span></a>
+    <div class="header-actions">
+      <a class="button" href="workshop.html#source-walkthrough" data-original-href="../../../README.md" data-source-label="项目 README" title="README.md 的所属模块讲解；该文件未单独逐行收录">模块指南</a>
+      <button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" data-study-sidebar></aside>
+
+    <main class="content">
+      <div class="content-inner">
+        <select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+
+        <section class="hero">
+          <p class="eyebrow">Source-guided learning map</p>
+          <h1>从一条用户消息，理解 nanobot 的内部 Agent</h1>
+          <p class="lead">忽略多渠道适配细节，只沿着 HTTP 输入、统一消息、状态机、上下文、模型工具循环、Provider 接口和结果持久化这条主干阅读。</p>
+          <div class="meta-row">
+            <span class="chip">7 个专题</span><span class="chip">2 层循环</span><span class="chip">1 条主数据流</span><span class="chip">纯静态 · 离线可用</span>
+          </div>
+        </section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+        <section class="summary-grid" aria-label="核心数字">
+          <div class="card flat"><div class="metric">HTTP → Agent</div><div class="metric-label">输入从网络协议转换为内部消息</div></div>
+          <div class="card flat"><div class="metric">8 states</div><div class="metric-label">AgentLoop 单轮状态机</div></div>
+          <div class="card flat"><div class="metric">LLM ↔ Tool</div><div class="metric-label">AgentRunner 的核心闭环</div></div>
+        </section>
+
+        <h2 id="reading-section-01">主数据流</h2>
+        <div class="flow" aria-label="nanobot 主数据流">
+          <a class="flow-node" href="01-http-request.html"><small>Transport</small><b>HTTP Request</b></a><span class="flow-arrow">→</span>
+          <a class="flow-node" href="02-agent-message.html"><small>Normalize</small><b>InboundMessage</b></a><span class="flow-arrow">→</span>
+          <a class="flow-node" href="03-message-lifecycle.html"><small>Orchestrate</small><b>TurnContext</b></a><span class="flow-arrow">→</span>
+          <a class="flow-node" href="04-context-building.html"><small>Prompt</small><b>messages[]</b></a><span class="flow-arrow">→</span>
+          <a class="flow-node" href="05-model-tool-loop.html"><small>Execute</small><b>AgentRunResult</b></a><span class="flow-arrow">→</span>
+          <a class="flow-node" href="07-save-and-response.html"><small>Deliver</small><b>OutboundMessage</b></a>
+        </div>
+
+        <div class="callout"><strong>最重要的边界：</strong>API 层不理解 Agent 推理；Provider 层不理解 HTTP 和 Session；中间由 <code>AgentLoop</code> 和标准消息对象连接。</div>
+
+        <h2 id="reading-section-02">代码架构</h2>
+        <div class="architecture" aria-label="代码分层">
+          <div class="arch-layer"><div class="arch-label">入口层</div><div class="arch-items"><span class="arch-item">api/server.py</span><span class="arch-item">nanobot.py</span><span class="arch-item">bus/events.py</span></div></div>
+          <div class="arch-layer"><div class="arch-label">编排层</div><div class="arch-items"><span class="arch-item">agent/loop.py</span><span>管理 Session、状态机、响应和运行时边界</span></div></div>
+          <div class="arch-layer"><div class="arch-label">执行层</div><div class="arch-items"><span class="arch-item">agent/runner.py</span><span class="arch-item">agent/tools/registry.py</span><span>驱动 LLM ↔ Tool 循环</span></div></div>
+          <div class="arch-layer"><div class="arch-label">适配层</div><div class="arch-items"><span class="arch-item">providers/base.py</span><span class="arch-item">providers/*_provider.py</span><span>屏蔽模型厂商差异</span></div></div>
+          <div class="arch-layer"><div class="arch-label">状态层</div><div class="arch-items"><span class="arch-item">session/manager.py</span><span class="arch-item">agent/memory.py</span><span>保存会话与长期记忆</span></div></div>
+        </div>
+
+        <h2 id="reading-section-03">七个专题</h2>
+        <div class="topic-grid">
+          <a class="card topic-card" href="01-http-request.html"><div class="topic-number">01</div><h3>后端怎样接收用户消息</h3><p>路由注册、JSON/multipart 解析、session lock、超时，以及 JSON/SSE 两种响应。</p><div class="topic-path">api/server.py</div></a>
+          <a class="card topic-card" href="02-agent-message.html"><div class="topic-number">02</div><h3>外部输入怎样转换成 Agent 消息</h3><p><code>process_direct()</code> 如何把普通参数统一成 <code>InboundMessage</code>。</p><div class="topic-path">bus/events.py · agent/loop.py</div></a>
+          <a class="card topic-card" href="03-message-lifecycle.html"><div class="topic-number">03</div><h3>一条消息怎样经过完整生命周期</h3><p>从 RESTORE 到 DONE 的八状态编排，以及同会话串行、跨会话并发。</p><div class="topic-path">agent/loop.py</div></a>
+          <a class="card topic-card" href="04-context-building.html"><div class="topic-number">04</div><h3>Agent 怎样构建模型上下文</h3><p>system prompt、历史、Memory、Skills、运行元数据和多模态内容如何合并。</p><div class="topic-path">agent/context.py</div></a>
+          <a class="card topic-card" href="05-model-tool-loop.html"><div class="topic-number">05</div><h3>Agent 怎样循环调用模型和工具</h3><p>模型产生 tool_calls、Python 执行工具、tool result 回填、模型继续推理。</p><div class="topic-path">agent/runner.py</div></a>
+          <a class="card topic-card" href="06-provider-interface.html"><div class="topic-number">06</div><h3>模型 Provider 接口层</h3><p><code>LLMProvider</code>、<code>LLMResponse</code>、<code>ToolCallRequest</code> 如何统一厂商差异。</p><div class="topic-path">providers/base.py</div></a>
+          <a class="card topic-card" href="07-save-and-response.html"><div class="topic-number">07</div><h3>结果怎样保存并返回</h3><p>增量持久化、运行检查点、<code>OutboundMessage</code> 和最终 HTTP 响应。</p><div class="topic-path">agent/loop.py · session/manager.py</div></a>
+        </div>
+
+        <h2 id="reading-section-04">建议阅读方法</h2>
+        <ol class="number-list">
+          <li>先看每页顶部的数据流，回答“输入是什么、输出是什么”。</li>
+          <li>再看代码架构，确定当前函数属于入口、编排、执行还是适配层。</li>
+          <li>最后对照核心源码表和代码片段，在仓库中设置断点单步跟踪。</li>
+        </ol>
+
+        <div class="page-nav" data-study-page-nav></div>
+        <footer class="footer">nanobot Agent 学习手册 · 内容基于当前本地仓库源码整理</footer>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

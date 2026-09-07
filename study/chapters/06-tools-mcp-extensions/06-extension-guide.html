@@ -1,0 +1,71 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>06 · 能力扩展选择与实现指南 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="tools-mcp-extensions" data-page="extension-guide">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-tools-loader-py-86" data-original-href="../../../nanobot/agent/tools/loader.py" data-source-label="扩展入口" title="阅读 nanobot/agent/tools/loader.py:86–116 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Capabilities · extension guide</p><h1>如何选择并实现能力扩展</h1><p class="lead">能力扩展不是都写 Python。先判断缺少的是“可执行动作”还是“完成任务的方法”，再根据部署边界选择内置 Tool、第三方插件、MCP 或 Skill。</p><div class="meta-row"><span class="chip">built-in</span><span class="chip">entry-point plugin</span><span class="chip">MCP</span><span class="chip">SKILL.md</span><span class="chip">MyTool</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">选择矩阵</h2><table class="source-table"><thead><tr><th>方式</th><th>适合什么</th><th>是否执行代码</th><th>部署/耦合</th><th>主要风险</th></tr></thead><tbody>
+  <tr><td>内置 Tool</td><td>项目核心、需要深度运行时依赖的稳定能力</td><td>是，进程内</td><td>随 nanobot 发布，耦合最高</td><td>扩大核心与安全面</td></tr>
+  <tr><td>entry-point 插件</td><td>Python 生态内、无需修改核心仓库的 Tool</td><td>是，进程内</td><td>独立包安装，中等耦合</td><td>插件代码拥有宿主进程权限</td></tr>
+  <tr><td>MCP Server</td><td>跨语言、远程服务、独立生命周期或多 Agent 复用</td><td>服务端执行</td><td>协议边界清晰，运维更多</td><td>凭据、网络、远程副作用</td></tr>
+  <tr><td>Skill</td><td>操作指南、领域知识、工具组合工作流</td><td>否，只进入 Prompt</td><td>Markdown 文件，最轻量</td><td>指令污染、过长 Context</td></tr>
+  <tr><td>MyTool</td><td>检查有限运行时状态，按配置允许修改少数字段</td><td>是，进程内</td><td>显式绑定 AgentLoop</td><td>自修改边界必须严格限制</td></tr>
+</tbody></table>
+
+<div class="callout"><strong>最常见的正确组合：</strong>MCP/Tool 提供原子动作，Skill 描述触发条件、调用顺序和错误恢复。例如 GitHub API 由 CLI Tool 或 MCP 提供，GitHub Skill 教模型怎样审查 PR、检查 CI 并组织结果。</div>
+
+<h2 id="reading-section-02">新增一个内置 Tool</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>定义契约</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>声明元数据</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>注入依赖</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>实现安全边界</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>验证发现和执行</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>name/description/parameters/execute</h3><p>名称短且稳定；description 明确使用条件；Schema 写出 required、类型与边界，execute 保持异步并返回模型可消费的文本或内容块。</p></div>
+  <div data-step-panel><h3>准确标记 scope 与并发</h3><p>只给需要的 core/subagent/memory scope；只有真正无副作用且可重入时才设置 read_only；需要串行则 exclusive。</p></div>
+  <div data-step-panel><h3>用 enabled/create 处理依赖</h3><p>不要从全局偷偷取 Bus/Workspace；通过 ToolContext 显式构造。需要渠道信息则实现 ContextAware，并用 ContextVar 保存请求期状态。</p></div>
+  <div data-step-panel><h3>Tool 自己守住副作用</h3><p>文件路径走允许目录解析，网络目标做 SSRF 校验，Shell 尊重 workspace/sandbox，敏感字段不回显，取消信号要继续传播。</p></div>
+  <div data-step-panel><h3>测试消费者可见行为</h3><p>验证 Loader 能发现、scope/enable 正确、Schema 拒绝非法输入、执行副作用受限，以及并发/取消路径不会破坏状态。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">最小插件示例</h2><div class="code-block"><div class="code-head"><span>third-party package</span><span>无需修改 nanobot 仓库</span></div><pre><code>from nanobot.agent.tools.base import Tool, tool_parameters
+
+@tool_parameters({
+    "type": "object",
+    "properties": {"text": {"type": "string", "minLength": 1}},
+    "required": ["text"],
+})
+class WordCountTool(Tool):
+    @property
+    def name(self): return "word_count"
+
+    @property
+    def description(self): return "Count whitespace-separated words in text."
+
+    @property
+    def read_only(self): return True
+
+    async def execute(self, text: str, **kwargs):
+        return str(len(text.split()))
+
+# pyproject.toml
+[project.entry-points."nanobot.tools"]
+word_count = "my_package.tools:WordCountTool"</code></pre></div>
+<p>插件被安装到 nanobot 所在的 Python 环境后，新的 ToolLoader 实例即可发现它；无需修改 AgentLoop 中的硬编码工具清单。</p>
+
+<h2 id="reading-section-04">Skill 如何扩展“会用”</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">位置</div><div class="arch-items"><span class="arch-item">workspace/skills/name/SKILL.md</span><span>优先覆盖</span><span class="arch-item">nanobot/skills/name/SKILL.md</span></div></div>
+  <div class="arch-layer"><div class="arch-label">元数据</div><div class="arch-items"><span class="arch-item">name</span><span class="arch-item">description</span><span class="arch-item">metadata.nanobot.requires</span><span class="arch-item">always</span></div></div>
+  <div class="arch-layer"><div class="arch-label">加载</div><div class="arch-items"><span class="arch-item">always skill 全文</span><span>+</span><span class="arch-item">其他 skill 摘要与路径</span><span>→ 模型按需 read_file</span></div></div>
+</div>
+<p><code>SkillsLoader</code> 会检查所需 CLI 和环境变量，排除 disabled/unavailable skill；workspace 同名 Skill 优先于 built-in。Skill 不会注册 callable function，因此不能单独创造文件系统或网络权限。</p>
+
+<h2 id="reading-section-05">何时选择 MCP</h2><ul class="number-list"><li><strong>服务已有独立 API/凭据边界：</strong>让 Server 持有凭据，Agent 只得到精简 capability。</li><li><strong>能力需要跨语言或多客户端复用：</strong>MCP 比 Python entry point 更适合独立部署。</li><li><strong>需要同时暴露动作、资源和模板：</strong>Tools/Resources/Prompts 可统一发现。</li><li><strong>愿意承担连接与运维成本：</strong>transport、超时、Server 日志和版本兼容都成为系统的一部分。</li></ul>
+
+<h2 id="reading-section-06">MyTool 的自修改边界</h2><p><code>MyTool</code> 默认允许检查，<code>allowSet=false</code> 禁止修改。即使允许 set，核心基础设施、Provider、Registry、MCP stacks、Session locks、渠道配置和安全边界均在 BLOCKED 中；API key、secret、password、token 等敏感子字段也会被拒绝。可修改字段还有显式类型和范围限制。</p>
+<div class="callout warning"><strong>不要用 MyTool 代替扩展机制：</strong>它适合有限的运行时自省和参数调整，不适合动态注入任意代码、替换 Provider/Bus 或绕过安全配置。真正的新能力应走 Tool/plugin/MCP/Skill。</div>
+
+<h2 id="reading-section-07">上线前安全清单</h2><ul class="check-list"><li>工具描述是否明确副作用，Schema 是否尽量缩小输入空间？</li><li>路径、URL、命令、凭据是否在具体 Tool 或 MCP Server 端验证？</li><li>read_only/concurrency_safe 是否与真实可重入性一致？</li><li>ContextAware 状态是否使用 ContextVar，避免跨 Session 串线？</li><li>错误文本是否足够指导模型，但不会泄露内部堆栈和 secret？</li><li>超时与 CancelledError 是否保留用户 /stop 的取消语义？</li><li>Skill 是否只教必要流程，避免把不可信输出固化为长期指令？</li></ul>
+
+<h2 id="reading-section-08">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-tools-base-py-48" data-original-href="../../../nanobot/agent/tools/base.py" data-source-label="tools/base.py:124" title="阅读 nanobot/agent/tools/base.py:48–101 的代表性摘录与讲解">tools/base.py · 站内摘录</a></td><td>实现 Tool 的最小契约</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-loader-py-86" data-original-href="../../../nanobot/agent/tools/loader.py" data-source-label="tools/loader.py:62" title="阅读 nanobot/agent/tools/loader.py:86–116 的代表性摘录与讲解">tools/loader.py · 站内摘录</a></td><td>插件 entry point</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../pyproject.toml" data-source-label="pyproject.toml:112" title="pyproject.toml 的所属模块讲解；该文件未单独逐行收录">pyproject.toml · 模块讲解</a></td><td>插件声明示例</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/skills.py" data-source-label="agent/skills.py" title="nanobot/agent/skills.py 的所属模块讲解；该文件未单独逐行收录">agent/skills.py · 模块讲解</a></td><td>Skill 优先级、要求与渐进加载</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/tools/self.py" data-source-label="tools/self.py:36" title="nanobot/agent/tools/self.py 的所属模块讲解；该文件未单独逐行收录">tools/self.py · 模块讲解</a></td><td>MyTool 的 blocked/read-only/sensitive 边界</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../.agent/security.md" data-source-label=".agent/security.md" title=".agent/security.md 的所属模块讲解；该文件未单独逐行收录">.agent/security.md · 模块讲解</a></td><td>Workspace、SSRF 与 shell sandbox 约束</td></tr></tbody></table>
+<h2 id="reading-section-09">自测</h2><ul class="check-list review-list"><li><span class="review-question">“告诉模型如何发布版本”更适合 Tool 还是 Skill？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>更适合 Skill：发布流程是在已有 shell、文件和 Git 能力之上的操作知识，并未新增外部能力。只有需要受控的一键发布 API 或专用权限边界时才应写 Tool。</p></div></details></li><li><span class="review-question">为什么 entry-point 插件的安全风险通常高于远程 MCP？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>entry-point 插件作为 Python 代码加载进 nanobot 进程，可访问同一内存、文件和凭据；远程 MCP 至少隔着进程/传输边界，主进程只暴露协议调用，但服务端本身仍需信任和校验。</p></div></details></li><li><span class="review-question">新增一个有副作用的 Tool 时，哪些并发元数据必须保持默认？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>保持默认的 <code>read_only=False</code>、<code>exclusive=False</code> 会使其不满足默认 <code>concurrency_safe</code>，因此不会与其他调用并发。只有确实可重入且无副作用时才覆写并发相关属性。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">06.06 · 能力扩展选择与实现指南</footer></div></main></div></body></html>

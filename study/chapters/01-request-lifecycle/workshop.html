@@ -1,0 +1,244 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="一条请求如何成为可恢复的一轮对话：数据契约、真实源码逐步讲解、状态演算与从零实现"><title>一条请求如何成为可恢复的一轮对话 · 源码精讲与设计实作</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script><style>
+.learning-diagram{width:100%;height:auto;min-width:650px;color:var(--text,#243247)}.diagram-panel{overflow-x:auto;margin:24px 0;padding:12px;border:1px solid var(--border,#cbd5e1);border-radius:14px}.learning-diagram rect{fill:var(--surface,#f1f5f9);stroke:currentColor;stroke-width:1.3}.learning-diagram text{fill:currentColor;font:17px system-ui,sans-serif}.learning-diagram .sub{font-size:13px}.learning-diagram path{stroke:currentColor;stroke-width:2;fill:none}.learning-diagram .arrowhead{fill:currentColor;stroke:none}.learning-diagram .failure{stroke:#b86b43}.learning-diagram .error-line{stroke:#b86b43;stroke-dasharray:5 4}.source-caption{font-size:.88rem;opacity:.82}article{scroll-margin-top:90px}pre{max-height:900px;overflow:auto}details{margin:20px 0;padding:18px;border:1px solid var(--border,#cbd5e1);border-radius:12px}summary{font-weight:650;cursor:pointer}section{scroll-margin-top:90px}td{vertical-align:top}figcaption{line-height:1.8;margin-top:12px}
+</style></head><body data-study-root="../.." data-chapter="request-lifecycle" data-page="workshop"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>Agent 学习手册</span></span></a><div class="header-actions"><a class="button" href="index.html">本章总览</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div><section class="hero"><p class="eyebrow">源码精讲与设计实作</p><h1>一条请求如何成为可恢复的一轮对话</h1><p class="lead">HTTP 处理器负责协议和会话入口；AgentLoop 负责可追踪的状态转换；AgentRunner 负责模型和工具。把这三层分开，才能准确回答“超时后保存了什么”和“为什么同一条用户消息不能再追加一次”。</p><div class="meta-row"><span class="chip">当前源码连续摘录</span><span class="chip">离线阅读</span><span class="chip">手工演算 + 设计实作</span></div></section><p>阅读顺序：<a href="#contract">输入输出契约</a> → <a href="#dataflow">模块数据流图</a> → <a href="#source-walkthrough">核心源码精讲</a> → <a href="#trace">手工演算</a> → <a href="#build-it">动手设计与验收</a>。本页所有原文均按当前本地文件行号提取；演算中的固定输出由假 Provider 提供，不需要模型账户。</p><section id="contract"><h2>先确定数据与责任的交接</h2><div class="table-wrap"><table><thead><tr><th>交接点 / 输入</th><th>输出与状态</th><th>约束、失败和所有者</th></tr></thead><tbody><tr><td>HTTP JSON / multipart：文本、附件、session_id、stream、model</td><td>规范化 text / media_paths / session_key</td><td>server.py 校验模型名；解析错误 400，附件过大 413。请求里的 model 不能临时切换后端模型。</td></tr><tr><td>process_direct(content, session_key, channel, chat_id)</td><td>InboundMessage → OutboundMessage 或 None</td><td>sender_id 固定为 user；显式 session_key 用于存储，channel/chat_id 用于回复路由，两者不必相同。</td></tr><tr><td>TurnContext：msg、session、state、history、initial_messages</td><td>trace、all_messages、stop_reason、outbound</td><td>handler 返回事件字符串；转换表决定下一状态。非法事件和缺失 handler 会抛错。</td></tr><tr><td>Runner：system + 历史 + 当前输入 + 工具定义</td><td>模型回答 / tool_calls → tool result → 最终文本</td><td>模型工具循环属于 RUN 内部；工具结果是下一次模型请求的输入，不是自动作为最终 HTTP 文本。</td></tr><tr><td>SAVE：all_messages 与 save_skip</td><td>增量 Session、清除恢复标记、OutboundMessage</td><td>用户可能已在 BUILD 提前保存；必须跳过 system、已有历史和提前保存的用户，防止重复。</td></tr><tr><td>HTTP 响应 / SSE token 队列</td><td>JSON completion 或多个 SSE chunk</td><td>非流式运行超时返回 504；SSE 已发响应头后不能再改成普通错误 JSON。段结束也不代表整轮结束。</td></tr></tbody></table></div></section><section id="dataflow"><h2>沿箭头追踪数据与失败去向</h2><figure class="diagram-panel"><svg class="learning-diagram" viewBox="0 0 900 320" role="img" aria-labelledby="flow-title flow-description" xmlns="http://www.w3.org/2000/svg"><title id="flow-title">本章数据流程与失败路径</title><desc id="flow-description">文本等价：解析成功后按 session_key 获取 API 会话锁，process_direct 构造 InboundMessage，状态机恢复并构建上下文，RUN 交给模型工具循环，SAVE 后组装 OutboundMessage。解析失败直接拒绝；运行异常回到入口错误处理。SSE 先打开连接，再消费 token 队列，因此它的错误收尾与 JSON 路径不同。</desc><defs><marker id="flow-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" class="arrowhead"/></marker></defs><rect x="20" y="60" width="170" height="86" rx="12"/><text x="105" y="94" text-anchor="middle">HTTP 解析</text><text x="105" y="123" text-anchor="middle" class="sub">text / media / session_id</text><rect x="250" y="60" width="170" height="86" rx="12"/><text x="335" y="94" text-anchor="middle">会话锁 + Direct</text><text x="335" y="123" text-anchor="middle" class="sub">InboundMessage</text><rect x="480" y="60" width="170" height="86" rx="12"/><text x="565" y="94" text-anchor="middle">Turn 状态机</text><text x="565" y="123" text-anchor="middle" class="sub">BUILD → RUN → SAVE</text><rect x="710" y="60" width="170" height="86" rx="12"/><text x="795" y="94" text-anchor="middle">协议响应</text><text x="795" y="123" text-anchor="middle" class="sub">Outbound → JSON / SSE</text><path d="M190 103 H250" marker-end="url(#flow-arrow)"/><text x="220" y="48" text-anchor="middle" class="sub">规范输入</text><path d="M420 103 H480" marker-end="url(#flow-arrow)"/><text x="450" y="48" text-anchor="middle" class="sub">session_key</text><path d="M650 103 H710" marker-end="url(#flow-arrow)"/><text x="680" y="48" text-anchor="middle" class="sub">content</text><rect x="250" y="225" width="400" height="65" rx="12" class="failure"/><text x="450" y="250" text-anchor="middle">异常传播至入口：400 / 413 / 504 / 500</text><text x="450" y="276" text-anchor="middle" class="sub">SSE 出错不发送成功 stop / DONE；保留恢复线索</text><path d="M565 146 V207 H510 V225" class="error-line" marker-end="url(#flow-arrow)"/><text x="582" y="180" class="sub">失败 / 未完成</text></svg><figcaption>文本等价：解析成功后按 session_key 获取 API 会话锁，process_direct 构造 InboundMessage，状态机恢复并构建上下文，RUN 交给模型工具循环，SAVE 后组装 OutboundMessage。解析失败直接拒绝；运行异常回到入口错误处理。SSE 先打开连接，再消费 token 队列，因此它的错误收尾与 JSON 路径不同。</figcaption></figure></section><section id="source-walkthrough"><h2>把源码读成可执行的因果链</h2><article id="source-1"><h3>1. handle_chat_completions：解析与会话隔离</h3><p>这一段把协议输入缩减成后续真正需要的数据。先验证再运行，避免无效模型请求进入会话状态机。</p><p class="source-caption">当前源码原文 · <code>nanobot/api/server.py</code> · <code>handle_chat_completions：解析与会话隔离</code> · 第 194–230 行（连续摘录）</p><pre id="excerpt-1" data-source="nanobot/api/server.py" data-start="194" data-end="230" data-symbol="handle_chat_completions：解析与会话隔离"><code class="language-python">async def handle_chat_completions(request: web.Request) -&gt; web.Response:
+    &quot;&quot;&quot;POST /v1/chat/completions — supports JSON and multipart/form-data.&quot;&quot;&quot;
+    content_type = request.content_type or &quot;&quot;
+    if not isinstance(content_type, str):
+        content_type = &quot;&quot;
+
+    agent_loop = request.app[&quot;agent_loop&quot;]
+    timeout_s: float = request.app.get(&quot;request_timeout&quot;, 120.0)
+    model_name: str = request.app.get(&quot;model_name&quot;, &quot;nanobot&quot;)
+
+    stream = False
+    try:
+        if content_type.startswith(&quot;multipart/&quot;):
+            text, media_paths, session_id, requested_model = await _parse_multipart(request)
+        else:
+            try:
+                body = await request.json()
+            except Exception:
+                return _error_json(400, &quot;Invalid JSON body&quot;)
+            stream = body.get(&quot;stream&quot;, False)
+            requested_model = body.get(&quot;model&quot;)
+            text, media_paths = _parse_json_content(body)
+            session_id = body.get(&quot;session_id&quot;)
+    except ValueError as e:
+        return _error_json(400, str(e))
+    except _FileSizeExceeded as e:
+        return _error_json(413, str(e), err_type=&quot;invalid_request_error&quot;)
+    except Exception:
+        logger.exception(&quot;Error parsing upload&quot;)
+        return _error_json(413, &quot;File too large or invalid upload&quot;)
+
+    if requested_model and requested_model != model_name:
+        return _error_json(400, f&quot;Only configured model &#x27;{model_name}&#x27; is available&quot;)
+
+    session_key = f&quot;api:{session_id}&quot; if session_id else API_SESSION_KEY
+    session_locks: dict[str, asyncio.Lock] = request.app[&quot;session_locks&quot;]
+    session_lock = session_locks.setdefault(session_key, asyncio.Lock())</code></pre><ol><li>先读取应用中已经装配的 agent_loop、超时和 model_name。stream 初始为 False，JSON 分支显式从 body 读取；multipart 分支不在这里开启流式。</li><li>JSON 解码失败立刻返回 400；业务内容解析的 ValueError 也映射为 400；文件大小错误是 413。最外层上传解析异常使用统一的 413 响应。</li><li>requested_model 与配置名不同就拒绝，而不是创建新 Provider。session_id 存在时得到 api:{session_id}，否则落在默认 API 会话键。</li><li>setdefault 为每个键保留 asyncio.Lock。同一 API 会话的持久状态由锁串行保护；这段代码没有给所有会话设置全局锁，也不意味着 process_direct 自己带锁。</li></ol></article><article id="source-2"><h3>2. handle_chat_completions：SSE 生命周期</h3><p>模型一次回答可能先输出文字，再调用工具，再继续输出。HTTP 流应跟随整轮任务，而不能在一个模型片段结束时关闭。</p><p class="source-caption">当前源码原文 · <code>nanobot/api/server.py</code> · <code>handle_chat_completions：SSE 生命周期</code> · 第 249–303 行（连续摘录）</p><pre id="excerpt-2" data-source="nanobot/api/server.py" data-start="249" data-end="303" data-symbol="handle_chat_completions：SSE 生命周期"><code class="language-python">        async def _on_stream(token: str) -&gt; None:
+            nonlocal emitted_content
+            if token:
+                emitted_content = True
+            await queue.put(token)
+
+        async def _on_stream_end(*_a: Any, **_kw: Any) -&gt; None:
+            # Agent stream-end callbacks mark generation segment boundaries.
+            # Tool-backed requests may continue after a segment ends, so the
+            # HTTP SSE stream is closed only when process_direct returns.
+            return None
+
+        async def _run() -&gt; None:
+            nonlocal stream_failed
+            try:
+                async with session_lock:
+                    response = await asyncio.wait_for(
+                        agent_loop.process_direct(
+                            content=text,
+                            media=media_paths if media_paths else None,
+                            session_key=session_key,
+                            channel=&quot;api&quot;,
+                            chat_id=API_CHAT_ID,
+                            on_stream=_on_stream,
+                            on_stream_end=_on_stream_end,
+                        ),
+                        timeout=timeout_s,
+                    )
+                    if not emitted_content:
+                        response_text = _response_text(response)
+                        if response_text.strip():
+                            await queue.put(response_text)
+            except Exception:
+                stream_failed = True
+                logger.exception(&quot;Streaming error for session {}&quot;, session_key)
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(_run())
+        try:
+            while True:
+                token = await queue.get()
+                if token is None:
+                    break
+                await resp.write(_sse_chunk(token, model_name, chunk_id))
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        if not stream_failed:
+            await resp.write(_sse_chunk(&quot;&quot;, model_name, chunk_id, finish_reason=&quot;stop&quot;))
+            await resp.write(_SSE_DONE)
+        return resp</code></pre><ol><li>_on_stream 收到 token 就入队，并记录是否发过非空内容；_on_stream_end 故意不关闭队列，它仅表示一次生成片段结束。</li><li>后台 _run 在会话锁内 wait_for(process_direct)。如果没有增量内容，才把最终 response_text 作为补偿文本入队，避免最终全文重复显示。</li><li>finally 入队 None 表示整轮生产者结束；外部循环持续写 SSE，读到 None 才退出。客户端写入异常时 finally 取消后台 task，并等待取消完成。</li><li>stream_failed 为真就不发送成功 stop 和 DONE。注意 wait_for 位于 async with 内部，等待锁的排队时间不在这一段 timeout 计时范围内。</li></ol></article><article id="source-3"><h3>3. AgentLoop.process_direct</h3><p>SDK / HTTP 调用绕过总线排队，但复用同一消息编排入口。这里的“direct”描述进入方式，不表示忽略 Session。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/loop.py</code> · <code>AgentLoop.process_direct</code> · 第 1669–1692 行（连续摘录）</p><pre id="excerpt-3" data-source="nanobot/agent/loop.py" data-start="1669" data-end="1692" data-symbol="AgentLoop.process_direct"><code class="language-python">    async def process_direct(
+        self,
+        content: str,
+        session_key: str = &quot;cli:direct&quot;,
+        channel: str = &quot;cli&quot;,
+        chat_id: str = &quot;direct&quot;,
+        media: list[str] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_stream: Callable[[str], Awaitable[None]] | None = None,
+        on_stream_end: Callable[..., Awaitable[None]] | None = None,
+    ) -&gt; OutboundMessage | None:
+        &quot;&quot;&quot;Process a message directly and return the outbound payload.&quot;&quot;&quot;
+        await self._connect_mcp()
+        msg = InboundMessage(
+            channel=channel, sender_id=&quot;user&quot;, chat_id=chat_id,
+            content=content, media=media or [],
+        )
+        return await self._process_message(
+            msg,
+            session_key=session_key,
+            on_progress=on_progress,
+            on_stream=on_stream,
+            on_stream_end=on_stream_end,
+        )</code></pre><ol><li>先连接 MCP，连接问题可在 TurnContext 创建前暴露给调用者。随后为 media=None 转为独立空列表，构造标准入站对象。</li><li>传给 _process_message 的 session_key 是独立参数；它可以覆盖消息自身 channel:chat_id 推导出的会话键。</li><li>progress 和 stream 回调原样向下传递，函数返回 OutboundMessage 或 None，不保证直接返回 str。HTTP 必须通过 _response_text 适配。</li></ol></article><article id="source-4"><h3>4. AgentLoop._process_message：状态驱动核心</h3><p>进入本段前，普通消息被包装进 state=RESTORE 的 TurnContext。循环只负责执行 handler、记轨迹、验证转换，不把各状态业务揉在一起。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/loop.py</code> · <code>AgentLoop._process_message：状态驱动核心</code> · 第 1228–1273 行（连续摘录）</p><pre id="excerpt-4" data-source="nanobot/agent/loop.py" data-start="1228" data-end="1273" data-symbol="AgentLoop._process_message：状态驱动核心"><code class="language-python">        while ctx.state is not TurnState.DONE:
+            handler_name = f&quot;_state_{ctx.state.name.lower()}&quot;
+            handler = getattr(self, handler_name, None)
+            if handler is None:
+                raise RuntimeError(f&quot;Missing state handler for {ctx.state}&quot;)
+
+            t0 = time.perf_counter()
+            try:
+                event = await handler(ctx)
+            except Exception:
+                duration = (time.perf_counter() - t0) * 1000
+                ctx.trace.append(
+                    StateTraceEntry(
+                        state=ctx.state,
+                        started_at=t0,
+                        duration_ms=duration,
+                        event=&quot;&quot;,
+                        error=&quot;exception&quot;,
+                    )
+                )
+                raise
+
+            duration = (time.perf_counter() - t0) * 1000
+            ctx.trace.append(
+                StateTraceEntry(
+                    state=ctx.state,
+                    started_at=t0,
+                    duration_ms=duration,
+                    event=event,
+                )
+            )
+            logger.debug(
+                &quot;[turn {}] State {} took {:.1f}ms -&gt; event {}&quot;,
+                ctx.turn_id,
+                ctx.state.name,
+                duration,
+                event,
+            )
+
+            next_state = self._TRANSITIONS.get((ctx.state, event))
+            if next_state is None:
+                raise RuntimeError(
+                    f&quot;[turn {ctx.turn_id}] No transition from {ctx.state} &quot;
+                    f&quot;on event {event!r}&quot;
+                )
+            ctx.state = next_state</code></pre><ol><li>按当前状态生成 _state_xxx 名称；找不到函数直接抛 RuntimeError，因此添加状态必须同时补 handler。</li><li>handler 修改共享 ctx 并返回事件。捕获普通 Exception 时先记录耗时和 error="exception"，然后重新抛出，避免把失败误记为完成。CancelledError 继承 BaseException，不经过这里的 except Exception；外层超时导致取消时，不能保证追加该状态的 error 轨迹。</li><li>成功后记录 event，按 (state,event) 查表；不存在的边也会报错。标准路径是 RESTORE→COMPACT→COMMAND→BUILD→RUN→SAVE→RESPOND→DONE。</li><li>COMMAND 返回 shortcut 时直接 DONE，ctx.outbound 已由命令设置；它不会走普通回答的 BUILD/RUN/SAVE。这是控制流边界而非模型推理捷径。</li></ol></article><article id="source-5"><h3>5. AgentLoop._state_build</h3><p>BUILD 先选历史再提前保存用户，顺序决定了该轮 prompt 和保存偏移量能否正确对齐。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/loop.py</code> · <code>AgentLoop._state_build</code> · 第 1360–1396 行（连续摘录）</p><pre id="excerpt-5" data-source="nanobot/agent/loop.py" data-start="1360" data-end="1396" data-symbol="AgentLoop._state_build"><code class="language-python">    async def _state_build(self, ctx: TurnContext) -&gt; str:
+        await self.consolidator.maybe_consolidate_by_tokens(
+            ctx.session,
+            replay_max_messages=self._max_messages,
+        )
+        self._set_tool_context(
+            ctx.msg.channel,
+            ctx.msg.chat_id,
+            ctx.msg.metadata.get(&quot;message_id&quot;),
+            ctx.msg.metadata,
+            session_key=ctx.session_key,
+        )
+        if message_tool := self.tools.get(&quot;message&quot;):
+            if isinstance(message_tool, MessageTool):
+                message_tool.start_turn()
+
+        _hist_kwargs: dict[str, Any] = {
+            &quot;max_messages&quot;: self._max_messages,
+            &quot;max_tokens&quot;: self._replay_token_budget(),
+            &quot;include_timestamps&quot;: True,
+        }
+        ctx.history = ctx.session.get_history(**_hist_kwargs)
+
+        pending_ask_id = pending_ask_user_id(ctx.history)
+        ctx.initial_messages = self._build_initial_messages(
+            ctx.msg, ctx.session, ctx.history, pending_ask_id, ctx.pending_summary
+        )
+        ctx.user_persisted_early = self._persist_user_message_early(
+            ctx.msg, ctx.session, pending_ask_id
+        )
+
+        if ctx.on_progress is None:
+            ctx.on_progress = await self._build_bus_progress_callback(ctx.msg)
+        if ctx.on_retry_wait is None:
+            ctx.on_retry_wait = await self._build_retry_wait_callback(ctx.msg)
+
+        return &quot;ok&quot;</code></pre><ol><li>先按 token 需求归档旧消息，再设置工具运行上下文。message 工具 start_turn 重置本轮发送状态，不应跨轮继承。</li><li>get_history 同时受到 max_messages、回放 token 预算限制，并加入时间。ctx.history 是本轮实际回放历史，不等于磁盘所有消息。</li><li>pending_ask_id 决定新输入是否是等待中的 ask_user 回复；_build_initial_messages 先处理这个协议，再调用提前保存逻辑。</li><li>用户提前保存使运行失败后仍能找到本次输入。此时若又把用户直接 append 到 ctx.history，会重复进入模型或破坏 save_skip。</li></ol></article><article id="source-6"><h3>6. AgentLoop._state_run / _state_save</h3><p>RUN 把执行结果回写 ctx；SAVE 只持久化本轮新增的后缀，完成后清除待恢复标记。</p><p class="source-caption">当前源码原文 · <code>nanobot/agent/loop.py</code> · <code>AgentLoop._state_run / _state_save</code> · 第 1398–1445 行（连续摘录）</p><pre id="excerpt-6" data-source="nanobot/agent/loop.py" data-start="1398" data-end="1445" data-symbol="AgentLoop._state_run / _state_save"><code class="language-python">    async def _state_run(self, ctx: TurnContext) -&gt; str:
+        result = await self._run_agent_loop(
+            ctx.initial_messages,
+            on_progress=ctx.on_progress,
+            on_stream=ctx.on_stream,
+            on_stream_end=ctx.on_stream_end,
+            on_retry_wait=ctx.on_retry_wait,
+            session=ctx.session,
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            message_id=ctx.msg.metadata.get(&quot;message_id&quot;),
+            metadata=ctx.msg.metadata,
+            session_key=ctx.session_key,
+            pending_queue=ctx.pending_queue,
+        )
+        final_content, tools_used, all_msgs, stop_reason, had_injections = result
+        ctx.final_content = final_content
+        ctx.tools_used = tools_used
+        ctx.all_messages = all_msgs
+        ctx.stop_reason = stop_reason
+        ctx.had_injections = had_injections
+        return &quot;ok&quot;
+
+    async def _state_save(self, ctx: TurnContext) -&gt; str:
+        if ctx.final_content is None or not ctx.final_content.strip():
+            ctx.final_content = EMPTY_FINAL_RESPONSE_MESSAGE
+
+        ctx.save_skip = 1 + len(ctx.history) + (1 if ctx.user_persisted_early else 0)
+        skip_msgs = ctx.all_messages[ctx.save_skip:]
+        ctx.generated_media = generated_image_paths_from_messages(skip_msgs)
+        last_msg = ctx.all_messages[-1] if ctx.all_messages else None
+        if ctx.generated_media and last_msg and last_msg.get(&quot;role&quot;) == &quot;assistant&quot;:
+            existing_media = last_msg.get(&quot;media&quot;)
+            media = existing_media if isinstance(existing_media, list) else []
+            last_msg[&quot;media&quot;] = list(dict.fromkeys([*media, *ctx.generated_media]))
+
+        self._save_turn(ctx.session, ctx.all_messages, ctx.save_skip)
+        ctx.session.enforce_file_cap(on_archive=self.context.memory.raw_archive)
+        self._clear_pending_user_turn(ctx.session)
+        self._clear_runtime_checkpoint(ctx.session)
+        self.sessions.save(ctx.session)
+        self._schedule_background(
+            self.consolidator.maybe_consolidate_by_tokens(
+                ctx.session,
+                replay_max_messages=self._max_messages,
+            )
+        )
+        return &quot;ok&quot;</code></pre><ol><li>_run_agent_loop 返回 final_content、tools_used、all_msgs、stop_reason、had_injections 五个值；状态机并不从最后一个 token 推断完成。</li><li>空白 final_content 替换成明确兜底消息。save_skip=1+len(history)+early_user，其中 1 代表 system。先按后缀查生成图片，再补进最后的 assistant media。</li><li>_save_turn 写增量，enforce_file_cap 可以归档旧内容，然后清 pending_user_turn 与 runtime checkpoint，保存 Session。保存失败会向上抛，不能先给客户端虚假成功。</li><li>最后调度后台 consolidation；回复无需等待后台归档完成。RESPOND 随后把 final_content 与渠道信息组装成 OutboundMessage。</li></ol></article></section><section id="trace"><h2>用一组具体数据推演全部变化</h2><p>设 API 已配置模型为 <code>deepseek-v4-flash</code>，请求为 <code>{"session_id":"lab-7","model":"deepseek-v4-flash","messages":[{"role":"user","content":"读一下 notes.txt，概括一句"}]}</code>。假设没有附件、没有待回答的 ask_user，也没有检查点；历史只有一问一答。假 Provider 第一次返回 read_file 调用 c1，第二次返回“这份笔记讨论异步队列”。</p><div class="table-wrap"><table><thead><tr><th>时刻</th><th>消息 / 状态</th><th>可核算结果</th></tr></thead><tbody><tr><td>解析</td><td>session_key=api:lab-7；channel=api</td><td>取得 lab-7 的锁。请求 B 若同键，等待；请求 C 不同键可进入自己的锁。</td></tr><tr><td>RESTORE / COMPACT / COMMAND</td><td>加载旧 Session；无压缩摘要；普通文本</td><td>ctx.history 尚未赋值；COMMAND 返回 dispatch。</td></tr><tr><td>BUILD</td><td>history=[user旧问,assistant旧答]</td><td>initial=[system,user旧问,assistant旧答,user新问]；用户新问提前写 Session，user_persisted_early=True。</td></tr><tr><td>RUN 第 1 次</td><td>assistant(tool_calls=[c1])；tool(c1,"笔记正文")</td><td>all_messages 长度从 4 变为 6。tool_call_id 必须等于 c1。</td></tr><tr><td>RUN 第 2 次</td><td>assistant("这份笔记讨论异步队列")</td><td>长度 7；final_content 确定。</td></tr><tr><td>SAVE</td><td>save_skip=1+2+1=4</td><td>保存下标 4,5,6 共 3 条；磁盘旧 2 条 + 已提前存用户 1 条 + 新 3 条=6 条，不含 system。</td></tr><tr><td>RESPOND / DONE</td><td>OutboundMessage.content → JSON choices message</td><td>若流式已发过 token，不追加整段 final_content。</td></tr></tbody></table></div><p>再演算一次失败：API 层 wait_for 在 RUN 期间到期，取消 process_direct；BUILD 提前保存的用户仍存在，常规 SAVE/RESPOND 不会执行。取消向内传播的是 CancelledError，不被状态驱动的 except Exception 捕获，因此这一取消路径不追加 RUN error 轨迹；wait_for 随后在 API 边界抛出 TimeoutError，非流式入口返回 504。要区分 Provider 内部请求超时：它可能被 Provider 可靠性层包装为 error 响应并进入重试或停止策略，不必然产生 HTTP 504。只有 handler 向外抛出普通 Exception 时，状态驱动才记录 error 并重新抛出。若要恢复，应由检查点/待处理用户机制去重，而不是假定“请求失败=磁盘未变化”。非流式入口还会对空响应再调用一次 process_direct，因此真实工具设计应考虑重复执行。</p></section><section id="build-it"><h2>独立搭建本章最小模块</h2><p>在练习目录从零写 <code>MiniTurnEngine</code> 和 <code>MiniApiAdapter</code>，不要导入生产 AgentLoop。接口为 <code>async handle(text, session_key) -&gt; {content, trace}</code>。使用内存 Session、每键 asyncio.Lock、确定性 FakeRunner；实现 RESTORE、BUILD、RUN、SAVE、RESPOND、DONE，并提供 /ping 快捷回复。FakeRunner 输出一个工具声明、一条工具结果、一条最终回答。</p><details><summary>展开参考方案：结构、算法与错误处理</summary><ol><li>定义 Turn dataclass，包含原输入、回放历史、early_user 布尔值、all_messages、trace。把状态边定义为字典，handler 返回事件，主循环统一验证边并记录普通 Exception；取消继续向上传播，不混成普通错误。</li><li>API 适配器在每键锁内设置运行超时。BUILD 先复制历史、构建 system+history+current，再提前保存 current；SAVE 根据固定偏移保存后缀。</li><li>Runner 只接收消息列表并返回新消息列表和文本；用 asyncio.Event 人工卡住一次运行来演示同键等待与异键推进。</li><li>异常时保留 early_user 标记和输入；恢复时确认相同待处理输入已保存，不能再次 append。/ping 在 COMMAND 的 shortcut 路径构造响应。</li><li>参考伪代码（教学算法，非仓库原文）：history = copy(session.messages); prompt = [system, *history, current]; persist_once(current); result = await runner(prompt); append(result.messages[1+len(history)+1:]); clear_pending(); return result.text。</li></ol></details><h3>验收条件</h3><ol><li>对上述 2 条历史 + 1 次工具的例子，精确得到 6 条持久消息，且没有 system、重复用户或孤立工具结果。</li><li>两个同键请求不会同时进入 FakeRunner；不同键能够同时抵达 FakeRunner 的事件等待点。</li><li>RUN 人工抛 RuntimeError 后，trace 有 error、用户仍保存、没有成功响应；恢复不会重复用户。另用 asyncio.Event 阻塞 FakeRunner 触发 API wait_for 超时：应得到 504、保留用户、跳过 SAVE/RESPOND；若仿照当前 except Exception 实现，此取消路径不应期待 RUN error 轨迹。若练习另外记录 cancelled 事件，应明确这是新增的可观测能力。</li><li>/ping 不触发 FakeRunner；未知转换事件得到明确异常。SSE 模拟中片段结束不会提前结束整轮。</li></ol></section><section id="boundaries"><h2>边界、不变量与容易写错的地方</h2><ol><li>本章讨论主干，渠道入站可走 MessageBus；HTTP process_direct 并未先 publish_inbound。因此不能把图中的所有箭头都理解成队列操作。</li><li>会话键用于状态隔离，chat_id 用于路由；将它们混为一谈会把 API 多个 session_id 写入同一个会话。</li><li>八个状态里 DONE 是终点，不执行 _state_done；实际执行次数由快捷命令、异常路径决定。</li><li>超时、取消与持久化不构成一个跨网络数据库事务。请求返回失败不能推导工具未执行，也不能任意重放有副作用工具。</li><li>重放 prompt 与 Session 文件是不同表示。system、运行元数据、图片 base64 和工具回显要按持久化规则处理，不能整个 prompt 原样写入记忆。</li></ol></section><div class="page-nav" data-study-page-nav></div><footer class="footer">nanobot Agent 学习手册 · 源码精讲与设计实作 · 本页为学习材料，不改动生产运行逻辑</footer></div></main></div></body></html>

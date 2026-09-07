@@ -1,0 +1,65 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>06 · MCP Wrappers 与可靠性 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="tools-mcp-extensions" data-page="mcp-wrappers">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-tools-mcp-py-149" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="MCP wrappers" title="阅读 nanobot/agent/tools/mcp.py:149–191 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">MCP · adapters</p><h1>MCP Tool、Resource 与 Prompt 的统一适配</h1><p class="lead">MCP 暴露三类 capability，但 AgentRunner 只认识 nanobot <code>Tool</code>。三个 Wrapper 把远程调用、资源读取和 Prompt 获取全部适配为相同的 name/description/parameters/execute 契约。</p><div class="meta-row"><span class="chip">MCPToolWrapper</span><span class="chip">MCPResourceWrapper</span><span class="chip">MCPPromptWrapper</span><span class="chip">fail-soft</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">三种能力怎样变成 Tool</h2><table class="source-table"><thead><tr><th>MCP capability</th><th>最终名称</th><th>parameters</th><th>execute 动作</th><th>并发</th></tr></thead><tbody>
+  <tr><td>Tool</td><td><code>mcp_server_tool</code></td><td>远程 inputSchema 归一化</td><td><code>session.call_tool(original_name)</code></td><td>默认非 read-only</td></tr>
+  <tr><td>Resource</td><td><code>mcp_server_resource_name</code></td><td>空 object</td><td><code>session.read_resource(uri)</code></td><td>read-only</td></tr>
+  <tr><td>Prompt</td><td><code>mcp_server_prompt_name</code></td><td>由 arguments 生成 string 字段</td><td><code>session.get_prompt(name, arguments)</code></td><td>read-only</td></tr>
+</tbody></table>
+
+<div class="callout"><strong>统一的代价与收益：</strong>Resource/Prompt 在 MCP 协议里不是 function，但包装后模型可以主动选择读取资源或获取工作流模板；Runner 无需新增 capability 分支，现有校验、并发和结果回填全部复用。</div>
+
+<h2 id="reading-section-02">Tool Wrapper 的适配过程</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>definition</small><b>保存原始名称</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>provider</small><b>生成安全名称</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>schema</small><b>归一 nullable</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>runtime</small><b>远程调用</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>result</small><b>提取内容</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>原始名只用于 MCP RPC</h3><p><code>_original_name</code> 保留 Server 定义，实际调用仍传它，避免 Provider 兼容处理改变远程协议标识。</p></div>
+  <div data-step-panel><h3>包装名避免跨 Server 碰撞</h3><p>前缀加入 server name；非字母数字、下划线和连字符替换为下划线，并折叠连续下划线，以兼容 OpenAI/Anthropic 工具名限制。</p></div>
+  <div data-step-panel><h3>只做窄范围 Schema 兼容</h3><p><code>type: [T, null]</code> 与单一 nullable oneOf/anyOf 被转换为 type=T + nullable；properties/items 递归处理，不任意重写远程约束。</p></div>
+  <div data-step-panel><h3>超时包裹真正 RPC</h3><p><code>asyncio.wait_for(call_tool(...), tool_timeout)</code>；参数已在本地 Registry 按归一后 Schema 验证。</p></div>
+  <div data-step-panel><h3>结果转为文本</h3><p>TextContent 取 text，其他 block 转字符串，多块用换行连接；空内容返回显式 <code>(no output)</code>。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">enabledTools 的准确边界</h2><div class="code-block"><div class="code-head"><span>agent/tools/mcp.py:524</span><span>只过滤 list_tools 结果</span></div><pre><code>enabled = set(cfg.enabled_tools)
+allow_all = "*" in enabled
+
+for tool_def in tools.tools:
+    wrapped = sanitize(f"mcp_{server}_{tool_def.name}")
+    if not allow_all and tool_def.name not in enabled and wrapped not in enabled:
+        continue
+    registry.register(MCPToolWrapper(...))</code></pre></div>
+<ul class="number-list"><li><strong><code>["*"]</code>：</strong>默认注册所有 MCP tools。</li><li><strong>原始名称或包装名称：</strong>两种写法都能精确启用某个 tool。</li><li><strong>空列表：</strong>不注册任何 tools。</li><li><strong>未知条目：</strong>记录可用 raw/wrapped 名称，便于纠错。</li></ul>
+<div class="callout warning"><strong>当前实现细节：</strong><code>enabledTools</code> 只应用于 MCP Tools；连接成功后发现的 Resources 和 Prompts 会全部尝试注册。若需要限制它们，应在 MCP Server 端控制暴露范围或扩展客户端配置。</div>
+
+<h2 id="reading-section-04">失败与取消语义</h2><table class="source-table"><thead><tr><th>失败</th><th>处理</th><th>给 Agent 的结果</th></tr></thead><tbody>
+  <tr><td>调用超过 tool_timeout</td><td>wait_for 超时，立即返回</td><td><code>(MCP ... timed out after Ns)</code></td></tr>
+  <tr><td>连接断开类瞬态异常</td><td>等待 1 秒，最多重试 1 次</td><td>第二次失败返回异常类型</td></tr>
+  <tr><td>MCP SDK 泄漏 CancelledError</td><td>当前 task 没有外部 cancelling 时转成失败文本</td><td><code>(MCP ... was cancelled)</code></td></tr>
+  <tr><td>用户 /stop 或系统真正取消 task</td><td><code>task.cancelling() &gt; 0</code> 时重新抛出</td><td>沿 AgentLoop 取消/Checkpoint 路径处理</td></tr>
+  <tr><td>Prompt McpError</td><td>记录 code/message</td><td>返回含服务端错误码的失败文本</td></tr>
+  <tr><td>其他异常</td><td>记录完整日志，隐藏内部细节</td><td>只暴露异常类型</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-05">Resource 与 Prompt 的输出转换</h2><div class="compare-grid"><div class="card"><h3>Resource</h3><p>TextResourceContents 返回正文；BlobResourceContents 不把二进制塞进 Context，只返回字节数占位；其他类型转字符串。</p></div><div class="card"><h3>Prompt</h3><p>遍历返回 messages；TextContent 取正文，list 中逐块提取。它返回“可作为工作流指南的文本”，不会直接替换 system prompt。</p></div></div>
+
+<div class="code-block"><div class="code-head"><span>agent/tools/mcp.py:173</span><span>fail-soft + 真取消透传</span></div><pre><code>for attempt in range(2):
+    try:
+        result = await asyncio.wait_for(remote_call(), timeout=timeout)
+    except asyncio.CancelledError:
+        if asyncio.current_task().cancelling() &gt; 0:
+            raise
+        return "(MCP call was cancelled)"
+    except Exception as exc:
+        if is_transient(exc) and attempt == 0:
+            await asyncio.sleep(1)
+            continue
+        return "(MCP call failed: ExceptionType)"</code></pre></div>
+
+<h2 id="reading-section-06">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-tools-mcp-py-149" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="mcp.py:37" title="阅读 nanobot/agent/tools/mcp.py:149–191 的代表性摘录与讲解">mcp.py · 站内摘录</a></td><td>Provider 兼容名称清理</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-mcp-py-149" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="mcp.py:83" title="阅读 nanobot/agent/tools/mcp.py:149–191 的代表性摘录与讲解">mcp.py · 站内摘录</a></td><td>nullable Schema 归一化</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-mcp-py-149" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="mcp.py:144" title="阅读 nanobot/agent/tools/mcp.py:149–191 的代表性摘录与讲解">mcp.py · 站内摘录</a></td><td>MCPToolWrapper</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-mcp-py-192" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="mcp.py:229" title="阅读 nanobot/agent/tools/mcp.py:192–226 的代表性摘录与讲解">mcp.py · 站内摘录</a></td><td>MCPResourceWrapper</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-mcp-py-192" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="mcp.py:320" title="阅读 nanobot/agent/tools/mcp.py:192–226 的代表性摘录与讲解">mcp.py · 站内摘录</a></td><td>MCPPromptWrapper</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-mcp-py-192" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="mcp.py:524" title="阅读 nanobot/agent/tools/mcp.py:192–226 的代表性摘录与讲解">mcp.py · 站内摘录</a></td><td>enabledTools 过滤</td></tr></tbody></table>
+<h2 id="reading-section-07">自测</h2><ul class="check-list review-list"><li><span class="review-question">MCP 原始工具名和模型看到的包装名为什么必须分开保存？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>模型名通常加服务器前缀以避免多个 MCP 服务同名，而协议调用必须发送服务声明的原始 name。包装器同时保存两者，Registry 用包装名路由，MCP session 用原名调用。</p></div></details></li><li><span class="review-question">为什么 MCP Resource 的二进制内容只返回大小占位？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>LLM tool result 是文本通道，直接内联任意二进制既无法可靠解释又可能造成巨大上下文。包装器只报告 MIME/大小等占位信息，实际二进制应通过专门文件或媒体路径处理。</p></div></details></li><li><span class="review-question">如何区分 MCP SDK 内部取消与用户真正执行 /stop？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>执行 wrapper 捕获 CancelledError 后检查当前 task 是否真的处于 cancelling 状态；若是则重新抛出保留 <code>/stop</code>，否则把 MCP/anyio 泄漏的内部取消转换为普通工具错误。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">06.05 · MCP Wrappers 与可靠性</footer></div></main></div></body></html>

@@ -1,0 +1,73 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>07.07 · 渠道呈现与命令扩展 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="slash-command-system" data-page="channels-extension">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/channels/websocket.py" data-source-label="渠道源码" title="nanobot/channels/websocket.py 的所属模块讲解；该文件未单独逐行收录">模块指南</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Commands · channels & extension</p><h1>命令如何出现在渠道里，以及怎样安全新增一个命令</h1><p class="lead">AgentLoop 提供统一执行语义，但渠道的“发现体验”并不统一：WebUI 动态读取后端元数据，Telegram 同时维护原生命令菜单、正则 Handler 与别名规范化。新增命令必须检查这条端到端链路。</p><div class="meta-row"><span class="chip">/api/commands</span><span class="chip">WebUI palette</span><span class="chip">Telegram BotCommand</span><span class="chip">extension checklist</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">WebUI：元数据只辅助输入</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>backend</small><b>command specs</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>REST</small><b>/api/commands</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>React</small><b>筛选与搜索</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>composer</small><b>填入文本</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>WebSocket</small><b>正常发送</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>后端暴露结构化列表</h3><p>认证后的 <code>GET /api/commands</code> 返回 <code>builtin_command_palette()</code>，字段包含 command、title、description、icon 和 arg_hint。</p></div>
+  <div data-step-panel><h3>REST 端点要求 API token</h3><p>未认证请求得到 401。这里暴露的是用户界面元数据，不是一个“执行命令”的管理 API。</p></div>
+  <div data-step-panel><h3>前端隐藏 stop/restart</h3><p><code>listSlashCommands</code> 主动过滤两项高影响命令；其他命令由 ThreadComposer 按命令、标题、描述和本地化文本搜索，最多显示 8 个。</p></div>
+  <div data-step-panel><h3>选择只修改输入框</h3><p>有 argHint 的命令填成 <code>command + 空格</code> 等待参数；无参数命令填入名称。用户仍需提交，不会因点击菜单立即执行。</p></div>
+  <div data-step-panel><h3>执行路径回归统一总线</h3><p>提交后和普通文本一样通过 WebSocket 形成 InboundMessage，AgentLoop 才进行命令识别。前端不是安全边界，手工输入隐藏命令仍会发往后端。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">WebUI 的关键代码</h2><div class="code-block"><div class="code-head"><span>webui/src/lib/api.ts:124–144</span><span>读取并过滤 palette</span></div><pre><code>const body = await request&lt;{ commands: Row[] }&gt;("/api/commands", token)
+return body.commands
+  .filter((command) =&gt; !["/stop", "/restart"].includes(command.command))
+  .map((command) =&gt; ({
+    command: command.command,
+    title: command.title,
+    description: command.description,
+    icon: command.icon,
+    argHint: command.arg_hint ?? "",
+  }))</code></pre></div>
+
+<h2 id="reading-section-03">Telegram：菜单、正则与规范化</h2><div class="architecture"><div class="arch-layer"><div class="arch-label">发现</div><div class="arch-items"><span class="arch-item">BOT_COMMANDS</span><span>→ set_my_commands</span></div></div><div class="arch-layer"><div class="arch-label">接收</div><div class="arch-items"><span class="arch-item">MessageHandler Regex</span><span>→ 权限检查</span><span>→ 去掉 @bot</span></div></div><div class="arch-layer"><div class="arch-label">规范化</div><div class="arch-items"><span class="arch-item">dream_log → dream-log</span><span class="arch-item">dream_restore → dream-restore</span></div></div><div class="arch-layer"><div class="arch-label">执行</div><div class="arch-items"><span class="arch-item">_handle_message</span><span>→ MessageBus</span><span>→ AgentLoop</span></div></div></div>
+<p><code>/start</code> 和 <code>/help</code> 在 Telegram Channel 内本地响应；其余被选中的命令经 <code>_forward_command</code> 进入统一 AgentLoop。转发时不会混入 reply-to 上下文，避免命令字符串被引用消息污染。</p>
+
+<div class="callout warning"><strong>当前源码中的渠道漂移：</strong><code>BOT_COMMANDS</code> 宣传了 <code>/history</code>，共享 help 也会列出它，但 Telegram 注册的转发正则没有包含 history，而通用消息 Handler 又排除了 <code>filters.COMMAND</code>。因此在当前实现中，Telegram 的 <code>/history</code> 菜单项很可能无法进入 AgentLoop。这正说明菜单、正则和 Router 三份表需要联动测试。</div>
+
+<h2 id="reading-section-04">新增命令的推荐步骤</h2><div class="code-block"><div class="code-head"><span>示例：/ping</span><span>先定义最小 Handler</span></div><pre><code>async def cmd_ping(ctx: CommandContext) -&gt; OutboundMessage:
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content="pong",
+        metadata=dict(ctx.msg.metadata or {}),
+    )
+
+# register_builtin_commands
+router.exact("/ping", cmd_ping)</code></pre></div>
+<ol class="number-list">
+  <li>在 <code>builtin.py</code> 编写异步 Handler，明确它是只读、会话副作用还是进程级副作用。</li>
+  <li>选择 tier：只有必须抢占运行中 Turn 的控制/观察动作才注册 priority；带参数命令同时考虑 exact 与带空格 prefix。</li>
+  <li>向 <code>BUILTIN_COMMAND_SPECS</code> 添加标题、描述、图标和 arg_hint，使 WebUI 与共享 help 自动发现。</li>
+  <li>审查渠道：WebUI 通常自动出现；Telegram 还要更新 <code>BOT_COMMANDS</code>、Regex 与必要的别名规范化。</li>
+  <li>测试 Router 匹配、busy-session 直派、参数边界、Handler 副作用、API metadata 与渠道转发。</li>
+</ol>
+
+<h2 id="reading-section-05">选择 tier 的决策表</h2><table class="source-table"><thead><tr><th>问题</th><th>选择</th><th>示例</th></tr></thead><tbody>
+  <tr><td>必须在当前 Turn 结束前生效？</td><td>priority exact</td><td>/stop、/restart</td></tr>
+  <tr><td>忙碌时要立即读状态？</td><td>priority + exact（如需普通 dispatch 完备）</td><td>/status</td></tr>
+  <tr><td>命令必须完全相等？</td><td>exact</td><td>/new、/help、/dream</td></tr>
+  <tr><td>可选/必选尾部参数？</td><td>exact + prefix("/cmd ")</td><td>/history、/dream-log</td></tr>
+  <tr><td>由动态运行状态决定是否接管？</td><td>interceptor</td><td>接口已预留；默认尚未使用</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-06">测试与源码地图</h2><table class="source-table"><thead><tr><th>位置</th><th>应验证什么</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/command/test_router_dispatchable.py" data-source-label="tests/command/test_router_dispatchable.py" title="tests/command/test_router_dispatchable.py 的所属模块讲解；该文件未单独逐行收录">tests/command/test_router_dispatchable.py · 模块讲解</a></td><td>exact/prefix/priority 边界、大小写、args、session=None</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/command/test_builtin_dream.py" data-source-label="tests/command/test_builtin_dream.py" title="tests/command/test_builtin_dream.py 的所属模块讲解；该文件未单独逐行收录">tests/command/test_builtin_dream.py · 模块讲解</a></td><td>Memory 命令的人类可读结果与恢复引导</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/channels/test_websocket_channel.py" data-source-label="tests/channels/test_websocket_channel.py:609" title="tests/channels/test_websocket_channel.py 的所属模块讲解；该文件未单独逐行收录">tests/channels/test_websocket_channel.py · 模块讲解</a></td><td>API 认证、metadata 字段</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../webui/src/tests/api.test.ts" data-source-label="webui/src/tests/api.test.ts" title="webui/src/tests/api.test.ts 的所属模块讲解；该文件未单独逐行收录">webui/src/tests/api.test.ts · 模块讲解</a></td><td>snake_case 转换与隐藏命令</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../webui/src/tests/thread-composer.test.tsx" data-source-label="thread-composer.test.tsx" title="webui/src/tests/thread-composer.test.tsx 的所属模块讲解；该文件未单独逐行收录">thread-composer.test.tsx · 模块讲解</a></td><td>palette 键盘选择和填充行为</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/channels/test_telegram_channel.py" data-source-label="tests/channels/test_telegram_channel.py:1235" title="tests/channels/test_telegram_channel.py 的所属模块讲解；该文件未单独逐行收录">tests/channels/test_telegram_channel.py · 模块讲解</a></td><td>@bot 去除、别名、reply context、帮助文本</td></tr>
+</tbody></table>
+
+<div class="callout"><strong>扩展边界：</strong>当前没有类似 <code>nanobot.tools</code> 的 command entry-point 插件。新增斜杠命令属于修改核心源码；如果需求是让 LLM 自主选择外部能力，应扩展 Tool/MCP，而不是把它伪装成用户命令。</div>
+<ul class="check-list review-list"><li><span class="review-question">为什么 WebUI palette 不是命令安全边界？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>palette 只是客户端发现和填充 UI，用户仍可绕过它直接发送任意文本。真正的匹配、tier、权限和副作用都必须由后端 CommandRouter、Handler 与 Channel 鉴权执行。</p></div></details></li><li><span class="review-question">Telegram 为什么需要把下划线别名转回连字符？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Telegram BotCommand 菜单名不接受连字符，因而公开 <code>dream_log/dream_restore</code>；进入核心前 Channel 将它们规范化为 Router 注册的 <code>/dream-log</code> 和 <code>/dream-restore</code>。</p></div></details></li><li><span class="review-question">新增带参数命令时至少要同步哪些位置？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>至少同步 Handler、Router 的 exact 与带空格 prefix 注册、<code>BUILTIN_COMMAND_SPECS</code> 展示元数据，以及需要显式命令表/正则/别名的渠道（尤其 Telegram）；同时补匹配、args 和忙碌期测试。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">09.07 · 渠道呈现与命令扩展</footer></div></main></div></body></html>

@@ -1,0 +1,295 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Agent Loop 与 Runner：当前源码连续摘录、数据流程、状态演算和模块实现练习"><title>05 · Agent Loop 与 Runner · 源码精讲与设计实作 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head><body data-study-root="../.." data-chapter="agent-loop" data-page="workshop"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="index.html">章节总览</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div><section class="hero"><p class="eyebrow">Chapter 05 · Source workshop</p><h1>Agent Loop 与 Runner：源码精讲与设计实作</h1><p class="lead">一次请求并不等于一次模型调用。用两层状态机解释消息从恢复到工具迭代、从 checkpoint 到增量保存的完整路径。</p><div class="meta-row"><a class="chip" href="#contract">输入输出契约</a><a class="chip" href="#dataflow">模块数据流图</a><a class="chip" href="#source-walkthrough">核心源码精讲</a><a class="chip" href="#build-it">动手设计与验收</a></div></section><div class="callout"><strong>使用方法：</strong>先遮住后面的演算结果，写出每一步进入和离开的数据，再读连续源码核对。摘录来自当前工作区；行号指原文件，代码块未插入讲解行。练习使用假 Provider、假时钟或内存队列，无需 API 凭据；若自行接入项目真实模型，须使用 <code>deepseek-v4-flash</code>，项目命令在 Conda <code>nanobot</code> 环境执行。</div><section id="contract"><h2>先约定谁持有数据、谁可以改变数据</h2><p>外层拥有会话与路由，内层拥有迭代中的消息事实。工具响应、最终文本与生命周期事件必须分开表示。</p><div class="table-wrap"><table class="source-table"><thead><tr><th>进入 / 离开边界</th><th>数据形状与示例</th><th>所有权、约束与失败表现</th></tr></thead><tbody><tr><td>渠道→Loop</td><td>InboundMessage(content, channel, chat_id, session_key_override, metadata)</td><td>effective key 决定会话隔离；业务消息不能直接替换运行策略。</td></tr><tr><td>Loop→Runner</td><td>AgentRunSpec(initial_messages,tools,model,max_iterations,callbacks)</td><td>模型固定为 deepseek-v4-flash；规格提供工具集合与迭代边界。</td></tr><tr><td>Provider→Runner</td><td>content / tool_calls[id,name,arguments] / finish_reason / usage</td><td>should_execute_tools 才授权该响应进入执行分支；有 tool_calls 不足以判断。</td></tr><tr><td>Runner→Loop</td><td>AgentRunResult(messages,final_content,stop_reason,error,had_injections)</td><td>事实链用于保存；文本用于展示；两者长度和用途不同。</td></tr><tr><td>Loop→Session / bus</td><td>新增消息切片 / OutboundMessage</td><td>save_skip 避免重复早写 U；异常、ask_user、completed 分别处理。</td></tr></tbody></table></div></section><section id="dataflow"><h2>沿箭头追踪数据，而非只记函数名</h2><figure><div class="diagram-scroll"><svg class="learning-diagram" viewBox="0 0 900 650" role="img" aria-labelledby="loop-title loop-desc" xmlns="http://www.w3.org/2000/svg"><title id="loop-title">Runner协调模型与工具的反馈回路</title><desc id="loop-desc">输入消息经BUILD生成AgentRunSpec交给Runner。Runner向Provider发送messages与tools，接收LLMResponse；只有可执行工具调用进入ToolRegistry，tool_call_id和result返回Runner后开始下一次模型迭代。最终内容返回SAVE/RESPOND；阶段异常记录trace并抛出，不走成功保存。</desc><style>.learning-diagram{width:100%;height:auto;display:block;--d-bg:#f1f5f9;--d-fg:#18324c;--d-line:#45627b;--d-error:#b23b46}[data-theme="dark"] .learning-diagram{--d-bg:#172538;--d-fg:#e0ecf8;--d-line:#9cbbd5;--d-error:#ff9c9c}@media(prefers-color-scheme:dark){html:not([data-theme="light"]) .learning-diagram{--d-bg:#172538;--d-fg:#e0ecf8;--d-line:#9cbbd5;--d-error:#ff9c9c}}.learning-diagram rect{fill:var(--d-bg);stroke:var(--d-line);stroke-width:1.5}.learning-diagram text{fill:var(--d-fg);font:14px system-ui,sans-serif;text-anchor:middle}.learning-diagram .node-title{font-size:17px;font-weight:650}.learning-diagram .edge{fill:none;stroke:var(--d-line);stroke-width:2;marker-end:url(#loop-arrow)}.learning-diagram .error-edge{fill:none;stroke:var(--d-error);stroke-width:2;stroke-dasharray:6 4;marker-end:url(#loop-error)}.learning-diagram .error-text{fill:var(--d-error)}</style><defs><marker id="loop-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--d-line)"/></marker><marker id="loop-error" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--d-error)"/></marker></defs><rect x="20" y="20" width="180" height="70" rx="12"/><text class="node-title" x="110.0" y="51">InboundMessage</text><text x="110.0" y="78">content + session key</text><rect x="20" y="170" width="180" height="100" rx="12"/><text class="node-title" x="110.0" y="201">BUILD</text><text x="110.0" y="228">Session → initial_messages</text><rect x="320" y="170" width="230" height="100" rx="12"/><text class="node-title" x="435.0" y="201">AgentRunner</text><text x="435.0" y="228">事实链 / iteration / stop_reason</text><rect x="650" y="170" width="230" height="100" rx="12"/><text class="node-title" x="765.0" y="201">Provider</text><text x="765.0" y="228">LLMResponse</text><rect x="650" y="400" width="230" height="100" rx="12"/><text class="node-title" x="765.0" y="431">ToolRegistry / Tool</text><text x="765.0" y="458">解析 → 校验 → 执行</text><rect x="20" y="400" width="180" height="100" rx="12"/><text class="node-title" x="110.0" y="431">SAVE / RESPOND</text><text x="110.0" y="458">Session + Outbound</text><rect x="320" y="550" width="230" height="70" rx="12"/><text class="node-title" x="435.0" y="581">异常出口</text><text x="435.0" y="608">trace / 抛出 / 恢复处理</text><path class="edge" d="M110 90V170"/><text class="" x="150" y="140">msg + key</text><path class="edge" d="M200 205H320"/><text class="" x="260" y="190">AgentRunSpec</text><path class="edge" d="M550 195H650"/><text class="" x="600" y="181">messages / tools</text><path class="edge" d="M650 245H550"/><text class="" x="600" y="268">LLMResponse</text><path class="edge" d="M495 270V355H765V400"/><text class="" x="688" y="344">name + arguments + id</text><path class="edge" d="M650 450H580V250H550"/><text class="" x="670" y="477">tool_call_id + result</text><path class="edge" d="M355 270V450H200"/><text class="" x="274" y="438">final_content</text><path class="error-edge" d="M435 270V550"/><text class="error-text" x="492" y="525">执行异常 → trace</text><path class="error-edge" d="M200 240H270V585H320"/><text class="error-text" x="231" y="573">阶段异常</text><text x="725" y="535">工具结果返回Runner，再发起下一次模型请求</text></svg></div><figcaption>文字等价：输入消息经BUILD生成AgentRunSpec交给Runner。Runner向Provider发送messages与tools，接收LLMResponse；只有可执行工具调用进入ToolRegistry，tool_call_id和result返回Runner后开始下一次模型迭代。最终内容返回SAVE/RESPOND；阶段异常记录trace并抛出，不走成功保存。</figcaption></figure></section><section id="source-walkthrough"><h2>当前源码逐段精讲</h2><article class="source-excerpt" id="guide-nanobot-agent-runner-py-56"><h3>1. 把推理器的输入与结果变成显式契约</h3><p>先看可复用内核的边界：它接收已经构造好的消息与工具，不读取渠道，也不直接保存 Session。</p><div class="code-block" id="nanobot-agent-runner-py-56" data-guide="guide-nanobot-agent-runner-py-56" data-source="nanobot/agent/runner.py" data-start="56" data-end="97" data-symbol="AgentRunSpec / AgentRunResult"><div class="code-head"><span>当前源码原文：nanobot/agent/runner.py · AgentRunSpec / AgentRunResult · 第 56–97 行（连续摘录）</span></div><pre><code>@dataclass(slots=True)
+class AgentRunSpec:
+    &quot;&quot;&quot;Configuration for a single agent execution.&quot;&quot;&quot;
+
+    initial_messages: list[dict[str, Any]]
+    tools: ToolRegistry
+    model: str
+    max_iterations: int
+    max_tool_result_chars: int
+    temperature: float | None = None
+    max_tokens: int | None = None
+    reasoning_effort: str | None = None
+    hook: AgentHook | None = None
+    error_message: str | None = _DEFAULT_ERROR_MESSAGE
+    max_iterations_message: str | None = None
+    concurrent_tools: bool = False
+    fail_on_tool_error: bool = False
+    workspace: Path | None = None
+    session_key: str | None = None
+    context_window_tokens: int | None = None
+    context_block_limit: int | None = None
+    provider_retry_mode: str = &quot;standard&quot;
+    progress_callback: Any | None = None
+    stream_progress_deltas: bool = True
+    retry_wait_callback: Any | None = None
+    checkpoint_callback: Any | None = None
+    injection_callback: Any | None = None
+    llm_timeout_s: float | None = None
+
+
+@dataclass(slots=True)
+class AgentRunResult:
+    &quot;&quot;&quot;Outcome of a shared agent execution.&quot;&quot;&quot;
+
+    final_content: str | None
+    messages: list[dict[str, Any]]
+    tools_used: list[str] = field(default_factory=list)
+    usage: dict[str, int] = field(default_factory=dict)
+    stop_reason: str = &quot;completed&quot;
+    error: str | None = None
+    tool_events: list[dict[str, str]] = field(default_factory=list)
+    had_injections: bool = False</code></pre></div><ol><li><code>initial_messages</code> 是进入本轮的消息数组；<code>tools</code> 决定可执行能力，<code>model</code> 和迭代上限由宿主传入。普通的消息内容不能修改这些运行限制。</li><li>可选回调把进度、checkpoint、后续输入与推理循环连接。没有回调时对应能力不启用，因此子 Agent 可以复用同一个 Runner。</li><li>结果同时携带 <code>final_content</code> 和完整 <code>messages</code>：前者用于显示，后者用于保存真实工具链。<code>stop_reason</code> 与 <code>error</code> 不能从文本内容反推。</li></ol><p><strong>取舍与异常边界：</strong>Spec 是策略集合，Result 是事实集合；只有一句“任务完成”不能证明 stop_reason 是 completed。异常是否进入结果还取决于后续执行路径，不能认为 dataclass 会捕获异常。</p></article><article class="source-excerpt" id="guide-nanobot-agent-loop-py-1228"><h3>2. 状态机驱动器只接受明确的事件</h3><p>外层 Turn 的职责是恢复、整理、命令、构建、运行、保存与响应。这个驱动器没有把所有业务写在一串 if 中。</p><div class="code-block" id="nanobot-agent-loop-py-1228" data-guide="guide-nanobot-agent-loop-py-1228" data-source="nanobot/agent/loop.py" data-start="1228" data-end="1273" data-symbol="AgentLoop._process_message"><div class="code-head"><span>当前源码原文：nanobot/agent/loop.py · AgentLoop._process_message · 第 1228–1273 行（连续摘录）</span></div><pre><code>        while ctx.state is not TurnState.DONE:
+            handler_name = f&quot;_state_{ctx.state.name.lower()}&quot;
+            handler = getattr(self, handler_name, None)
+            if handler is None:
+                raise RuntimeError(f&quot;Missing state handler for {ctx.state}&quot;)
+
+            t0 = time.perf_counter()
+            try:
+                event = await handler(ctx)
+            except Exception:
+                duration = (time.perf_counter() - t0) * 1000
+                ctx.trace.append(
+                    StateTraceEntry(
+                        state=ctx.state,
+                        started_at=t0,
+                        duration_ms=duration,
+                        event=&quot;&quot;,
+                        error=&quot;exception&quot;,
+                    )
+                )
+                raise
+
+            duration = (time.perf_counter() - t0) * 1000
+            ctx.trace.append(
+                StateTraceEntry(
+                    state=ctx.state,
+                    started_at=t0,
+                    duration_ms=duration,
+                    event=event,
+                )
+            )
+            logger.debug(
+                &quot;[turn {}] State {} took {:.1f}ms -&gt; event {}&quot;,
+                ctx.turn_id,
+                ctx.state.name,
+                duration,
+                event,
+            )
+
+            next_state = self._TRANSITIONS.get((ctx.state, event))
+            if next_state is None:
+                raise RuntimeError(
+                    f&quot;[turn {ctx.turn_id}] No transition from {ctx.state} &quot;
+                    f&quot;on event {event!r}&quot;
+                )
+            ctx.state = next_state</code></pre></div><ol><li>根据 <code>ctx.state</code> 找到 <code>_state_*</code>，例如 RUN 找到 _state_run。状态数据集中在同一个 TurnContext 中。</li><li>执行处理器前计时；成功记录返回事件，异常记录 trace 后重新抛出。trace 是诊断证据，写了 trace 不等于业务成功。</li><li>用 <code>(state,event)</code> 查显式转换表。RUN 返回 ok 才进入 SAVE；COMMAND 返回 shortcut 直接 DONE。不存在的组合抛错，避免无意进入下一状态。</li></ol><p><strong>取舍与异常边界：</strong>显式转换使阶段顺序可审查。每个处理器仍可改变 ctx，驱动器本身不提供事务回滚；处理器失败后的恢复必须靠 checkpoint 和持久化约定。</p></article><article class="source-excerpt" id="guide-nanobot-agent-runner-py-251"><h3>3. 模型输入副本与待执行工具 checkpoint</h3><p>从这一段开始区分“用于本次模型请求的治理视图”与“保存本轮事实的消息链”。</p><div class="code-block" id="nanobot-agent-runner-py-251" data-guide="guide-nanobot-agent-runner-py-251" data-source="nanobot/agent/runner.py" data-start="251" data-end="312" data-symbol="AgentRunner.run"><div class="code-head"><span>当前源码原文：nanobot/agent/runner.py · AgentRunner.run · 第 251–312 行（连续摘录）</span></div><pre><code>        for iteration in range(spec.max_iterations):
+            try:
+                # Keep the persisted conversation untouched. Context governance
+                # may repair or compact historical messages for the model, but
+                # those synthetic edits must not shift the append boundary used
+                # later when the caller saves only the new turn.
+                messages_for_model = self._drop_orphan_tool_results(messages)
+                messages_for_model = self._backfill_missing_tool_results(messages_for_model)
+                messages_for_model = self._microcompact(messages_for_model)
+                messages_for_model = self._apply_tool_result_budget(spec, messages_for_model)
+                messages_for_model = self._snip_history(spec, messages_for_model)
+                # Snipping may have created new orphans; clean them up.
+                messages_for_model = self._drop_orphan_tool_results(messages_for_model)
+                messages_for_model = self._backfill_missing_tool_results(messages_for_model)
+            except Exception:
+                logger.exception(
+                    &quot;Context governance failed on turn {} for {}; applying minimal repair&quot;,
+                    iteration,
+                    spec.session_key or &quot;default&quot;,
+                )
+                try:
+                    messages_for_model = self._drop_orphan_tool_results(messages)
+                    messages_for_model = self._backfill_missing_tool_results(messages_for_model)
+                except Exception:
+                    messages_for_model = messages
+            context = AgentHookContext(iteration=iteration, messages=messages)
+            await hook.before_iteration(context)
+            response = await self._request_model(spec, messages_for_model, hook, context)
+            raw_usage = self._usage_dict(response.usage)
+            context.response = response
+            context.usage = dict(raw_usage)
+            context.tool_calls = list(response.tool_calls)
+            self._accumulate_usage(usage, raw_usage)
+
+            if response.should_execute_tools:
+                tool_calls = list(response.tool_calls)
+                ask_index = next((i for i, tc in enumerate(tool_calls) if tc.name == &quot;ask_user&quot;), None)
+                if ask_index is not None:
+                    tool_calls = tool_calls[: ask_index + 1]
+                context.tool_calls = list(tool_calls)
+                if hook.wants_streaming():
+                    await hook.on_stream_end(context, resuming=True)
+
+                assistant_message = build_assistant_message(
+                    response.content or &quot;&quot;,
+                    tool_calls=[tc.to_openai_tool_call() for tc in tool_calls],
+                    reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
+                )
+                messages.append(assistant_message)
+                tools_used.extend(tc.name for tc in tool_calls)
+                await self._emit_checkpoint(
+                    spec,
+                    {
+                        &quot;phase&quot;: &quot;awaiting_tools&quot;,
+                        &quot;iteration&quot;: iteration,
+                        &quot;model&quot;: spec.model,
+                        &quot;assistant_message&quot;: assistant_message,
+                        &quot;completed_tool_results&quot;: [],
+                        &quot;pending_tool_calls&quot;: [tc.to_openai_tool_call() for tc in tool_calls],
+                    },
+                )</code></pre></div><ol><li>每次迭代先修复孤立 tool result、补缺失结果、压缩和裁剪，结果存入 <code>messages_for_model</code>；原始 messages 的追加边界不能随治理一起移动。治理失败先最小修复，再退回原链。</li><li>Hook 观察本轮，Provider 返回结构化 response，usage 累加到整轮计数。只有 <code>should_execute_tools</code> 为真才进入执行分支，并非看到 tool_calls 就执行。</li><li>遇到 ask_user 时截断它之后的调用；将 assistant 的工具调用声明先追加，再写 awaiting_tools checkpoint，其中 completed 为空、pending 含这批调用。此时工具尚未开始。</li></ol><p><strong>取舍与异常边界：</strong>先记录调用意图有助于中断恢复，但 checkpoint 不是外部副作用的事务提交；进程可能在工具实际完成后、结果记录前退出。治理异常的降级也不保证 Provider 一定接受历史。</p></article><article class="source-excerpt" id="guide-nanobot-agent-runner-py-316"><h3>4. 用 tool_call_id 闭合协议，再选择继续还是结束</h3><p>模型在下一次请求里必须看见与调用声明相匹配的工具结果。这里的追加顺序比结果的显示文案更重要。</p><div class="code-block" id="nanobot-agent-runner-py-316" data-guide="guide-nanobot-agent-runner-py-316" data-source="nanobot/agent/runner.py" data-start="316" data-end="378" data-symbol="AgentRunner.run tool results"><div class="code-head"><span>当前源码原文：nanobot/agent/runner.py · AgentRunner.run tool results · 第 316–378 行（连续摘录）</span></div><pre><code>                results, new_events, fatal_error = await self._execute_tools(
+                    spec,
+                    tool_calls,
+                    external_lookup_counts,
+                    workspace_violation_counts,
+                )
+                tool_events.extend(new_events)
+                context.tool_results = list(results)
+                context.tool_events = list(new_events)
+                completed_tool_results: list[dict[str, Any]] = []
+                for tool_call, result in zip(tool_calls, results):
+                    if isinstance(fatal_error, AskUserInterrupt) and tool_call.name == &quot;ask_user&quot;:
+                        continue
+                    tool_message = {
+                        &quot;role&quot;: &quot;tool&quot;,
+                        &quot;tool_call_id&quot;: tool_call.id,
+                        &quot;name&quot;: tool_call.name,
+                        &quot;content&quot;: self._normalize_tool_result(
+                            spec,
+                            tool_call.id,
+                            tool_call.name,
+                            result,
+                        ),
+                    }
+                    messages.append(tool_message)
+                    completed_tool_results.append(tool_message)
+                if fatal_error is not None:
+                    if isinstance(fatal_error, AskUserInterrupt):
+                        final_content = fatal_error.question
+                        stop_reason = &quot;ask_user&quot;
+                        context.final_content = final_content
+                        context.stop_reason = stop_reason
+                        if hook.wants_streaming():
+                            await hook.on_stream_end(context, resuming=False)
+                        await hook.after_iteration(context)
+                        break
+                    error = f&quot;Error: {type(fatal_error).__name__}: {fatal_error}&quot;
+                    final_content = error
+                    stop_reason = &quot;tool_error&quot;
+                    self._append_final_message(messages, final_content)
+                    context.final_content = final_content
+                    context.error = error
+                    context.stop_reason = stop_reason
+                    await hook.after_iteration(context)
+                    should_continue, injection_cycles = await self._try_drain_injections(
+                        spec, messages, None, injection_cycles,
+                        phase=&quot;after tool error&quot;,
+                    )
+                    if should_continue:
+                        had_injections = True
+                        continue
+                    break
+                await self._emit_checkpoint(
+                    spec,
+                    {
+                        &quot;phase&quot;: &quot;tools_completed&quot;,
+                        &quot;iteration&quot;: iteration,
+                        &quot;model&quot;: spec.model,
+                        &quot;assistant_message&quot;: assistant_message,
+                        &quot;completed_tool_results&quot;: completed_tool_results,
+                        &quot;pending_tool_calls&quot;: [],
+                    },
+                )</code></pre></div><ol><li>执行器给出 results、events、fatal_error。按原 tool_calls 顺序 zip 回填 role=tool，携带调用 id、名字以及规范化内容。</li><li>ask_user 的调用不在这里生成普通结果；它将 final_content 设为问题并以 ask_user 停止，等待下一次用户回答补齐协议。</li><li>其他致命工具错误把 stop_reason 设为 tool_error，追加最终错误消息，再尝试吸收待注入消息；有注入仍可继续。成功则写 tools_completed checkpoint，pending 清空。</li></ol><p><strong>取舍与异常边界：</strong>普通错误字符串与 fatal_error 是不同维度，不能用“返回值非空”判断成功。这里是在整批执行返回后组装已完成结果；不能把此段描述为每完成一个并发工具就实时落盘。</p></article><article class="source-excerpt" id="guide-nanobot-agent-runner-py-1179"><h3>5. 并发以连续安全区间为单位</h3><p>假设工具依次是 read A、read B、write C、read D。分组必须保持 write C 两侧的因果关系。</p><div class="code-block" id="nanobot-agent-runner-py-1179" data-guide="guide-nanobot-agent-runner-py-1179" data-source="nanobot/agent/runner.py" data-start="1179" data-end="1202" data-symbol="AgentRunner._partition_tool_batches"><div class="code-head"><span>当前源码原文：nanobot/agent/runner.py · AgentRunner._partition_tool_batches · 第 1179–1202 行（连续摘录）</span></div><pre><code>    def _partition_tool_batches(
+        self,
+        spec: AgentRunSpec,
+        tool_calls: list[ToolCallRequest],
+    ) -&gt; list[list[ToolCallRequest]]:
+        if not spec.concurrent_tools:
+            return [[tool_call] for tool_call in tool_calls]
+
+        batches: list[list[ToolCallRequest]] = []
+        current: list[ToolCallRequest] = []
+        for tool_call in tool_calls:
+            get_tool = getattr(spec.tools, &quot;get&quot;, None)
+            tool = get_tool(tool_call.name) if callable(get_tool) else None
+            can_batch = bool(tool and tool.concurrency_safe)
+            if can_batch:
+                current.append(tool_call)
+                continue
+            if current:
+                batches.append(current)
+                current = []
+            batches.append([tool_call])
+        if current:
+            batches.append(current)
+        return batches</code></pre></div><ol><li>未启用 concurrent_tools 时，每个调用都是单元素批次。</li><li>启用时，只有已注册且 <code>concurrency_safe</code> 为真的工具进入 current；未知工具保守地成为独立批次。</li><li>遇到非安全工具，先封存 current，再加入独立批次。末尾还有 current 时补入。因此例子得到 [[read A,read B],[write C],[read D]]。</li></ol><p><strong>取舍与异常边界：</strong>只合并连续安全调用，不把所有读取跨越写入搬到一起。并发资格是工具声明的契约，错误声明会让分组算法“正确地”制造业务竞态。</p></article><article class="source-excerpt" id="guide-nanobot-agent-loop-py-1398"><h3>6. 从执行结果转入增量持久化</h3><p>宿主重新接手结果：Runner 不知道 Session 的早写用户消息策略，因此保存偏移由 AgentLoop 计算。</p><div class="code-block" id="nanobot-agent-loop-py-1398" data-guide="guide-nanobot-agent-loop-py-1398" data-source="nanobot/agent/loop.py" data-start="1398" data-end="1445" data-symbol="AgentLoop._state_run / _state_save"><div class="code-head"><span>当前源码原文：nanobot/agent/loop.py · AgentLoop._state_run / _state_save · 第 1398–1445 行（连续摘录）</span></div><pre><code>    async def _state_run(self, ctx: TurnContext) -&gt; str:
+        result = await self._run_agent_loop(
+            ctx.initial_messages,
+            on_progress=ctx.on_progress,
+            on_stream=ctx.on_stream,
+            on_stream_end=ctx.on_stream_end,
+            on_retry_wait=ctx.on_retry_wait,
+            session=ctx.session,
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            message_id=ctx.msg.metadata.get(&quot;message_id&quot;),
+            metadata=ctx.msg.metadata,
+            session_key=ctx.session_key,
+            pending_queue=ctx.pending_queue,
+        )
+        final_content, tools_used, all_msgs, stop_reason, had_injections = result
+        ctx.final_content = final_content
+        ctx.tools_used = tools_used
+        ctx.all_messages = all_msgs
+        ctx.stop_reason = stop_reason
+        ctx.had_injections = had_injections
+        return &quot;ok&quot;
+
+    async def _state_save(self, ctx: TurnContext) -&gt; str:
+        if ctx.final_content is None or not ctx.final_content.strip():
+            ctx.final_content = EMPTY_FINAL_RESPONSE_MESSAGE
+
+        ctx.save_skip = 1 + len(ctx.history) + (1 if ctx.user_persisted_early else 0)
+        skip_msgs = ctx.all_messages[ctx.save_skip:]
+        ctx.generated_media = generated_image_paths_from_messages(skip_msgs)
+        last_msg = ctx.all_messages[-1] if ctx.all_messages else None
+        if ctx.generated_media and last_msg and last_msg.get(&quot;role&quot;) == &quot;assistant&quot;:
+            existing_media = last_msg.get(&quot;media&quot;)
+            media = existing_media if isinstance(existing_media, list) else []
+            last_msg[&quot;media&quot;] = list(dict.fromkeys([*media, *ctx.generated_media]))
+
+        self._save_turn(ctx.session, ctx.all_messages, ctx.save_skip)
+        ctx.session.enforce_file_cap(on_archive=self.context.memory.raw_archive)
+        self._clear_pending_user_turn(ctx.session)
+        self._clear_runtime_checkpoint(ctx.session)
+        self.sessions.save(ctx.session)
+        self._schedule_background(
+            self.consolidator.maybe_consolidate_by_tokens(
+                ctx.session,
+                replay_max_messages=self._max_messages,
+            )
+        )
+        return &quot;ok&quot;</code></pre></div><ol><li>RUN 把回调、会话及路由传给 _run_agent_loop，并将五项结果写回 ctx。返回 ok 仅表示阶段执行完成，具体结束原因仍在 ctx.stop_reason。</li><li>SAVE 对空最终文本提供后备内容。<code>save_skip = 1 + len(history) + early_user</code> 排除 system、已存在历史和已提前保存的用户消息。</li><li>从新增消息收集生成媒体，再保存这一轮、限制文件容量、清除 pending/checkpoint 标记并保存 Session。随后排后台整理任务，避免让整理阻塞当前返回。</li></ol><p><strong>取舍与异常边界：</strong>偏移依赖 Runner 保持事实链前缀稳定；若直接对 messages 原地删历史，save_skip 会跳过本应保存的结果。清理标记也不是独立于 Session 保存的永久提交。</p></article></section><section id="worked-example"><h2>手工演算：消息和状态如何一步步变化</h2><p>设历史为空，输入 <code>“读取 notes.txt 并总结”</code>。假 Provider 的第 1 次响应声明 <code>c1/read_file({path:"notes.txt"})</code>，工具返回 <code>alpha</code>，第 2 次响应返回 <code>“笔记包含 alpha”</code>。以下采用用户消息提前保存成功的分支。</p><div class="table-wrap"><table class="source-table"><thead><tr><th>时刻</th><th>内存事实 / checkpoint</th><th>持久化与下一步</th></tr></thead><tbody><tr><td>RESTORE→COMPACT→COMMAND</td><td>Session 历史=[]；命令未命中→dispatch</td><td>BUILD 继续</td></tr><tr><td>BUILD</td><td>initial_messages=[S,U]；history=[]；early_user=true</td><td>Session=[U]</td></tr><tr><td>iteration 0</td><td>messages=[S,U,A(c1)]；awaiting_tools: pending=[c1]</td><td>调用 read_file，暂未生成最终响应</td></tr><tr><td>工具批次完成</td><td>messages=[S,U,A(c1),T(c1,"alpha")]；tools_completed: pending=[]</td><td>下一次模型请求必须携带 T(c1)</td></tr><tr><td>iteration 1</td><td>追加 A("笔记包含 alpha")；stop_reason=completed</td><td>all_messages 长度=5</td></tr><tr><td>SAVE→RESPOND</td><td>save_skip=1+0+1=2；保存索引2、3、4</td><td>Session=[U,A(c1),T(c1),A(final)]；Outbound 只投递最终内容</td></tr></tbody></table></div><p>改变一个条件：工具阶段触发 AskUserInterrupt 时，返回问题而不是伪造执行结果；若在 awaiting_tools 后取消，恢复逻辑需要为未完成调用生成中断结果。若直接删掉 A(c1) 而保留 T(c1)，下一次 Provider 会看见孤立工具结果。</p></section><section id="build-it"><h2>从空文件实现一个可推演的最小模块</h2><p>在独立练习文件中实现“两层最小运行器”，让同一输入跑出上面的消息链。禁止真实网络和文件修改；用固定响应列表模拟模型。</p><ol><li>定义 Spec(messages, tools, max_iterations)、Result(messages, final, stop_reason)，再定义外层 BUILD、RUN、SAVE 三阶段及转换表。</li><li>实现一个以 id 关联的工具响应回填器；每次先追加 assistant 调用声明，再执行工具。保留事实链，单独构造发给模型的副本。</li><li>实现连续安全工具批次和仅追加新增消息的保存函数；加入未知工具、达到迭代上限与模拟中断输入。</li></ol><details class="answer-reveal"><summary>展开参考方案与设计理由</summary><div class="answer-content"><p><strong>下面是教学参考伪代码，不是仓库原文。</strong>它只覆盖本练习的有限输入；先完成自己的实现，再逐项比较责任边界。</p><pre><code>messages = copy(initial_messages)
+for i in range(limit):
+    response = await fake_provider(govern(copy(messages)))
+    if response.executable_calls:
+        append_assistant_calls(messages, response.calls)
+        checkpoint(&quot;awaiting_tools&quot;, response.calls)
+        for batch in partition_contiguous_safe(response.calls):
+            results = await execute_batch(batch)
+            append_results_in_call_order(messages, batch, results)
+        checkpoint(&quot;tools_completed&quot;, [])
+    else:
+        append_final(messages, response.text)
+        return Result(messages, response.text, &quot;completed&quot;)
+return Result(messages, None, &quot;max_iterations&quot;)
+# 外层：Session 已有 U；跳过 [S,U] 后保存新增事实
+persist(messages[1 + history_count + int(early_user):])</code></pre><p>将 I/O 放在可替换的回调中，用固定输入验证状态与调用次数；错误路径必须留下可观察的结果，不能只写日志。</p></div></details><h3>验收条件</h3><ol><li>上面的固定 Provider 正好请求 2 次；最终 Session 恰好 4 条且 c1 声明/结果各出现一次。</li><li>四个工具 read/read/write/read 分成 3 批，工具结果顺序与调用声明顺序一致。</li><li>治理函数裁剪模型副本后，保存偏移仍正确；未知状态事件必须抛错，不能默认 DONE。</li></ol></section><section id="invariants"><h2>边界、不变量与容易写错的地方</h2><ol><li>正常工具协议要求每个已执行调用的结果用同一个 tool_call_id 关联；AskUser 等受控中断在下一轮另行补齐。</li><li>max_iterations 约束迭代次数，不是工具数量；一次响应可能声明多个工具，也可能因空响应恢复消耗迭代。</li><li>跨 Session 并发由外层限制，同 Session 普通输入经 pending queue 合入；命令有快速分流路径，不等同于普通追问。</li><li>checkpoint 保护对话恢复，不保证远程写操作 exactly-once；有副作用的工具仍需要幂等设计。</li><li>Hook 是可观察与宿主扩展边界。流 delta 是输出片段，不能把每个 delta 当作完整 assistant 消息保存。</li></ol></section><section id="self-test"><h2>独立推理练习</h2><ol><li>为何不能只保存 final_content？<details><summary>展开推理依据</summary><p>会丢失模型如何调用工具与结果对应关系；下一轮无法可靠重放事实，也不能解释中断位置。</p></details></li><li>RUN 返回 ok，是否能断言模型成功？<details><summary>展开推理依据</summary><p>不能。ok 是状态机事件；工具错误也可能以 Result 返回，须检查 stop_reason 与 error。</p></details></li><li>工具读取被声明为并发安全，是否意味着任意排序都安全？<details><summary>展开推理依据</summary><p>不意味着。算法只合并连续安全区间，跨写入移动读取会改变读到的数据。</p></details></li></ol></section><div class="page-nav" data-study-page-nav></div><footer class="footer">05 · Agent Loop 与 Runner · 源码精讲与设计实作</footer></div></main></div></body></html>

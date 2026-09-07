@@ -1,0 +1,495 @@
+<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="从契约、测试到可运行代码，独立实现一个标准库最小 Agent，并逐步扩展为完整系统。"><title>10 · 独立实现你的 Agent | nanobot 学习手册</title>
+<link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="build-your-agent" data-page="overview">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="#complete-source">完整示例</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Chapter 10 · Build your own agent</p><h1>独立实现你的 Agent：从契约到可观察运行</h1><p class="lead">目标是离开任何项目源码也能动手：先规定消息如何流转，再写验收测试，最后把 Provider、工具、循环和会话组合成一个可运行程序。本章提供一套独立教学实现；它不是 nanobot 源码摘录，也不要求安装 nanobot。</p><div class="meta-row"><span class="chip">Python 3.11+ 标准库</span><span class="chip">6 个实现模块</span><span class="chip">12 个回归测试</span><span class="chip">离线确定性运行</span></div></section>
+<div class="callout"><strong>完成标志：</strong>输入 <code>add 2 3</code> 后，Provider 请求工具；Runner 校验、执行并把结果送回 Provider；最终得到 <code>Result: 5</code>。你能用 trace 解释每条消息，并证明异常有界、会话不串线、退出后可恢复。默认 ScriptedProvider 只是可预测的测试替身，没有任何真实 LLM、网络或密钥依赖，也不会读取 <code>api.txt</code>。</div>
+
+<h2 id="requirements">先写需求与不变量</h2>
+<ol><li>用户输入只经 Runner 进入历史。Provider 返回决策，不能自行执行工具。</li><li>工具名称必须来自注册表；本例只实现“恰好两个有界整数”的 schema 子集，未知工具、缺失字段、额外字段、布尔值和越界数字均返回结构化错误。</li><li>一条 assistant 工具请求包含若干 Call；每个 Call 必须且只能对应一条带相同 ID 的 tool 消息；下一次 Provider 请求前配对完整。</li><li>默认每轮最多 4 次 Provider 请求，每次最多 4 个工具调用。最后一步也先补齐工具结果，再以 <code>step_budget</code> 终止。</li><li>按 session key 分隔文件，完成一轮后原子替换 JSON。存储损坏或写入失败不能伪装成成功。</li></ol>
+<p>本章把“一轮 turn”定义为一次用户输入引发的全部模型与工具往返；“step”是其中一次 Provider 请求。Provider 返回普通文本时回合完成，返回调用时继续。这个区别决定预算的计数位置。</p>
+
+<h2 id="architecture">先定接口，再决定模块依赖</h2>
+<figure class="card diagram-scroll"><svg class="learning-diagram" viewBox="0 0 880 355" role="img" aria-labelledby="agent-architecture-title agent-architecture-desc" style="width:100%;height:auto;display:block">
+<title id="agent-architecture-title">最小 Agent 的模块与消息流</title><desc id="agent-architecture-desc">app 装配 Runner、Provider、工具注册表和 SessionStore。Runner 载入历史，向 Provider 发送消息与 schema，接收工具调用，执行工具后把带原 call ID 的结果追加到历史，直到完成并保存。</desc>
+<defs><marker id="agent-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--primary)"/></marker></defs>
+<g fill="var(--surface-2)" stroke="var(--line)" stroke-width="2"><rect x="20" y="125" width="160" height="85" rx="12"/><rect x="300" y="125" width="240" height="85" rx="12"/><rect x="660" y="20" width="195" height="80" rx="12"/><rect x="660" y="135" width="195" height="80" rx="12"/><rect x="660" y="250" width="195" height="80" rx="12"/></g>
+<g stroke="var(--primary)" stroke-width="2" fill="none" marker-end="url(#agent-arrow)"><path d="M180 165H295"/><path d="M540 145L650 65"/><path d="M660 90L545 160"/><path d="M540 180H650"/><path d="M660 200L545 195"/><path d="M540 210L650 275"/><path d="M660 300L510 215"/></g>
+<g fill="var(--text)" font-family="system-ui,sans-serif" text-anchor="middle" font-size="17"><text x="100" y="158">app.py</text><text x="100" y="184" font-size="14">装配 / CLI</text><text x="420" y="157">runner.py</text><text x="420" y="185" font-size="14">唯一执行边界 / 预算</text><text x="758" y="52">provider.py</text><text x="758" y="79" font-size="14">消息 → Reply</text><text x="758" y="167">tools.py</text><text x="758" y="194" font-size="14">Call → JSON 结果</text><text x="758" y="281">session.py</text><text x="758" y="309" font-size="14">key ↔ JSON 历史</text><text x="235" y="148" font-size="13">key + text</text><text x="399" y="55" font-size="15">contracts.py 定义 Call / Reply / Provider</text><text x="340" y="290" font-size="14">请求 → 工具结果 → 再请求 → 最终文本</text><text x="340" y="320" font-size="14">每条 tool 结果保留原始 tool_call_id</text></g></svg><figcaption>箭头表示运行数据流。静态依赖指向契约：Provider 不依赖 Runner；工具和存储不依赖 Provider；只有 app 知道具体实现。</figcaption></figure>
+<table class="source-table"><thead><tr><th>文件</th><th>公开接口</th><th>输入 / 输出与职责</th></tr></thead><tbody>
+<tr><td>contracts.py</td><td>Call、Reply、Provider</td><td>Call = id/name/arguments；Reply = content/calls。共享契约不导入业务模块。</td></tr>
+<tr><td>provider.py</td><td>async complete(messages, schemas)</td><td>接收历史副本与可用工具 schema，返回 Reply。ScriptedProvider 识别 add 指令和上一条工具结果。</td></tr>
+<tr><td>tools.py</td><td>register / schemas / execute</td><td>统一登记名称、参数声明与可调用函数。执行前验证同一份 schema；错误返回 JSON，不向模型泄露异常文本。</td></tr>
+<tr><td>runner.py</td><td>async run(key, text)</td><td>管理本轮历史、ID 集合和预算，返回 (answer, trace)。只在结束时写存储。</td></tr>
+<tr><td>session.py</td><td>load(key) / save(key, messages)</td><td>session key 经 SHA-256 变成固定文件名；验证解析后的路径仍位于存储目录；写临时文件、fsync，再 replace。</td></tr>
+<tr><td>app.py</td><td>main()</td><td>解析参数并装配具体对象。默认临时目录保证每次演示输出相同；指定 state-dir 才保留历史。</td></tr>
+</tbody></table>
+<p>消息在存储中使用普通字典，便于直接 JSON 序列化；边界决策用 dataclass，便于识别错误类型。Provider 是 Protocol，因此替换适配器只需满足一个方法，无须继承庞大的框架。工具注册表刻意只支持本章所需 schema 子集，不是通用 JSON Schema 验证器。</p>
+
+<h2 id="run">复制到任意目录，先跑出一个闭环</h2>
+<p>新建任意目录 <code>mini_agent</code>，把下方七个代码块分别保存为同名文件，也可以复制手册中的 <code>study/examples/mini_agent/</code>。六个实现文件加一个测试文件都只导入 Python 标准库和同目录模块。无需 pip、配置文件、服务器或源码路径。</p>
+<div class="code-block"><div class="code-head"><span>文件布局</span></div><pre><code>mini_agent/
+  contracts.py
+  provider.py
+  tools.py
+  runner.py
+  session.py
+  app.py
+  test_agent.py</code></pre></div>
+<p>在复制后的目录内运行（本仓库规定项目命令使用名为 nanobot 的 Conda 环境；该环境提供 Python 3.11+ 即可）：</p>
+<div class="code-block"><pre><code>conda run -n nanobot python app.py
+conda run -n nanobot python -m unittest discover -s . -v</code></pre></div>
+<p>直接从本仓库根目录运行同一示例：</p>
+<div class="code-block"><pre><code>conda run -n nanobot python study/examples/mini_agent/app.py
+conda run -n nanobot python -m unittest discover -s study/examples/mini_agent -v</code></pre></div>
+<h3>默认输出与完整事件 trace</h3><div class="code-block"><pre><code>input: add 2 3
+provider: step 1
+request: call-1 add {"a": 2, "b": 3}
+tool: add -&gt; ok
+provider: step 2
+final: Result: 5
+saved: 4 messages
+answer: Result: 5</code></pre></div>
+<p>第一步只产生请求，不是答案。Runner 看到 <code>call-1</code> 后校验 add 的参数，调用纯函数；第二步 Provider 才看到 <code>{"ok": true, "value": 5}</code> 并生成答案。trace 是可观察事件摘要；实际完整协议保存在四条历史消息里：</p>
+<div class="code-block"><pre><code>[
+  {"role":"user", "content":"add 2 3"},
+  {"role":"assistant", "content":"", "tool_calls":[
+    {"id":"call-1", "name":"add", "arguments":{"a":2,"b":3}}
+  ]},
+  {"role":"tool", "tool_call_id":"call-1", "content":"{\"ok\": true, \"value\": 5}"},
+  {"role":"assistant", "content":"Result: 5"}
+]</code></pre></div>
+<p>工具结果的 content 是 JSON 字符串，而不是嵌套消息；role 决定它是外部数据，tool_call_id 决定它回应哪个请求。不能把工具内容写成 user 或 system，否则会改变语义。遇到错误也保留配对，Provider 才有机会修正下一次调用。</p>
+<h3>观察重启恢复与会话隔离</h3><p>下面三次命令分别是独立 Python 进程。使用一个尚未存在的 <code>demo-state</code> 目录时，前两次 alice 分别打印 <code>saved: 4 messages</code> 和 <code>saved: 8 messages</code>；第二次 call ID 为 <code>call-5</code>。bob 仍从 call-1 开始并只保存 4 条消息：</p>
+<div class="code-block"><pre><code>conda run -n nanobot python app.py "add 2 3" --session alice --state-dir demo-state
+conda run -n nanobot python app.py "add 10 20" --session alice --state-dir demo-state
+conda run -n nanobot python app.py "add 8 9" --session bob --state-dir demo-state</code></pre></div>
+<p>三个答案依次是 Result: 5、Result: 30、Result: 17。重复使用已有目录时，消息计数继续增长，不应仍期待 4/8/4。文件名散列用于安全映射，不是加密；JSON 中仍保存明文 key 和内容。</p>
+
+<h2 id="acceptance">先让验收失败，再补齐实现</h2>
+<p>如果要自己练习，不要先复制实现。只保存 <code>test_agent.py</code>，执行 unittest：此时应因 contracts 尚未实现而失败。然后依次实现 contracts → tools 与 session → provider → runner → app，直到输出 <code>Ran 12 tests</code> 和 <code>OK</code>。首次导入失败只证明测试入口连通；真正的行为保证来自下面每个断言，不能把“能 import”当作完成。</p>
+<table class="source-table"><thead><tr><th>验收场景</th><th>可观察断言</th><th>它保护什么</th></tr></thead><tbody>
+<tr><td>正常工具往返</td><td>5；user/assistant/tool/assistant；ID 相同</td><td>结果被模型消费，消息顺序正确</td></tr>
+<tr><td>非法参数 / 未知工具</td><td>invalid_arguments / unknown_tool</td><td>不会把模型输出直接作为任意函数执行</td></tr>
+<tr><td>错误回传</td><td>下一次 Provider 返回 Observed: unknown_tool</td><td>错误仍是结构化 tool 结果</td></tr>
+<tr><td>步骤预算 / 批量预算</td><td>仅请求 1 步后停止；5 个调用整体拒绝</td><td>不无限循环，不先执行部分超限批次</td></tr>
+<tr><td>重复 ID / Provider 异常 / 工具异常</td><td>明确停止或 tool_error；原始异常文本不进入历史</td><td>协议完整与错误边界</td></tr>
+<tr><td>隔离 / 重启 / 损坏文件</td><td>alice 与 bob 分别读取；新 Store 读回 8 条；损坏抛错</td><td>持久化确实生效，失败不静默清空</td></tr>
+</tbody></table>
+
+<h2 id="complete-source">完整可复制源码</h2><p>每个折叠块都是完整文件，没有省略核心路径。先读接口说明再逐个展开；下载链接只是便捷入口，页面本身包含全部运行与测试源码。</p>
+<details><summary>contracts.py · 完整文件</summary><p><a href="../../examples/mini_agent/contracts.py" download>保存 contracts.py</a></p><div class="code-block"><pre><code data-source-file="contracts.py">&quot;&quot;&quot;The transport-neutral contract shared by providers and the runner.&quot;&quot;&quot;
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+Message = dict[str, Any]
+
+
+@dataclass
+class Call:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class Reply:
+    content: str = &quot;&quot;
+    calls: list[Call] = field(default_factory=list)
+
+
+class Provider(Protocol):
+    async def complete(self, messages: list[Message], schemas: list[dict]) -&gt; Reply:
+        &quot;&quot;&quot;Return final text or tool calls; never execute a tool here.&quot;&quot;&quot;
+        ...
+</code></pre></div></details>
+<details><summary>tools.py · 完整文件</summary><p><a href="../../examples/mini_agent/tools.py" download>保存 tools.py</a></p><div class="code-block"><pre><code data-source-file="tools.py">&quot;&quot;&quot;A deliberately small schema subset: exactly two bounded integer arguments.&quot;&quot;&quot;
+import json
+from copy import deepcopy
+
+
+class ToolRegistry:
+    def __init__(self):
+        self._tools = {}
+
+    def register(self, name, description, function):
+        if name in self._tools:
+            raise ValueError(&quot;duplicate tool name&quot;)
+        parameters = {
+            &quot;type&quot;: &quot;object&quot;,
+            &quot;properties&quot;: {
+                key: {&quot;type&quot;: &quot;integer&quot;, &quot;minimum&quot;: -1000000, &quot;maximum&quot;: 1000000}
+                for key in (&quot;a&quot;, &quot;b&quot;)
+            },
+            &quot;required&quot;: [&quot;a&quot;, &quot;b&quot;],
+            &quot;additionalProperties&quot;: False,
+        }
+        schema = {&quot;name&quot;: name, &quot;description&quot;: description, &quot;parameters&quot;: parameters}
+        self._tools[name] = (schema, function)
+
+    def schemas(self):
+        return [deepcopy(schema) for schema, _ in self._tools.values()]
+
+    def execute(self, call):
+        def failure(code):
+            return json.dumps({&quot;ok&quot;: False, &quot;error&quot;: code})
+        if call.name not in self._tools:
+            return failure(&quot;unknown_tool&quot;)
+        schema, function = self._tools[call.name]
+        args = call.arguments
+        parameters = schema[&quot;parameters&quot;]
+        if not isinstance(args, dict) or set(args) != set(parameters[&quot;required&quot;]):
+            return failure(&quot;invalid_arguments&quot;)
+        for key, value in args.items():
+            rule = parameters[&quot;properties&quot;][key]
+            # bool is a subclass of int in Python; exact type rejects True/False.
+            if type(value) is not int or not rule[&quot;minimum&quot;] &lt;= value &lt;= rule[&quot;maximum&quot;]:
+                return failure(&quot;invalid_arguments&quot;)
+        try:
+            return json.dumps({&quot;ok&quot;: True, &quot;value&quot;: function(**args)}, allow_nan=False)
+        except Exception:
+            return failure(&quot;tool_error&quot;)
+
+
+def make_tools():
+    registry = ToolRegistry()
+    registry.register(&quot;add&quot;, &quot;Add two integers between -1000000 and 1000000.&quot;,
+                      lambda a, b: a + b)
+    return registry
+</code></pre></div></details>
+<details><summary>session.py · 完整文件</summary><p><a href="../../examples/mini_agent/session.py" download>保存 session.py</a></p><div class="code-block"><pre><code data-source-file="session.py">&quot;&quot;&quot;Single-writer JSON persistence. Caller owns the storage directory.&quot;&quot;&quot;
+import hashlib
+import json
+import os
+import tempfile
+from pathlib import Path
+
+
+class SessionStore:
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, key):
+        if not isinstance(key, str) or not key:
+            raise ValueError(&quot;session key must be nonempty text&quot;)
+        name = hashlib.sha256(key.encode(&quot;utf-8&quot;)).hexdigest() + &quot;.json&quot;
+        path = (self.root / name).resolve()
+        if not path.is_relative_to(self.root):
+            raise ValueError(&quot;session path escapes storage directory&quot;)
+        return path
+
+    def load(self, key):
+        path = self._path(key)
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding=&quot;utf-8&quot;))
+        if (not isinstance(data, dict) or data.get(&quot;version&quot;) != 1
+                or data.get(&quot;key&quot;) != key or not isinstance(data.get(&quot;messages&quot;), list)):
+            raise ValueError(&quot;invalid session envelope&quot;)
+        for message in data[&quot;messages&quot;]:
+            if (not isinstance(message, dict)
+                    or message.get(&quot;role&quot;) not in {&quot;user&quot;, &quot;assistant&quot;, &quot;tool&quot;}
+                    or not isinstance(message.get(&quot;content&quot;), str)):
+                raise ValueError(&quot;invalid stored message&quot;)
+        return data[&quot;messages&quot;]
+
+    def save(self, key, messages):
+        path = self._path(key)
+        payload = json.dumps({&quot;version&quot;: 1, &quot;key&quot;: key, &quot;messages&quot;: messages},
+                             ensure_ascii=False, indent=2)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode=&quot;w&quot;, encoding=&quot;utf-8&quot;, dir=self.root,
+                                             suffix=&quot;.tmp&quot;, delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+</code></pre></div></details>
+<details><summary>provider.py · 完整文件</summary><p><a href="../../examples/mini_agent/provider.py" download>保存 provider.py</a></p><div class="code-block"><pre><code data-source-file="provider.py">&quot;&quot;&quot;Deterministic teaching provider. No network, model request, or credential.&quot;&quot;&quot;
+import json
+
+from contracts import Call, Reply
+
+
+class ScriptedProvider:
+    async def complete(self, messages, schemas):
+        last = messages[-1]
+        if last[&quot;role&quot;] == &quot;tool&quot;:
+            result = json.loads(last[&quot;content&quot;])
+            if result[&quot;ok&quot;]:
+                return Reply(content=f&quot;Result: {result[&#x27;value&#x27;]}&quot;)
+            return Reply(content=f&quot;Tool error: {result[&#x27;error&#x27;]}&quot;)
+        parts = last[&quot;content&quot;].split()
+        if len(parts) == 3 and parts[0] == &quot;add&quot;:
+            try:
+                a, b = int(parts[1]), int(parts[2])
+            except ValueError:
+                return Reply(content=&quot;Usage: add INTEGER INTEGER&quot;)
+            return Reply(calls=[Call(f&quot;call-{len(messages)}&quot;, &quot;add&quot;, {&quot;a&quot;: a, &quot;b&quot;: b})])
+        return Reply(content=&quot;Usage: add INTEGER INTEGER&quot;)
+</code></pre></div></details>
+<details><summary>runner.py · 完整文件</summary><p><a href="../../examples/mini_agent/runner.py" download>保存 runner.py</a></p><div class="code-block"><pre><code data-source-file="runner.py">&quot;&quot;&quot;The only module allowed to turn provider requests into tool execution.&quot;&quot;&quot;
+import asyncio
+import json
+from copy import deepcopy
+from dataclasses import asdict
+
+from contracts import Call, Provider, Reply
+
+
+class Runner:
+    def __init__(self, provider: Provider, tools, store, max_steps=4,
+                 max_calls_per_step=4, provider_timeout=5.0):
+        if max_steps &lt; 1 or max_calls_per_step &lt; 1 or provider_timeout &lt;= 0:
+            raise ValueError(&quot;budgets must be positive&quot;)
+        self.provider, self.tools, self.store = provider, tools, store
+        self.max_steps = max_steps
+        self.max_calls_per_step = max_calls_per_step
+        self.provider_timeout = provider_timeout
+
+    async def run(self, key, text):
+        messages = self.store.load(key)
+        messages.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: text})
+        trace = [f&quot;input: {text}&quot;]
+        seen_ids = {call[&quot;id&quot;] for message in messages
+                    for call in message.get(&quot;tool_calls&quot;, [])}
+
+        def finish(content):
+            messages.append({&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: content})
+            self.store.save(key, messages)
+            trace.append(f&quot;final: {content}&quot;)
+            trace.append(f&quot;saved: {len(messages)} messages&quot;)
+            return content, trace
+
+        for step in range(1, self.max_steps + 1):
+            trace.append(f&quot;provider: step {step}&quot;)
+            try:
+                reply = await asyncio.wait_for(
+                    self.provider.complete(deepcopy(messages), self.tools.schemas()),
+                    timeout=self.provider_timeout,
+                )
+            except TimeoutError:
+                return finish(&quot;Stopped: provider_timeout&quot;)
+            except Exception:
+                return finish(&quot;Stopped: provider_error&quot;)
+            if (not isinstance(reply, Reply) or not isinstance(reply.content, str)
+                    or not isinstance(reply.calls, list)):
+                return finish(&quot;Stopped: invalid_reply&quot;)
+            if not reply.calls:
+                return finish(reply.content)
+            ids = []
+            for call in reply.calls:
+                if (not isinstance(call, Call) or not isinstance(call.id, str) or not call.id
+                        or not isinstance(call.name, str) or not call.name):
+                    return finish(&quot;Stopped: invalid_tool_calls&quot;)
+                ids.append(call.id)
+            if (len(ids) &gt; self.max_calls_per_step or len(set(ids)) != len(ids)
+                    or seen_ids.intersection(ids)):
+                return finish(&quot;Stopped: invalid_tool_calls&quot;)
+            # Reject the whole invalid batch before adding a protocol record or executing.
+            seen_ids.update(ids)
+            messages.append({&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: reply.content,
+                             &quot;tool_calls&quot;: [asdict(call) for call in reply.calls]})
+            for call in reply.calls:
+                trace.append(f&quot;request: {call.id} {call.name} {json.dumps(call.arguments)}&quot;)
+                result = self.tools.execute(call)
+                messages.append({&quot;role&quot;: &quot;tool&quot;, &quot;tool_call_id&quot;: call.id, &quot;content&quot;: result})
+                status = &quot;ok&quot; if json.loads(result)[&quot;ok&quot;] else &quot;error&quot;
+                trace.append(f&quot;tool: {call.name} -&gt; {status}&quot;)
+        # Even the final allowed batch receives all tool results before stopping.
+        return finish(&quot;Stopped: step_budget&quot;)
+</code></pre></div></details>
+<details><summary>app.py · 完整文件</summary><p><a href="../../examples/mini_agent/app.py" download>保存 app.py</a></p><div class="code-block"><pre><code data-source-file="app.py">&quot;&quot;&quot;CLI composition root; copy this whole directory anywhere to run it.&quot;&quot;&quot;
+import argparse
+import asyncio
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from provider import ScriptedProvider
+from runner import Runner
+from session import SessionStore
+from tools import make_tools
+
+
+async def execute(args, root):
+    runner = Runner(ScriptedProvider(), make_tools(), SessionStore(root))
+    answer, trace = await runner.run(args.session, args.text)
+    for event in trace:
+        print(event)
+    print(&quot;answer:&quot;, answer)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(&quot;text&quot;, nargs=&quot;?&quot;, default=&quot;add 2 3&quot;)
+    parser.add_argument(&quot;--session&quot;, default=&quot;demo&quot;)
+    parser.add_argument(&quot;--state-dir&quot;, type=Path,
+                        help=&quot;Persist state here; default uses a temporary demo directory.&quot;)
+    args = parser.parse_args()
+    if args.state_dir is None:
+        with TemporaryDirectory(prefix=&quot;mini-agent-&quot;) as directory:
+            asyncio.run(execute(args, Path(directory)))
+    else:
+        asyncio.run(execute(args, args.state_dir))
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre></div></details>
+<details><summary>test_agent.py · 完整文件</summary><p><a href="../../examples/mini_agent/test_agent.py" download>保存 test_agent.py</a></p><div class="code-block"><pre><code data-source-file="test_agent.py">&quot;&quot;&quot;Run with: conda run -n nanobot python -m unittest discover -s . -v&quot;&quot;&quot;
+import asyncio
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from contracts import Call, Reply
+from provider import ScriptedProvider
+from runner import Runner
+from session import SessionStore
+from tools import make_tools
+
+
+class FixedProvider:
+    def __init__(self, reply):
+        self.reply = reply
+
+    async def complete(self, messages, schemas):
+        return self.reply
+
+
+class AgentTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.store = SessionStore(self.root)
+
+    def run_turn(self, provider=None, key=&quot;demo&quot;, text=&quot;add 2 3&quot;, **limits):
+        agent = Runner(provider or ScriptedProvider(), make_tools(), self.store, **limits)
+        return asyncio.run(agent.run(key, text))
+
+    def test_tool_round_trip_and_call_id(self):
+        answer, trace = self.run_turn()
+        self.assertEqual(answer, &quot;Result: 5&quot;)
+        messages = self.store.load(&quot;demo&quot;)
+        self.assertEqual([m[&quot;role&quot;] for m in messages],
+                         [&quot;user&quot;, &quot;assistant&quot;, &quot;tool&quot;, &quot;assistant&quot;])
+        self.assertEqual(messages[1][&quot;tool_calls&quot;][0][&quot;id&quot;], messages[2][&quot;tool_call_id&quot;])
+        self.assertEqual(json.loads(messages[2][&quot;content&quot;]), {&quot;ok&quot;: True, &quot;value&quot;: 5})
+        self.assertIn(&quot;tool: add -&gt; ok&quot;, trace)
+
+    def test_invalid_arguments_do_not_execute(self):
+        registry = make_tools()
+        for args in ({&quot;a&quot;: True, &quot;b&quot;: 3}, {&quot;a&quot;: &quot;2&quot;, &quot;b&quot;: 3}, {&quot;a&quot;: 2},
+                     {&quot;a&quot;: 2, &quot;b&quot;: 3, &quot;extra&quot;: 1}, {&quot;a&quot;: 1000001, &quot;b&quot;: 1}, []):
+            result = json.loads(registry.execute(Call(&quot;x&quot;, &quot;add&quot;, args)))
+            self.assertFalse(result[&quot;ok&quot;])
+            self.assertEqual(result[&quot;error&quot;], &quot;invalid_arguments&quot;)
+
+    def test_unknown_tool(self):
+        result = json.loads(make_tools().execute(Call(&quot;x&quot;, &quot;shell&quot;, {})))
+        self.assertEqual(result[&quot;error&quot;], &quot;unknown_tool&quot;)
+
+    def test_error_result_returns_to_provider(self):
+        class Recovering:
+            async def complete(self, messages, schemas):
+                if messages[-1][&quot;role&quot;] == &quot;tool&quot;:
+                    error = json.loads(messages[-1][&quot;content&quot;])[&quot;error&quot;]
+                    return Reply(content=&quot;Observed: &quot; + error)
+                return Reply(calls=[Call(&quot;bad-1&quot;, &quot;missing&quot;, {})])
+        answer, _ = self.run_turn(Recovering())
+        self.assertEqual(answer, &quot;Observed: unknown_tool&quot;)
+
+    def test_step_budget_closes_pending_calls(self):
+        answer, trace = self.run_turn(max_steps=1)
+        self.assertEqual(answer, &quot;Stopped: step_budget&quot;)
+        self.assertEqual(self.store.load(&quot;demo&quot;)[-2][&quot;role&quot;], &quot;tool&quot;)
+        self.assertEqual(sum(t.startswith(&quot;provider:&quot;) for t in trace), 1)
+
+    def test_call_batch_budget(self):
+        reply = Reply(calls=[Call(str(i), &quot;add&quot;, {&quot;a&quot;: 1, &quot;b&quot;: 2}) for i in range(5)])
+        answer, _ = self.run_turn(FixedProvider(reply))
+        self.assertEqual(answer, &quot;Stopped: invalid_tool_calls&quot;)
+        self.assertFalse(any(m[&quot;role&quot;] == &quot;tool&quot; for m in self.store.load(&quot;demo&quot;)))
+
+    def test_duplicate_call_id_rejected_before_execution(self):
+        call = Call(&quot;same&quot;, &quot;add&quot;, {&quot;a&quot;: 1, &quot;b&quot;: 2})
+        answer, _ = self.run_turn(FixedProvider(Reply(calls=[call, call])))
+        self.assertEqual(answer, &quot;Stopped: invalid_tool_calls&quot;)
+
+    def test_provider_exception_is_bounded(self):
+        class Broken:
+            async def complete(self, messages, schemas):
+                raise RuntimeError(&quot;private diagnostics must not enter history&quot;)
+        answer, _ = self.run_turn(Broken())
+        self.assertEqual(answer, &quot;Stopped: provider_error&quot;)
+        self.assertNotIn(&quot;private&quot;, json.dumps(self.store.load(&quot;demo&quot;)))
+
+    def test_session_isolation_and_safe_paths(self):
+        self.run_turn(key=&quot;../alice&quot;, text=&quot;add 2 3&quot;)
+        self.run_turn(key=&quot;bob&quot;, text=&quot;add 8 9&quot;)
+        self.assertEqual(self.store.load(&quot;../alice&quot;)[-1][&quot;content&quot;], &quot;Result: 5&quot;)
+        self.assertEqual(self.store.load(&quot;bob&quot;)[-1][&quot;content&quot;], &quot;Result: 17&quot;)
+        self.assertEqual(len(list(self.root.glob(&quot;*.json&quot;))), 2)
+
+    def test_restart_restores_history(self):
+        self.run_turn()
+        fresh = SessionStore(self.root)
+        self.assertEqual(fresh.load(&quot;demo&quot;), self.store.load(&quot;demo&quot;))
+        answer, _ = asyncio.run(Runner(ScriptedProvider(), make_tools(), fresh)
+                              .run(&quot;demo&quot;, &quot;add 10 20&quot;))
+        self.assertEqual(answer, &quot;Result: 30&quot;)
+        self.assertEqual(len(fresh.load(&quot;demo&quot;)), 8)
+
+    def test_corrupt_file_is_not_silently_reset(self):
+        self.run_turn()
+        next(self.root.glob(&quot;*.json&quot;)).write_text(&quot;{broken&quot;, encoding=&quot;utf-8&quot;)
+        with self.assertRaises(ValueError):
+            self.store.load(&quot;demo&quot;)
+
+    def test_tool_exception_becomes_error(self):
+        registry = make_tools()
+        def broken(a, b):
+            raise RuntimeError(&quot;private&quot;)
+        registry.register(&quot;broken&quot;, &quot;fail for testing&quot;, broken)
+        result = json.loads(registry.execute(Call(&quot;x&quot;, &quot;broken&quot;, {&quot;a&quot;: 1, &quot;b&quot;: 2})))
+        self.assertEqual(result, {&quot;ok&quot;: False, &quot;error&quot;: &quot;tool_error&quot;})
+
+
+if __name__ == &quot;__main__&quot;:
+    unittest.main()
+</code></pre></div></details>
+
+<h2 id="tradeoffs">实现中的取舍与故障边界</h2>
+<ol><li><strong>协议先验证，副作用后执行。</strong>重复 ID、空 ID 或超大调用批次在写入 assistant 请求前整体拒绝；已接纳的每条调用包括未知工具、非法参数都补一条结果。seen_ids 覆盖已有历史，避免后续回合复用 ID。</li>
+<li><strong>预算有多个维度。</strong>示例限制 Provider 步数、单步工具数和 Provider 等待时间（5 秒），正常最多执行 16 个工具。本地工具同步执行，只适用于这里的短小纯计算；它没有通用工具超时、token 预算或输出字节预算，不能据此宣称任意插件都安全。</li>
+<li><strong>错误分层。</strong>参数与工具失败进入 tool 消息；Provider 异常/超时变成停止文本并保存；存储损坏和写入失败向调用者抛出，因为没有可靠落盘时不能报告成功。CancelledError 不被 Exception 捕获，取消会继续向上传播。</li>
+<li><strong>完成时提交。</strong>临时文件 flush + fsync + replace 防止半个 JSON 覆盖旧状态；取消或进程在提交前退出会丢失当前轮。此演示没有目录 fsync、日志恢复或事务数据库，不能保证断电后的全部持久性，也没有跨进程锁。同一个目录只允许单写入者；持久化头部和消息角色检查不等于验证所有历史协议。</li>
+<li><strong>隔离不等于鉴权。</strong>散列文件名与 resolve 检查防止把 session key 当路径；真实 Channel 还必须由可信身份构造 key，不能让客户指定别人的 key。存储目录应只由服务账户控制。</li>
+<li><strong>测试替身使流程可重复。</strong>ScriptedProvider 不理解任意自然语言，不证明真实模型准确率。它只让协议、循环和失败条件可以离线复现；真实模型的质量需要另做评测。当前 Runner 将没有工具调用的 Reply 视为完成，即使 content 是空字符串；若产品需要可见答案，应在 Provider 适配器或 Runner 增加“空文本有限重试/明确失败”的语义策略，并测试次数耗尽后的反馈，不能无限重试。</li></ol>
+
+<h2 id="iterations">六轮迭代：把最小闭环扩展为自己的系统</h2>
+<p>每轮先写以下验收，再按参考设计动手。所有任务均从本页接口出发，不需要寻找 nanobot 的实现；本节描述的是待做扩展，未包含在默认示例中。</p>
+<ol>
+<li><h3>迭代 1：接入真实网络 Provider</h3><p><strong>目标：</strong>Runner 与 tools 不变，把 ScriptedProvider 替换成一个 HTTP 适配器。先用伪造 HTTP 响应测试，再选择真实服务。</p><details><summary>逐步参考设计与验收</summary><p>① 给适配器注入 transport、endpoint 和密钥读取函数；真实凭据只在需要时从受控文件或环境读取，不能写入历史与日志。② 请求中模型 ID 固定为 <code>deepseek-v4-flash</code>；把内部 Call 映射成服务端 function tool 格式。③ 检查 HTTP 状态、响应类型、tool name、call ID，并显式 JSON 解码 arguments；非法 JSON 作为 Provider 协议错误结束。④ 设置连接/读取超时，仅对适合重试的失败做有限退避；区分连接失败与响应丢失，避免盲目重试有副作用的操作。⑤ 建立测例：fake transport 检查模型 ID 和 schema；200 + tool_calls 经 Runner 得到对应 tool_call_id；429 后成功最多尝试约定次数；坏 JSON/超时都有限结束。验收日志只含状态和 request ID，不含密钥。默认测试仍全部离线。</p></details></li>
+<li><h3>迭代 2：添加 Channel 与消息总线</h3><p><strong>目标：</strong>让控制台输入和另一种渠道共享同一个 Runner，同时保证同会话串行。</p><details><summary>逐步参考设计与验收</summary><p>① 定义 Inbound(channel, account, chat, sender, text, event_id) 与 Outbound(target, text, reply_to)。② Channel 只做校验、身份映射、入队和发送；由可信字段构造稳定 session key，别直接信任客户端传入的 key。③ 用有界 asyncio.Queue 吸收消息；消费者从队列分配任务，用每个 key 一把 Lock，跨 key 可并行。④ outbound 保存原路由，不从模型输出推断接收人。⑤ 测试两渠道各发一条消息，答案回到各自目标；同 key 的两个延迟请求按序追加；一个慢 key 不阻塞其他 key；队列满时显示明确背压行为。若要多进程消费，升级存储事务与锁后再启用。</p></details></li>
+<li><h3>迭代 3：上下文压缩与长期记忆</h3><p><strong>目标：</strong>限制发送给 Provider 的历史长度，同时保留可追溯的完整记录。</p><details><summary>逐步参考设计与验收</summary><p>① 把完整事件日志与“本轮发送视图”分开；只压缩已完成的整轮，不能切断 assistant/tool 配对。② 用字符估算器先实现阈值，并为响应和工具结果预留预算；以后换 tokenizer，不改变策略接口。③ 保存 summary、covered_until、source_message_ids 和版本，原始日志不删除。④ 长期记忆单独保存可复用事实及来源，不把临时工具输出自动升格为系统指令。⑤ 构造 100 轮历史，确认上下文低于阈值、最新问题和整组调用仍在；压缩失败时不提交覆盖范围；重启读回同一摘要；alice 记忆永不进入 bob 的请求。用假 summarizer 测结构，再为真实摘要质量设计评测。</p></details></li>
+<li><h3>迭代 4：后台任务与 cron 调度</h3><p><strong>目标：</strong>用户能登记稍后执行的任务，不占用当前对话回合等待。</p><details><summary>逐步参考设计与验收</summary><p>① 定义 Job(id, owner, payload, due_at_utc, status, attempts, idempotency_key)，先支持单次到期；周期规则是后续适配层。② 工具只创建 Job 并返回 job ID，调度器另行领取与执行。③ 状态按 pending → running → succeeded/failed/cancelled 转移，持久化租约用于崩溃后重新领取。④ 结果通过 outbound 投递到原拥有者，给投递设去重键；不要宣称仅靠重试能实现 exactly-once。⑤ 用可注入时钟测试未到期不执行、到期只领取一次、进程重启恢复 pending、同一次投递重复尝试能去重；失败次数耗尽进入 failed。时区显示与内部 UTC 计算分离。</p></details></li>
+<li><h3>迭代 5：受限 subagent</h3><p><strong>目标：</strong>父任务拆出独立子任务，得到结构化结果，而不是共享一个可任意修改的历史列表。</p><details><summary>逐步参考设计与验收</summary><p>① 定义 ChildTask(id, parent_id, objective, depth, deadline, allowed_tools)，创建独立 session key 与最小上下文快照。② 子 Runner 只获得工具白名单，并设置并发数、最大深度和共享总预算。③ spawn 立即返回 ID，子任务完成后发布一次 Result(id, status, content)，父 Agent 在安全边界消费。④ 父子写各自记录，不共用可变消息对象；总预算采用原子扣减，防止并行倍增费用。⑤ 测试两个子任务互不见历史、无权限工具被拒绝、深度超限不创建、父任务终止能取消子任务、重复完成事件不重复注入。</p></details></li>
+<li><h3>迭代 6：取消、超时与工具安全</h3><p><strong>目标：</strong>从纯加法扩展到有副作用工具前，建立可测试的授权与生命周期边界。</p><details><summary>逐步参考设计与验收</summary><p>① 维护 session → 当前 task 的映射，控制命令走优先入口；取消后仍在 finally 释放锁并更新任务状态，不能吞掉 CancelledError。② 对网络调用配置超时，对不可协作取消的阻塞任务使用受控子进程；取消 asyncio 包装器并不等于停止后台线程。③ 文件工具先 resolve 并检查 allowed root，拒绝路径穿越与符号链接逃逸；网络工具先验证目标地址并在重定向后重新检查，禁止访问私网/元数据地址；shell 需要单独隔离和最小权限。④ 有副作用动作在模型请求之外执行权限/确认策略，并使用幂等键与审计事件；工具文本始终作为不可信数据。⑤ 测试取消慢 Provider 后不会执行下一工具；取消后同 key 可以再次运行；越界路径、重定向到内网、未授权写操作都在副作用前拒绝；一次已提交副作用在响应丢失重试时不会重复。此能力完成前只开放本例短小纯函数工具。</p></details></li>
+</ol>
+
+<h2 id="finish">提交你自己的实现</h2><p>最终交付应包含一张模块图、一份消息契约、可运行入口、结构化 trace，以及证明不变量的回归测试。先让 12 个基础测试通过，再为每个已实现迭代加入可观察验收；没有实现的能力应在 README 明确列出。通过这些步骤，你已经掌握构建类似 Agent 的设计方法，不需要以阅读项目源码为先决条件。</p>
+<div class="callout warning"><strong>本示例的生产能力边界：</strong>尚未实现真实网络 Provider、流式输出、Channel/bus、身份认证、并发写入、token 成本控制、上下文压缩、长期记忆、cron、subagent、完整取消恢复、文件/网络/shell 沙箱、日志脱敏系统或可观测平台。默认的 12 项回归验证的是离线教学闭环，不是生产安全认证。</div>
+<p>可继续回看手册中的 <a href="../05-agent-loop/index.html">核心循环</a>、<a href="../02-llm-provider-gateway/index.html">Provider 与网关</a>、<a href="../03-memory-system/index.html">记忆系统</a>、<a href="../07-subagent-system/index.html">子 Agent</a>、<a href="../08-automation-system/index.html">自动化系统</a>，对照自己的模块边界。</p>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">10 · 独立实现你的 Agent · 综合实作</footer></div></main></div></body></html>

@@ -1,0 +1,299 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Cron 与 Heartbeat 自动化：当前源码连续摘录、数据流程、状态演算和模块实现练习"><title>08 · Cron 与 Heartbeat 自动化 · 源码精讲与设计实作 | nanobot 学习手册</title><link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script></head><body data-study-root="../.." data-chapter="automation-system" data-page="workshop"><header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="index.html">章节总览</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header><div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div><section class="hero"><p class="eyebrow">Chapter 08 · Source workshop</p><h1>Cron 与 Heartbeat 自动化：源码精讲与设计实作</h1><p class="lead">理解定时任务必须先算出时间线：谁决定下一次时间，任务耗时算不算在间隔里，失败后是否还会再跑，以及执行后为何可能保持静默。</p><div class="meta-row"><a class="chip" href="#contract">输入输出契约</a><a class="chip" href="#dataflow">模块数据流图</a><a class="chip" href="#source-walkthrough">核心源码精讲</a><a class="chip" href="#build-it">动手设计与验收</a></div></section><div class="callout"><strong>使用方法：</strong>先遮住后面的演算结果，写出每一步进入和离开的数据，再读连续源码核对。摘录来自当前工作区；行号指原文件，代码块未插入讲解行。练习使用假 Provider、假时钟或内存队列，无需 API 凭据；若自行接入项目真实模型，须使用 <code>deepseek-v4-flash</code>，项目命令在 Conda <code>nanobot</code> 环境执行。</div><section id="contract"><h2>先约定谁持有数据、谁可以改变数据</h2><p>Cron 的调度规则是确定数据，Heartbeat 的任务决策是结构化模型结果。两者都需要把执行事实与用户通知分开。</p><div class="table-wrap"><table class="source-table"><thead><tr><th>进入 / 离开边界</th><th>数据形状与示例</th><th>所有权、约束与失败表现</th></tr></thead><tbody><tr><td>用户工具→服务</td><td>CronSchedule(kind,at_ms,every_ms,expr,tz)</td><td>内部统一毫秒；cron 时区显式；不可计算 next 返回 None。</td></tr><tr><td>服务→回调</td><td>CronJob(payload.message,channel,to,session_key,deliver)</td><td>回调解释任务并选择运行方式；调度器本身不执行模型推理。</td></tr><tr><td>回调→状态</td><td>last_status、last_error、last_run_at_ms、RunRecord</td><td>普通异常记 error；无回调或无异常返回仍可记 ok。</td></tr><tr><td>时间→队列</td><td>enabled && next_run_at_ms && now>=next</td><td>到期集合是本次 tick 快照，串行处理可能延迟其他任务。</td></tr><tr><td>Heartbeat→决策 / 交付</td><td>(action,tasks) → response → should_notify</td><td>只有 run 执行；空/不可交付/评估拒绝均不通知。</td></tr></tbody></table></div></section><section id="dataflow"><h2>沿箭头追踪数据，而非只记函数名</h2><figure><div class="diagram-scroll"><svg class="learning-diagram" viewBox="0 0 900 390" role="img" aria-labelledby="cron-title cron-desc" xmlns="http://www.w3.org/2000/svg"><title id="cron-title">CronTool / 配置的数据与失败路径</title><desc id="cron-desc">文字等价：输入 schedule 和 payload 后计算 next_run_at_ms；计时器醒来选出到期 jobs，按顺序 await on_job；成功或普通异常均形成状态与历史记录；every/cron 在执行结束附近重算 next，at 删除或禁用。时间参数不可计算时得到 None，不进入到期集合。Heartbeat 则先以虚拟工具作 run/skip 决策，执行结果还需通过交付判定。</desc><style>.learning-diagram{width:100%;height:auto;display:block;--d-bg:#f1f5f9;--d-fg:#18324c;--d-line:#45627b;--d-error:#b23b46}[data-theme="dark"] .learning-diagram{--d-bg:#172538;--d-fg:#e0ecf8;--d-line:#9cbbd5;--d-error:#ff9c9c}@media(prefers-color-scheme:dark){html:not([data-theme="light"]) .learning-diagram{--d-bg:#172538;--d-fg:#e0ecf8;--d-line:#9cbbd5;--d-error:#ff9c9c}}.learning-diagram rect{fill:var(--d-bg);stroke:var(--d-line);stroke-width:1.5}.learning-diagram text{fill:var(--d-fg);font:14px system-ui,sans-serif;text-anchor:middle}.learning-diagram .node-title{font-size:17px;font-weight:650}.learning-diagram .edge{fill:none;stroke:var(--d-line);stroke-width:2;marker-end:url(#cron-arrow)}.learning-diagram .error-edge{fill:none;stroke:var(--d-error);stroke-width:2;stroke-dasharray:6 4;marker-end:url(#cron-error)}.learning-diagram .error-text{fill:var(--d-error)}</style><defs><marker id="cron-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--d-line)"/></marker><marker id="cron-error" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--d-error)"/></marker></defs><rect x="25" y="35" width="210" height="85" rx="12"/><text class="node-title" x="130" y="68">CronTool / 配置</text><text x="130" y="96">schedule + payload</text><rect x="345" y="35" width="210" height="85" rx="12"/><text class="node-title" x="450" y="68">计算下一次</text><text x="450" y="96">next_run_at_ms</text><rect x="665" y="35" width="210" height="85" rx="12"/><text class="node-title" x="770" y="68">计时器唤醒</text><text x="770" y="96">now_ms + jobs</text><rect x="665" y="225" width="210" height="85" rx="12"/><text class="node-title" x="770" y="258">逐个回调</text><text x="770" y="286">await on_job(job)</text><rect x="345" y="225" width="210" height="85" rx="12"/><text class="node-title" x="450" y="258">记录执行</text><text x="450" y="286">start/end/status/history</text><rect x="25" y="225" width="210" height="85" rx="12"/><text class="node-title" x="130" y="258">重排或结束</text><text x="130" y="286">every/cron → next；at终止</text><path class="edge" d="M235 78H345"/><text x="290" y="60">CronJob</text><path class="edge" d="M555 78H665"/><text x="610" y="60">next_wake</text><path class="edge" d="M770 120V225"/><text x="787" y="175">due_jobs</text><path class="edge" d="M665 268H555"/><text x="610" y="250">结果 / 异常</text><path class="edge" d="M345 268H235"/><text x="290" y="250">更新 state</text><path class="error-edge" d="M450 120V165H130V225"/><text class="error-text" x="310" y="155">时间无效 → next=None</text><path class="edge" d="M130 310V345H890V10H770V35"/><text x="525" y="373">next_run_at_ms → 重新设置计时器 → 下一 tick</text></svg></div><figcaption>文字等价：输入 schedule 和 payload 后计算 next_run_at_ms；计时器醒来选出到期 jobs，按顺序 await on_job；成功或普通异常均形成状态与历史记录；every/cron 在执行结束附近重算 next，at 删除或禁用。时间参数不可计算时得到 None，不进入到期集合。Heartbeat 则先以虚拟工具作 run/skip 决策，执行结果还需通过交付判定。</figcaption></figure></section><section id="source-walkthrough"><h2>当前源码逐段精讲</h2><article class="source-excerpt" id="guide-nanobot-cron-types-py-7"><h3>1. 把何时、做什么、上次怎样分成三份数据</h3><p>定时任务如果只保存一段自然语言，就无法稳定判断下一次触发和上次失败。这里用三个数据对象表达。</p><div class="code-block" id="nanobot-cron-types-py-7" data-guide="guide-nanobot-cron-types-py-7" data-source="nanobot/cron/types.py" data-start="7" data-end="64" data-symbol="CronSchedule / CronPayload / CronJobState / CronJob"><div class="code-head"><span>当前源码原文：nanobot/cron/types.py · CronSchedule / CronPayload / CronJobState / CronJob · 第 7–64 行（连续摘录）</span></div><pre><code>@dataclass
+class CronSchedule:
+    &quot;&quot;&quot;Schedule definition for a cron job.&quot;&quot;&quot;
+    kind: Literal[&quot;at&quot;, &quot;every&quot;, &quot;cron&quot;]
+    # For &quot;at&quot;: timestamp in ms
+    at_ms: int | None = None
+    # For &quot;every&quot;: interval in ms
+    every_ms: int | None = None
+    # For &quot;cron&quot;: cron expression (e.g. &quot;0 9 * * *&quot;)
+    expr: str | None = None
+    # Timezone for cron expressions
+    tz: str | None = None
+
+
+@dataclass
+class CronPayload:
+    &quot;&quot;&quot;What to do when the job runs.&quot;&quot;&quot;
+    kind: Literal[&quot;system_event&quot;, &quot;agent_turn&quot;] = &quot;agent_turn&quot;
+    message: str = &quot;&quot;
+    # Deliver response to channel
+    deliver: bool = False
+    channel: str | None = None  # e.g. &quot;whatsapp&quot;
+    to: str | None = None  # e.g. phone number
+    channel_meta: dict = field(default_factory=dict)  # channel-specific routing (e.g. Slack thread_ts)
+    session_key: str | None = None  # original session key for correct session recording
+
+
+@dataclass
+class CronRunRecord:
+    &quot;&quot;&quot;A single execution record for a cron job.&quot;&quot;&quot;
+    run_at_ms: int
+    status: Literal[&quot;ok&quot;, &quot;error&quot;, &quot;skipped&quot;]
+    duration_ms: int = 0
+    error: str | None = None
+
+
+@dataclass
+class CronJobState:
+    &quot;&quot;&quot;Runtime state of a job.&quot;&quot;&quot;
+    next_run_at_ms: int | None = None
+    last_run_at_ms: int | None = None
+    last_status: Literal[&quot;ok&quot;, &quot;error&quot;, &quot;skipped&quot;] | None = None
+    last_error: str | None = None
+    run_history: list[CronRunRecord] = field(default_factory=list)
+
+
+@dataclass
+class CronJob:
+    &quot;&quot;&quot;A scheduled job.&quot;&quot;&quot;
+    id: str
+    name: str
+    enabled: bool = True
+    schedule: CronSchedule = field(default_factory=lambda: CronSchedule(kind=&quot;every&quot;))
+    payload: CronPayload = field(default_factory=CronPayload)
+    state: CronJobState = field(default_factory=CronJobState)
+    created_at_ms: int = 0
+    updated_at_ms: int = 0
+    delete_after_run: bool = False</code></pre></div><ol><li>CronSchedule 的 kind 选择 at/every/cron；时间戳与间隔单位都是毫秒，cron 另含表达式和时区。</li><li>CronPayload 保存任务文本、投递开关、渠道目标及 session_key；执行时使用的路由不应从任务正文猜测。</li><li>CronJobState 保存 next/last 时间、status/error 与 run_history；CronJob 将三者与 enabled、delete_after_run 组合。</li></ol><p><strong>取舍与异常边界：</strong>dataclass 类型声明是结构说明，不能替代运行时 schedule 校验。deliver 控制交付意图，不代表只要 callback 返回就真的有用户通知。</p></article><article class="source-excerpt" id="guide-nanobot-cron-service-py-31"><h3>2. “下一次”相对于哪个 now</h3><p>这段纯计算决定时间语义。尤其 every 是从传入 now 往后加间隔，不是强制落在固定墙钟网格上。</p><div class="code-block" id="nanobot-cron-service-py-31" data-guide="guide-nanobot-cron-service-py-31" data-source="nanobot/cron/service.py" data-start="31" data-end="57" data-symbol="_compute_next_run"><div class="code-head"><span>当前源码原文：nanobot/cron/service.py · _compute_next_run · 第 31–57 行（连续摘录）</span></div><pre><code>def _compute_next_run(schedule: CronSchedule, now_ms: int) -&gt; int | None:
+    &quot;&quot;&quot;Compute next run time in ms.&quot;&quot;&quot;
+    if schedule.kind == &quot;at&quot;:
+        return schedule.at_ms if schedule.at_ms and schedule.at_ms &gt; now_ms else None
+
+    if schedule.kind == &quot;every&quot;:
+        if not schedule.every_ms or schedule.every_ms &lt;= 0:
+            return None
+        # Next interval from now
+        return now_ms + schedule.every_ms
+
+    if schedule.kind == &quot;cron&quot; and schedule.expr:
+        try:
+            from zoneinfo import ZoneInfo
+
+            from croniter import croniter
+            # Use caller-provided reference time for deterministic scheduling
+            base_time = now_ms / 1000
+            tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
+            base_dt = datetime.fromtimestamp(base_time, tz=tz)
+            cron = croniter(schedule.expr, base_dt)
+            next_dt = cron.get_next(datetime)
+            return int(next_dt.timestamp() * 1000)
+        except Exception:
+            return None
+
+    return None</code></pre></div><ol><li>at 只接受严格晚于 now 的 at_ms；已经等于或过去时返回 None。</li><li>every 要求正间隔，直接 now_ms+every_ms；因此传入执行结束时间会造成完成后再等待一个间隔。</li><li>cron 将毫秒转秒，使用指定时区或本地时区创建 base datetime，让 croniter 求严格后继；异常与不支持输入返回 None。</li></ol><p><strong>取舍与异常边界：</strong>None 代表没有可运行时间，不等于立刻执行。每次计算使用注入的 now 便于确定性测试；但服务层仍使用系统时钟，需要在测试中替换时钟。</p></article><article class="source-excerpt" id="guide-nanobot-cron-service-py-355"><h3>3. 单个计时器、到期快照与串行执行</h3><p>服务不为每个任务启动一个永远循环的协程，而是寻找最近唤醒时间，到点重新装载任务并选出到期项。</p><div class="code-block" id="nanobot-cron-service-py-355" data-guide="guide-nanobot-cron-service-py-355" data-source="nanobot/cron/service.py" data-start="355" data-end="418" data-symbol="CronService._arm_timer / _on_timer"><div class="code-head"><span>当前源码原文：nanobot/cron/service.py · CronService._arm_timer / _on_timer · 第 355–418 行（连续摘录）</span></div><pre><code>    def _recompute_next_runs(self) -&gt; None:
+        &quot;&quot;&quot;Recompute next run times for all enabled jobs.&quot;&quot;&quot;
+        if not self._store:
+            return
+        now = _now_ms()
+        for job in self._store.jobs:
+            if job.enabled:
+                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+
+    def _get_next_wake_ms(self) -&gt; int | None:
+        &quot;&quot;&quot;Get the earliest next run time across all jobs.&quot;&quot;&quot;
+        if not self._store:
+            return None
+        times = [j.state.next_run_at_ms for j in self._store.jobs
+                 if j.enabled and j.state.next_run_at_ms]
+        return min(times) if times else None
+
+    def _arm_timer(self) -&gt; None:
+        &quot;&quot;&quot;Schedule the next timer tick.&quot;&quot;&quot;
+        if self._timer_task:
+            self._timer_task.cancel()
+
+        if not self._running:
+            return
+
+        next_wake = self._get_next_wake_ms()
+        if next_wake is None:
+            delay_ms = self.max_sleep_ms
+        else:
+            delay_ms = min(self.max_sleep_ms, max(0, next_wake - _now_ms()))
+        delay_s = delay_ms / 1000
+
+        async def tick():
+            await asyncio.sleep(delay_s)
+            if self._running:
+                await self._on_timer()
+
+        self._timer_task = asyncio.create_task(tick())
+
+    async def _on_timer(self) -&gt; None:
+        &quot;&quot;&quot;Handle timer tick - run due jobs.&quot;&quot;&quot;
+        self._load_store()
+        # If a hot reload found a corrupt store on disk, ``self._store`` may
+        # still hold the previous, known-good in-memory snapshot.  Keep using
+        # it rather than crashing the timer or wiping live jobs.
+        if not self._store:
+            self._arm_timer()
+            return
+
+        self._timer_active = True
+        try:
+            now = _now_ms()
+            due_jobs = [
+                j for j in self._store.jobs
+                if j.enabled and j.state.next_run_at_ms and now &gt;= j.state.next_run_at_ms
+            ]
+
+            for job in due_jobs:
+                await self._execute_job(job)
+
+            self._save_store()
+        finally:
+            self._timer_active = False
+        self._arm_timer()</code></pre></div><ol><li>_recompute_next_runs 对启用任务按当前 now 重新计算；_get_next_wake_ms 找最小 next。_arm_timer 取消旧计时器，用 max_sleep_ms 限制最长睡眠。</li><li>tick 睡眠后检查 _running；_on_timer 热重载 store，若没有可用 store 则重新设定计时器后返回。热重载发现损坏时可能保留之前有效内存快照。</li><li>将此刻满足 enabled 且 next≤now 的任务固定为 due_jobs，然后按列表顺序 await；执行完保存 store，finally 清理 _timer_active，正常路径再重新 arm。</li></ol><p><strong>取舍与异常边界：</strong>同一批任务串行，慢任务会推迟后续任务；执行期间新到期的任务要等下一 tick。finally 只清理标记，_arm_timer 在 finally 之后，不能声称任何未捕获异常后都一定重新排期。</p></article><article class="source-excerpt" id="guide-nanobot-cron-service-py-420"><h3>4. 错误也记录历史，一次任务也会消费触发机会</h3><p>任务回调返回或抛异常后，服务仍要更新状态并决定还有没有下一次。</p><div class="code-block" id="nanobot-cron-service-py-420" data-guide="guide-nanobot-cron-service-py-420" data-source="nanobot/cron/service.py" data-start="420" data-end="459" data-symbol="CronService._execute_job"><div class="code-head"><span>当前源码原文：nanobot/cron/service.py · CronService._execute_job · 第 420–459 行（连续摘录）</span></div><pre><code>    async def _execute_job(self, job: CronJob) -&gt; None:
+        &quot;&quot;&quot;Execute a single job.&quot;&quot;&quot;
+        start_ms = _now_ms()
+        logger.info(&quot;Cron: executing job &#x27;{}&#x27; ({})&quot;, job.name, job.id)
+
+        try:
+            if self.on_job:
+                await self.on_job(job)
+
+            job.state.last_status = &quot;ok&quot;
+            job.state.last_error = None
+            logger.info(&quot;Cron: job &#x27;{}&#x27; completed&quot;, job.name)
+
+        except Exception as e:
+            job.state.last_status = &quot;error&quot;
+            job.state.last_error = str(e)
+            logger.exception(&quot;Cron: job &#x27;{}&#x27; failed&quot;, job.name)
+
+        end_ms = _now_ms()
+        job.state.last_run_at_ms = start_ms
+        job.updated_at_ms = end_ms
+
+        job.state.run_history.append(CronRunRecord(
+            run_at_ms=start_ms,
+            status=job.state.last_status,
+            duration_ms=end_ms - start_ms,
+            error=job.state.last_error,
+        ))
+        job.state.run_history = job.state.run_history[-self._MAX_RUN_HISTORY:]
+
+        # Handle one-shot jobs
+        if job.schedule.kind == &quot;at&quot;:
+            if job.delete_after_run:
+                self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
+            else:
+                job.enabled = False
+                job.state.next_run_at_ms = None
+        else:
+            # Compute next run
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())</code></pre></div><ol><li>start_ms 在调用前记录；有 on_job 才 await，否则仍设置 last_status=ok。普通异常转为 error/last_error，不向外继续抛。</li><li>end_ms 记录完成时刻；last_run_at_ms 使用开始时间，updated_at_ms 使用结束时间。run_history 追加一次记录，并只保留末尾上限条数。</li><li>at 任务根据 delete_after_run 删除或禁用；这个分支不检查成功状态，所以失败的一次任务也不会自动保留待重试。周期任务用结束附近的新 now 计算下一次。</li></ol><p><strong>取舍与异常边界：</strong>这个状态代表调度回调是否抛异常，不是独立的业务正确性判定。回调返回错误字符串仍可能标记 ok；任务副作用成功而保存失败也不构成 exactly-once。</p></article><article class="source-excerpt" id="guide-nanobot-heartbeat-service-py-87"><h3>5. Heartbeat 用虚拟工具决定是否执行</h3><p>与 Cron 的确定时间触发不同，Heartbeat 先读任务文件，再让模型做结构化 skip/run 决策。</p><div class="code-block" id="nanobot-heartbeat-service-py-87" data-guide="guide-nanobot-heartbeat-service-py-87" data-source="nanobot/heartbeat/service.py" data-start="87" data-end="116" data-symbol="HeartbeatService._decide"><div class="code-head"><span>当前源码原文：nanobot/heartbeat/service.py · HeartbeatService._decide · 第 87–116 行（连续摘录）</span></div><pre><code>    async def _decide(self, content: str) -&gt; tuple[str, str]:
+        &quot;&quot;&quot;Phase 1: ask LLM to decide skip/run via virtual tool call.
+
+        Returns (action, tasks) where action is &#x27;skip&#x27; or &#x27;run&#x27;.
+        &quot;&quot;&quot;
+        from nanobot.utils.helpers import current_time_str
+
+        response = await self.provider.chat_with_retry(
+            messages=[
+                {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;You are a heartbeat agent. Call the heartbeat tool to report your decision.&quot;},
+                {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: (
+                    f&quot;Current Time: {current_time_str(self.timezone)}\n\n&quot;
+                    &quot;Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n&quot;
+                    f&quot;{content}&quot;
+                )},
+            ],
+            tools=_HEARTBEAT_TOOL,
+            model=self.model,
+        )
+
+        if not response.should_execute_tools:
+            if response.has_tool_calls:
+                logger.warning(
+                    &quot;Ignoring heartbeat tool calls under finish_reason=&#x27;{}&#x27;&quot;,
+                    response.finish_reason,
+                )
+            return &quot;skip&quot;, &quot;&quot;
+
+        args = response.tool_calls[0].arguments
+        return args.get(&quot;action&quot;, &quot;skip&quot;), args.get(&quot;tasks&quot;, &quot;&quot;)</code></pre></div><ol><li>构造 system 指令和带当前时间、HEARTBEAT.md 内容的 user 消息；模型请求携带 _HEARTBEAT_TOOL schema 和 self.model。</li><li>should_execute_tools 为假就返回 skip，即使响应里附带不可执行的 tool_calls 也不采纳。这里并不搜索自由文本中的某个成功标记。</li><li>从首个工具调用 arguments 提取 action/tasks，缺字段采用 skip/空串；实际执行由下一阶段只接受 action==run 决定。</li></ol><p><strong>取舍与异常边界：</strong>schema 提示 action 的可选值，但本段没有对工具名和所有字段做完整后置验证。不得把描述文字宣称为强制完整校验；练习可以显式增强验证并标明是练习方案。</p></article><article class="source-excerpt" id="guide-nanobot-heartbeat-service-py-184"><h3>6. 决定执行不等于决定通知</h3><p>静默检查场景必须区分“有事情可做”和“有值得通知用户的结果”。</p><div class="code-block" id="nanobot-heartbeat-service-py-184" data-guide="guide-nanobot-heartbeat-service-py-184" data-source="nanobot/heartbeat/service.py" data-start="184" data-end="226" data-symbol="HeartbeatService._tick"><div class="code-head"><span>当前源码原文：nanobot/heartbeat/service.py · HeartbeatService._tick · 第 184–226 行（连续摘录）</span></div><pre><code>    async def _tick(self) -&gt; None:
+        &quot;&quot;&quot;Execute a single heartbeat tick.&quot;&quot;&quot;
+        from nanobot.utils.evaluator import evaluate_response
+
+        content = self._read_heartbeat_file()
+        if not content:
+            logger.debug(&quot;Heartbeat: HEARTBEAT.md missing or empty&quot;)
+            return
+
+        logger.info(&quot;Heartbeat: checking for tasks...&quot;)
+
+        try:
+            action, tasks = await self._decide(content)
+
+            if action != &quot;run&quot;:
+                logger.info(&quot;Heartbeat: OK (nothing to report)&quot;)
+                return
+
+            logger.info(&quot;Heartbeat: tasks found, executing...&quot;)
+            if self.on_execute:
+                response = await self.on_execute(tasks)
+
+                if not response:
+                    logger.info(&quot;Heartbeat: no response from execution&quot;)
+                    return
+
+                if not self._is_deliverable(response):
+                    logger.info(
+                        &quot;Heartbeat: suppressed non-deliverable response ({})&quot;,
+                        response[:80],
+                    )
+                    return
+
+                should_notify = await evaluate_response(
+                    response, tasks, self.provider, self.model,
+                )
+                if should_notify and self.on_notify:
+                    logger.info(&quot;Heartbeat: completed, delivering response&quot;)
+                    await self.on_notify(response)
+                else:
+                    logger.info(&quot;Heartbeat: silenced by post-run evaluation&quot;)
+        except Exception:
+            logger.exception(&quot;Heartbeat execution failed&quot;)</code></pre></div><ol><li>文件不存在或为空直接返回；_decide 返回非 run 也直接结束，不执行 on_execute。</li><li>有执行回调时运行 tasks；空响应和 _is_deliverable 判定的内部输出不继续投递。</li><li>evaluate_response 再判断是否值得通知；只有 should_notify 且 on_notify 存在才发送。任何普通异常在此记录失败日志。</li></ol><p><strong>取舍与异常边界：</strong>Heartbeat 是决策→执行→交付判定的流程，可能有多次 LLM 调用，全部应继承规定模型。手动 trigger_now 的路径较短，不能把 _tick 的通知过滤套用到所有入口。</p></article><article class="source-excerpt" id="guide-nanobot-agent-tools-cron-py-134"><h3>7. 运行上下文防止定时任务不断创建自己</h3><p>面向模型的 CronTool 是调度服务的入口适配，不应被任务执行过程无限递归调用 add。</p><div class="code-block" id="nanobot-agent-tools-cron-py-134" data-guide="guide-nanobot-agent-tools-cron-py-134" data-source="nanobot/agent/tools/cron.py" data-start="134" data-end="155" data-symbol="CronTool.execute"><div class="code-head"><span>当前源码原文：nanobot/agent/tools/cron.py · CronTool.execute · 第 134–155 行（连续摘录）</span></div><pre><code>    async def execute(
+        self,
+        action: str,
+        name: str | None = None,
+        message: str = &quot;&quot;,
+        every_seconds: int | None = None,
+        cron_expr: str | None = None,
+        tz: str | None = None,
+        at: str | None = None,
+        job_id: str | None = None,
+        deliver: bool = True,
+        **kwargs: Any,
+    ) -&gt; str:
+        if action == &quot;add&quot;:
+            if self._in_cron_context.get():
+                return &quot;Error: cannot schedule new jobs from within a cron job execution&quot;
+            return self._add_job(name, message, every_seconds, cron_expr, tz, at, deliver)
+        elif action == &quot;list&quot;:
+            return self._list_jobs()
+        elif action == &quot;remove&quot;:
+            return self._remove_job(job_id)
+        return f&quot;Unknown action: {action}&quot;</code></pre></div><ol><li>action=add 先检查 _in_cron_context；当前就在 Cron 执行中时返回错误，不继续创建。</li><li>list/remove 分别交给对应操作，未知 action 返回提示；这些操作本身没有在这里调用模型。</li><li>add 的参数包含 every_seconds、cron_expr、at 等面向用户单位；后续 _add_job 才转换成调度内部毫秒数据。</li></ol><p><strong>取舍与异常边界：</strong>这是特定递归调度边界，不能当作通用权限系统。时间参数和渠道上下文仍需 _add_job 校验，列举/删除也有自身规则。</p></article></section><section id="worked-example"><h2>手工演算：消息和状态如何一步步变化</h2><p>用相对毫秒时钟演算，避免日期及时区噪声。开始时 now=100000，A 是 every_ms=60000，B 是 at_ms=170000，delete_after_run=false。两者启用。A 的回调耗时 25000ms，B 的回调耗时 3000ms 且抛 ValueError。</p><div class="table-wrap"><table class="source-table"><thead><tr><th>时钟</th><th>任务状态</th><th>为什么</th></tr></thead><tbody><tr><td>100000</td><td>A.next=160000；B.next=170000</td><td>every 相对当前 now，at 保留未来时刻</td></tr><tr><td>160000 tick</td><td>due_jobs=[A]；A.start=160000</td><td>B 此刻未到期，不在当前快照</td></tr><tr><td>185000 A 完成</td><td>A.last=160000；duration=25000；A.next=245000</td><td>下一次=完成附近 now+60000，不是220000</td></tr><tr><td>185000 下一 tick</td><td>B 已过期，delay=0；B.start≈185000</td><td>A 的串行执行让 B 晚约15秒</td></tr><tr><td>188000 B 失败</td><td>B.status=error；duration=3000；B.enabled=false；next=None</td><td>一次任务失败也消耗触发机会；保留历史便于检查</td></tr><tr><td>随后</td><td>最近可运行时间是 A.next=245000</td><td>不会因为 B 失败而在循环中无限重试</td></tr></tbody></table></div><p>Heartbeat 的独立演算：文件为空→模型0次、执行0次、通知0次；文件非空且决策 skip→决策请求1次、执行0次；决策 run 且执行结果为空→执行1次、通知0次；结果可交付但 evaluator 判 false→仍不通知。真正通知必须穿过每个门槛。</p></section><section id="build-it"><h2>从空文件实现一个可推演的最小模块</h2><p>实现一个使用整数毫秒假时钟的内存调度器，再实现一个有限状态 Heartbeat 管线。将“调度时钟”和“用户通知”分别验证。</p><ol><li>实现 at/every 的 next(schedule,now)，定义 Job 与 RunRecord；先不接 croniter，明确练习只覆盖两种 schedule。</li><li>tick 固定到期快照并串行 await，回调通过推进假时钟模拟耗时；成功失败都写记录，at 消费后禁用。</li><li>Heartbeat 以 fake_decider 返回 run/skip，用计数回调记录 execute/evaluate/notify；错误必须在状态或事件中可观察。</li></ol><details class="answer-reveal"><summary>展开参考方案与设计理由</summary><div class="answer-content"><p><strong>下面是教学参考伪代码，不是仓库原文。</strong>它只覆盖本练习的有限输入；先完成自己的实现，再逐项比较责任边界。</p><pre><code>next(schedule, now):
+    if schedule.kind == &quot;at&quot;:
+        return schedule.at if schedule.at &gt; now else None
+    if schedule.kind == &quot;every&quot; and schedule.interval &gt; 0:
+        return now + schedule.interval
+    return None
+tick():
+    due = [j for j in jobs if j.enabled and j.next is not None and j.next &lt;= clock.now]
+    for j in due:
+        start = clock.now
+        try: await callback(j); status, error = &quot;ok&quot;, None
+        except Exception as e: status, error = &quot;error&quot;, str(e)
+        record(j, start, clock.now - start, status, error)
+        if j.kind == &quot;at&quot;: j.enabled, j.next = False, None
+        else: j.next = next(j.schedule, clock.now)
+    persist(jobs)
+heartbeat():
+    action, tasks = await decide(content)
+    if action != &quot;run&quot;: return
+    response = await execute(tasks)
+    if response and deliverable(response) and await evaluate(response):
+        await notify(response)</code></pre><p>将 I/O 放在可替换的回调中，用固定输入验证状态与调用次数；错误路径必须留下可观察的结果，不能只写日志。</p></div></details><h3>验收条件</h3><ol><li>准确复现 A.next=245000 和 B 约晚15秒；B 失败后保留 error 历史但不再启用。</li><li>interval≤0 与过去的 at 返回 None；时间单位测试不得把秒当毫秒。</li><li>Heartbeat skip、空响应、evaluate=false 三种路径都不通知；正常路径恰好通知一次。</li><li>说明重启重新计算 next 与固定频率补跑的区别，并明确练习没有实现持久化恢复、时区/DST或副作用幂等。</li></ol></section><section id="invariants"><h2>边界、不变量与容易写错的地方</h2><ol><li>every 当前实现是完成附近时间加间隔；不能把它介绍成严格每个墙钟整点运行。</li><li>at 失败后仍删除或禁用；需要重试必须额外明确设计，不能凭直觉推断自动补跑。</li><li>last_status=ok 说明回调未抛异常，不证明任务目标达到，也不证明通知已经到达用户。</li><li>启动发现损坏 store 会拒绝从空列表启动，避免覆盖可恢复数据；热重载则可能继续使用最后有效快照。</li><li>禁用递归 add 保护运行期间的调度规模。时间规则校验、I/O 安全与通知政策属于不同边界。</li></ol></section><section id="self-test"><h2>独立推理练习</h2><ol><li>为什么把 now 作为 _compute_next_run 参数？<details><summary>展开推理依据</summary><p>便于用固定时间精确演算，避免纯计算暗中读取另一个时钟；服务调用处仍需选好参考时刻。</p></details></li><li>一次任务执行失败，next 一定还在吗？<details><summary>展开推理依据</summary><p>不在。at 分支不以成功与否为条件，失败也删除或禁用。</p></details></li><li>Heartbeat run 之后是不是必然通知？<details><summary>展开推理依据</summary><p>不是。执行回调、非空响应、可交付过滤、evaluator 和通知回调全部影响最终是否发送。</p></details></li></ol></section><div class="page-nav" data-study-page-nav></div><footer class="footer">08 · Cron 与 Heartbeat 自动化 · 源码精讲与设计实作</footer></div></main></div></body></html>

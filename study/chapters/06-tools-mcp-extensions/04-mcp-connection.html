@@ -1,0 +1,55 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>06 · MCP 连接架构与生命周期 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="tools-mcp-extensions" data-page="mcp-connection">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-tools-mcp-py-149" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="mcp.py" title="阅读 nanobot/agent/tools/mcp.py:149–191 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">MCP · transport</p><h1>MCP 连接架构与生命周期</h1><p class="lead">nanobot 是 MCP client：它根据配置建立 transport，创建并初始化 <code>ClientSession</code>，枚举远程 capabilities，再把它们包装为本地 Tool 实例注册到同一个 Registry。</p><div class="meta-row"><span class="chip">stdio</span><span class="chip">SSE</span><span class="chip">Streamable HTTP</span><span class="chip">AsyncExitStack</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">配置模型</h2><div class="code-block"><div class="code-head"><span>config/schema.py:209</span><span>MCPServerConfig</span></div><pre><code>class MCPServerConfig(Base):
+    type: Literal["stdio", "sse", "streamableHttp"] | None = None
+    command: str = ""
+    args: list[str] = []
+    env: dict[str, str] = {}
+    url: str = ""
+    headers: dict[str, str] = {}
+    tool_timeout: int = 30
+    enabled_tools: list[str] = ["*"]</code></pre></div>
+<p><code>ToolsConfig.mcp_servers</code> 以用户定义的 server name 为键。这个名称会进入最终工具名，因此同名远程工具仍能区分来源。</p>
+
+<h2 id="reading-section-02">传输选择</h2><table class="source-table"><thead><tr><th>类型</th><th>配置</th><th>连接方式</th><th>自动推断</th></tr></thead><tbody>
+  <tr><td>stdio</td><td>command、args、env</td><td>启动本地子进程，stdin/stdout 承载 JSON-RPC</td><td>有 command 时</td></tr>
+  <tr><td>SSE</td><td>url、headers</td><td><code>sse_client</code> + 自定义 httpx client</td><td>URL 以 <code>/sse</code> 结尾</td></tr>
+  <tr><td>Streamable HTTP</td><td>url、headers</td><td>共享 httpx AsyncClient + <code>streamable_http_client</code></td><td>其他 URL</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-03">单个 Server 的握手流程</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>1</small><b>创建独立 Stack</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>2</small><b>进入 Transport</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>3</small><b>建立 Session</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>4</small><b>能力发现</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>5</small><b>保留或清理</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>每个 Server 一个 AsyncExitStack</h3><p>transport、http client 和 ClientSession 的异步上下文都进入同一 server stack；不同 Server 不共享 cancel scope，关闭时可以独立清理。</p></div>
+  <div data-step-panel><h3>按 type 创建 read/write 通道</h3><p>stdio 先处理 Windows launcher；HTTP 路径合并 headers、允许重定向，并把连接资源交给 stack 托管。</p></div>
+  <div data-step-panel><h3><code>ClientSession.initialize()</code></h3><p>完成 MCP 协议初始化后才调用 list APIs。无 command/url 或未知 transport 会关闭当前 stack 并跳过。</p></div>
+  <div data-step-panel><h3>Tools、Resources、Prompts</h3><p>先列 tools 并应用 enabledTools；resources 与 prompts 分别在独立 try 中枚举，不支持其中一种不会破坏其他能力。</p></div>
+  <div data-step-panel><h3>成功返回 Stack，失败局部降级</h3><p>成功 stack 被 AgentLoop 保存；连接异常关闭当前 stack 并返回 None，外层继续下一个 Server。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-04">Windows stdio 兼容</h2><div class="code-block"><div class="code-head"><span>agent/tools/mcp.py:52</span><span>shell launcher 归一</span></div><pre><code>if Windows and command is npx/npm/pnpm/yarn/bunx or .cmd/.bat:
+    comspec = env.get("COMSPEC") or os.environ.get("COMSPEC") or "cmd.exe"
+    return comspec, ["/d", "/c", command, *args], env</code></pre></div>
+<p>Windows 上这些命令通常不是可直接 exec 的二进制文件。显式通过 <code>cmd.exe /d /c</code> 启动能让 MCP stdio server 可靠运行；已经是 cmd/PowerShell 或 .exe/.com 的命令不重复包装。</p>
+
+<h2 id="reading-section-05">AgentLoop 何时连接</h2><div class="architecture">
+  <div class="arch-layer"><div class="arch-label">构造</div><div class="arch-items"><span class="arch-item">mcp_servers config</span><span>只保存配置，不立即产生网络/子进程副作用</span></div></div>
+  <div class="arch-layer"><div class="arch-label">首次使用</div><div class="arch-items"><span class="arch-item">run()</span><span>或</span><span class="arch-item">process_direct()</span><span>→</span><span class="arch-item">_connect_mcp()</span></div></div>
+  <div class="arch-layer"><div class="arch-label">运行中</div><div class="arch-items"><span class="arch-item">_mcp_connected</span><span class="arch-item">_mcp_connecting</span><span>防止重复/并发建连</span></div></div>
+  <div class="arch-layer"><div class="arch-label">关闭</div><div class="arch-items"><span class="arch-item">close_mcp()</span><span>先等待后台任务，再逐个 aclose stack 并清空映射</span></div></div>
+</div>
+<p>如果所有 Server 都失败，<code>_mcp_connected</code> 仍为 false，后续再次调用 <code>_connect_mcp()</code> 时可重试；<code>process_direct()</code> 每次都会走这个入口，但长期运行的 <code>run()</code> 当前只在启动前调用一次。如果至少一个 Server 成功则标记为已连接，本次运行不会自动追连其余失败 Server。</p>
+
+<h2 id="reading-section-06">失败隔离</h2><div class="compare-grid"><div class="card"><h3>Server 内能力隔离</h3><p>list_resources 或 list_prompts 失败只写 debug 日志，已注册的 tools 仍然保留。</p></div><div class="card"><h3>Server 之间隔离</h3><p>外层逐个连接；一个 Server 抛错不会阻止后续 Server。返回映射只包含成功且 stack 有效的连接。</p></div></div>
+<div class="callout warning"><strong>stdio stdout 必须纯净：</strong>如果错误文本像 JSON parse、JSON-RPC 或 Content-Length 污染，日志会提示 MCP Server 只向 stdout 写协议数据，把普通日志写到 stderr。</div>
+
+<h2 id="reading-section-07">源码学习索引（站内阅读）</h2><table class="source-table"><thead><tr><th>位置</th><th>阅读重点</th></tr></thead><tbody><tr><td><a href="../02-llm-provider-gateway/workshop.html#source-2" data-original-href="../../../nanobot/config/schema.py" data-source-label="config/schema.py:209" title="阅读 nanobot/config/schema.py:263–326 的代表性摘录与讲解">config/schema.py · 站内摘录</a></td><td>MCP 配置字段</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-mcp-py-149" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="mcp.py:52" title="阅读 nanobot/agent/tools/mcp.py:149–191 的代表性摘录与讲解">mcp.py · 站内摘录</a></td><td>Windows stdio 启动归一</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-tools-mcp-py-192" data-original-href="../../../nanobot/agent/tools/mcp.py" data-source-label="mcp.py:439" title="阅读 nanobot/agent/tools/mcp.py:192–226 的代表性摘录与讲解">mcp.py · 站内摘录</a></td><td>建连、发现和独立 stack</td></tr><tr><td><a href="../02-llm-provider-gateway/workshop.html#source-8" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:510" title="阅读 nanobot/agent/loop.py:453–481 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>懒连接与重试标记</td></tr><tr><td><a href="../01-request-lifecycle/workshop.html#source-4" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1080" title="阅读 nanobot/agent/loop.py:1228–1273 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>连接关闭</td></tr></tbody></table>
+<h2 id="reading-section-08">自测</h2><ul class="check-list review-list"><li><span class="review-question">省略 type 且 URL 不以 /sse 结尾时选择哪种 transport？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>选择 streamable HTTP；只有显式 <code>type=sse</code> 或 URL 以 <code>/sse</code> 结尾才走旧 SSE transport，stdio 则需要对应显式配置。</p></div></details></li><li><span class="review-question">为什么每个 MCP Server 必须有独立 AsyncExitStack？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>MCP SDK transport 会创建各自的 anyio cancel scope，必须由进入它的同一生命周期独立退出。共用栈可能在一个服务关闭时交叉退出另一个服务的 scope，触发取消域错误。</p></div></details></li><li><span class="review-question">为什么 <code>_mcp_connected=false</code> 只表示“允许重试”，不等于主 run 循环必然会在下一条消息重试？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它让下一次调用 <code>_connect_mcp()</code> 时不被“已连接”短路；只有 <code>process_direct()</code> 或 run 启动等路径再次调用连接函数才会真正重试，普通循环不会仅因布尔值变化自动唤醒。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">06.04 · MCP 连接架构与生命周期</footer></div></main></div></body></html>

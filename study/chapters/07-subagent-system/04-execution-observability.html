@@ -1,0 +1,69 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>08.04 · Subagent 执行与可观测性 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="subagent-system" data-page="execution-observability">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Subagent · execution</p><h1>AgentRunSpec 如何把通用 Runner 配置成子执行器</h1><p class="lead">SubagentManager 不实现第二套模型循环。它构造一个严格的 <code>AgentRunSpec</code>，复用 AgentRunner，并通过 checkpoint callback 与 Hook 把内部阶段、工具事件和 token usage 投影到临时状态对象。</p><div class="meta-row"><span class="chip">AgentRunSpec</span><span class="chip">fail fast</span><span class="chip">checkpoint</span><span class="chip">SubagentStatus</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">一次子执行的五个阶段</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>initializing</small><b>构建输入</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>awaiting_tools</small><b>模型规划</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>tools_completed</small><b>工具观察</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>final_response</small><b>形成结果</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>done/error</small><b>分类回传</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>初始化工具、Prompt 和 messages</h3><p>状态创建时 phase=initializing；真正后台 task 开始后，Manager 才调用 _build_tools 与 _build_subagent_prompt。</p></div>
+  <div data-step-panel><h3>Runner 的 checkpoint 更新阶段</h3><p>checkpoint callback 读取 payload 的 phase 与 iteration。它不写 Session，只更新当前 SubagentStatus。</p></div>
+  <div data-step-panel><h3>Hook 收集实际工具事件</h3><p>before_execute_tools 记录工具名与 JSON 参数；after_iteration 复制 iteration、tool_events、usage 与 error，供运行时观察。</p></div>
+  <div data-step-panel><h3>没有最终文本也有明确替代</h3><p>达到迭代上限时使用专门文本；其他无 final_content 的非错误结果也回退到 “Task completed but no final response was generated.”。</p></div>
+  <div data-step-panel><h3>Manager 按 stop_reason 分类</h3><p>tool_error 回传部分进度，error 回传 Runner error，其余都视为可用结果；外围异常也转换为 announcement，而不是静默丢失。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">关键 AgentRunSpec</h2><div class="code-block"><div class="code-head"><span>agent/subagent.py:193–204</span><span>用参数塑造子 Agent</span></div><pre><code>result = await self.runner.run(AgentRunSpec(
+    initial_messages=messages,
+    tools=tools,
+    model=self.model,
+    max_iterations=self.max_iterations,
+    max_tool_result_chars=self.max_tool_result_chars,
+    hook=_SubagentHook(task_id, status),
+    max_iterations_message="Task completed but no final response was generated.",
+    error_message=None,
+    fail_on_tool_error=True,
+    checkpoint_callback=_on_checkpoint,
+))</code></pre></div>
+
+<h2 id="reading-section-03">与主 Agent 的执行策略差异</h2><table class="source-table"><thead><tr><th>维度</th><th>主 Agent</th><th>Subagent</th></tr></thead><tbody>
+  <tr><td>初始消息</td><td>父 System Prompt + Session replay + 当前用户输入</td><td>专用 System Prompt + 单一 task</td></tr>
+  <tr><td>工具错误</td><td>通常作为观察交给模型尝试恢复</td><td><code>fail_on_tool_error=True</code>，结束并报告部分进度</td></tr>
+  <tr><td>注入 callback</td><td>有，接收用户追问与 Subagent 结果</td><td>没有，子任务范围固定</td></tr>
+  <tr><td>checkpoint</td><td>写入 Session metadata，可用于中断恢复</td><td>只更新临时 status phase/iteration</td></tr>
+  <tr><td>可观测 Hook</td><td>LoopHook + 外部 Hooks + 流式进度</td><td>_SubagentHook，记录工具与 usage</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-04">SubagentStatus 的数据模型</h2><div class="code-block"><div class="code-head"><span>agent/subagent.py:26–39</span><span>实时而非历史记录</span></div><pre><code>@dataclass(slots=True)
+class SubagentStatus:
+    task_id: str
+    label: str
+    task_description: str
+    started_at: float
+    phase: str = "initializing"
+    iteration: int = 0
+    tool_events: list = field(default_factory=list)
+    usage: dict = field(default_factory=dict)
+    stop_reason: str | None = None
+    error: str | None = None</code></pre></div>
+<p>状态表用于正在运行时的观察，例如 MyTool 能格式化 Manager 中的 SubagentStatus；task 完成后的 done callback 会把 status 删除，所以它不是审计日志。最终可追溯信息应从父 Session 与日志获取。</p>
+
+<h2 id="reading-section-05">工具失败时怎样保留部分进度</h2><div class="code-block"><div class="code-head"><span>agent/subagent.py:277–296</span><span>面向父 Agent 的错误摘要</span></div><pre><code>completed = [e for e in result.tool_events if e["status"] == "ok"]
+failure = next((e for e in reversed(result.tool_events)
+                if e["status"] == "error"), None)
+
+for event in completed[-3:]:
+    lines.append(f"- {event['name']}: {event['detail']}")
+if failure:
+    lines.append(f"- {failure['name']}: {failure['detail']}")</code></pre></div>
+<p>错误结果不是只有 “failed”：最多保留最近三个成功步骤和最后一个失败工具，让父 Agent 能解释已完成的工作、决定是否接管或重新委派。</p>
+
+<div class="callout warning"><strong>状态语义要按源码理解：</strong>Runner 返回后 Manager 先把 phase 设为 done，再依据 stop_reason 选择成功或错误 announcement；tool_error 分支不会把 phase 改回 error，而且状态很快被 cleanup 删除。对外可靠信号是 announcement status/result，不应只盯 phase。</div>
+
+<h2 id="reading-section-06">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-subagent-py-127" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py:26" title="阅读 nanobot/agent/subagent.py:127–167 的代表性摘录与讲解">subagent.py · 站内摘录</a></td><td>Status 与 Hook</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-subagent-py-185" data-original-href="../../../nanobot/agent/subagent.py" data-source-label="subagent.py:169" title="阅读 nanobot/agent/subagent.py:185–230 的代表性摘录与讲解">subagent.py · 站内摘录</a></td><td>完整执行和 stop_reason 分类</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-runner-py-189" data-original-href="../../../nanobot/agent/runner.py" data-source-label="runner.py:56" title="阅读 nanobot/agent/runner.py:189–232 的代表性摘录与讲解">runner.py · 站内摘录</a></td><td>AgentRunSpec / AgentRunResult</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/agent/hook.py" data-source-label="agent/hook.py" title="nanobot/agent/hook.py 的所属模块讲解；该文件未单独逐行收录">agent/hook.py · 模块讲解</a></td><td>通用 Hook 契约</td></tr><tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../tests/agent/tools/test_subagent_tools.py" data-source-label="test_subagent_tools.py:16" title="tests/agent/tools/test_subagent_tools.py 的所属模块讲解；该文件未单独逐行收录">test_subagent_tools.py · 模块讲解</a></td><td>配置、迭代与等待测试</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">Subagent 为什么选择 fail_on_tool_error=True？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>子任务通常是单一后台工作，若工具失败后继续，最终 announcement 容易掩盖不完整结果。spec 设置 <code>fail_on_tool_error=True</code>，让失败明确进入 FAILED 状态并报告。</p></div></details></li><li><span class="review-question">checkpoint callback 与父 Agent checkpoint 有什么本质差别？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>子 Agent checkpoint 只保存到 <code>SubagentStatus</code> 供运行期观察，不写父 Session 的 runtime checkpoint；父 checkpoint 用于用户 <code>/stop</code> 后恢复主 Turn 的工具协议。</p></div></details></li><li><span class="review-question">SubagentStatus 为什么不能充当完成历史？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Status 是内存中的活动任务快照，done callback 会清理运行表，进程重启也会消失。完成历史依赖 announcement 被注入并由 AgentLoop 保存到 Session。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">07.04 · Subagent 执行与可观测性</footer></div></main></div></body></html>

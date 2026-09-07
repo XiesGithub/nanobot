@@ -1,0 +1,48 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="nanobot Memory 系统源码学习章节">
+  <title>03 · Memory 系统 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="memory-system" data-page="overview">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#source-1" data-original-href="../../../nanobot/agent/memory.py" data-source-label="核心源码" title="阅读 nanobot/agent/memory.py:235–275 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner">
+<select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Chapter 03 · ready</p><h1>Memory 系统：从聊天记录到可恢复的长期记忆</h1><p class="lead">nanobot 没有把 Memory 做成一个“无限增长的聊天数组”。它用实时 Session、压缩归档和长期 Markdown 三层结构，在连续性、上下文成本与可审计性之间取平衡。</p><div class="meta-row"><span class="chip">6 个学习页面</span><span class="chip">3 层记忆</span><span class="chip">2 阶段 Dream</span><span class="chip">源码 + 测试</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<div class="callout"><strong>先建立结论：</strong><code>session.messages</code> 是当前会话的短期工作记忆；<code>memory/history.jsonl</code> 是 Consolidator 生成的压缩中间层；<code>SOUL.md / USER.md / memory/MEMORY.md</code> 才是 Dream 整理后的长期记忆。</div>
+
+<h2 id="reading-section-01">全章主数据流</h2>
+<section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>01</small><b>记录 Session</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>02</small><b>Consolidator</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>03</small><b>history.jsonl</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>04</small><b>Dream</b></button><span class="flow-arrow">→</span>
+  <button class="flow-node" data-step><small>05</small><b>注入上下文</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>当前对话先进入 Session</h3><p>用户、助手、工具调用与工具结果都保存在 <code>Session.messages</code>，并原子写入 <code>workspace/sessions/*.jsonl</code>。</p></div>
+  <div data-step-panel><h3>上下文压力触发轻量压缩</h3><p>Consolidator 估算完整 Prompt；超过输入预算时，从最老的安全 user-turn 边界切出一段并摘要。</p></div>
+  <div data-step-panel><h3>摘要成为 Dream 的原料</h3><p>摘要按递增 cursor 追加到 <code>history.jsonl</code>；模型失败时退化为带 <code>[RAW]</code> 标记的截断原文，避免静默丢失。</p></div>
+  <div data-step-panel><h3>Dream 做慢速整理</h3><p>Phase 1 分析新增事实、重复项与过期内容；Phase 2 通过受限文件工具增量编辑长期记忆，并可创建可复用 Skill。</p></div>
+  <div data-step-panel><h3>下一次请求重新获得连续性</h3><p><code>ContextBuilder</code> 把长期 Memory、尚未被 Dream 消费的近期归档和会话摘要加入 system prompt。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-02">六页学习路线</h2><div class="roadmap-list">
+  <a class="roadmap-item" href="01-memory-architecture.html"><b>01 · Memory 系统全景</b><span>三层模型、运行时序和模块边界</span></a>
+  <a class="roadmap-item" href="02-memory-store.html"><b>02 · MemoryStore 与存储布局</b><span>文件、cursor、迁移、原子写与上下文注入</span></a>
+  <a class="roadmap-item" href="03-consolidator.html"><b>03 · Consolidator 会话归档</b><span>token 预算、安全切分、摘要与失败降级</span></a>
+  <a class="roadmap-item" href="04-dream.html"><b>04 · Dream 两阶段整理</b><span>分析、增量编辑、游标提交、Git 审计</span></a>
+  <a class="roadmap-item" href="05-autocompact-recovery.html"><b>05 · AutoCompact 与恢复机制</b><span>TTL、近期后缀、Session 持久化和修复</span></a>
+</div>
+
+<h2 id="reading-section-03">模块地图</h2><table class="source-table"><thead><tr><th>模块</th><th>核心职责</th><th>关键状态</th></tr></thead><tbody>
+  <tr><td><a href="workshop.html#source-8" data-original-href="../../../nanobot/session/manager.py" data-source-label="session/manager.py" title="阅读 nanobot/session/manager.py:423–470 的代表性摘录与讲解">session/manager.py · 站内摘录</a></td><td>短期对话、重放切片、Session JSONL</td><td><code>messages</code>、<code>last_consolidated</code></td></tr>
+  <tr><td><a href="workshop.html#source-1" data-original-href="../../../nanobot/agent/memory.py" data-source-label="agent/memory.py" title="阅读 nanobot/agent/memory.py:235–275 的代表性摘录与讲解">agent/memory.py · 站内摘录</a></td><td>MemoryStore、Consolidator、Dream</td><td><code>.cursor</code>、<code>.dream_cursor</code></td></tr>
+  <tr><td><a href="workshop.html#source-7" data-original-href="../../../nanobot/agent/autocompact.py" data-source-label="agent/autocompact.py" title="阅读 nanobot/agent/autocompact.py:40–72 的代表性摘录与讲解">agent/autocompact.py · 站内摘录</a></td><td>空闲会话压缩并保留可继续对话的尾部</td><td><code>_last_summary</code></td></tr>
+  <tr><td><a href="../04-context-management/workshop.html#source-1" data-original-href="../../../nanobot/agent/context.py" data-source-label="agent/context.py" title="阅读 nanobot/agent/context.py:37–76 的代表性摘录与讲解">agent/context.py · 站内摘录</a></td><td>把记忆转换为模型可见的上下文</td><td>Long-term Memory、Recent History</td></tr>
+  <tr><td><a href="workshop.html#source-walkthrough" data-original-href="../../../nanobot/utils/gitstore.py" data-source-label="utils/gitstore.py" title="nanobot/utils/gitstore.py 的所属模块讲解；该文件未单独逐行收录">utils/gitstore.py · 模块讲解</a></td><td>记录、查看和撤销 Dream 对长期文件的修改</td><td>Dream commits</td></tr>
+</tbody></table>
+
+<h2 id="reading-section-04">读完本章后你应该能解释</h2><ul class="check-list review-list"><li><span class="review-question">为什么 <code>history.jsonl</code> 不是最终长期记忆？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>history.jsonl</code> 是 Consolidator 写入的跨会话归档/摘要流水，仍是等待 Dream 消费的中间材料并受条目上限管理；提炼后的长期事实写入工作区 <code>memory/MEMORY.md</code>，再由后续 Turn 注入 system context。</p></div></details></li><li><span class="review-question"><code>last_consolidated</code> 与 <code>.dream_cursor</code> 分别表示什么进度？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>last_consolidated</code> 是某个 Session 已归档/摘要到哪里的消息索引；<code>.dream_cursor</code> 是 Dream 已消费 raw history 到哪个全局行号。前者服务上下文窗口，后者服务长期记忆提炼。</p></div></details></li><li><span class="review-question">Consolidator 和 AutoCompact 为什么都做归档，但触发条件不同？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Consolidator 在单个 Session 上因 token/window 压力归档较旧消息；AutoCompact 在会话闲置超过 TTL 后归档并保留近期后缀。一个按容量触发，一个按时间触发。</p></div></details></li><li><span class="review-question">Dream 失败时为什么不能推进消费 cursor？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>Dream 只有两个阶段都成功才原子推进 cursor。失败时保留旧位置，下次仍读取同一批 raw history，避免把未提炼的事实永久标成已消费。</p></div></details></li><li><span class="review-question">记忆怎样被模型看到，又怎样被用户审计和恢复？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>ContextBuilder 读取 <code>MEMORY.md</code> 和尚未被 Dream 消费的 Recent History；用户可用 <code>/dream-log</code> 查看版本、<code>/dream-restore</code> 通过 GitStore revert 恢复。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">02 · Memory 系统 · 章节总览</footer>
+</div></main></div></body></html>

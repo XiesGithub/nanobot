@@ -1,0 +1,56 @@
+<!doctype html><html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>07.03 · AgentLoop 命令分流 | nanobot 学习手册</title>
+  <link rel="stylesheet" href="../../assets/study.css"><link rel="stylesheet" href="../../assets/navigation.css"><script defer src="../../assets/catalog.js"></script><script defer src="../../assets/navigation.js"></script><script defer src="../../assets/sections.js"></script><script defer src="../../assets/reading-navigation.js"></script><script defer src="../../assets/study.js"></script>
+</head><body data-study-root="../.." data-chapter="slash-command-system" data-page="loop-dispatch">
+<header class="site-header"><a class="brand" href="../../index.html"><span class="brand-mark">N</span><span class="brand-text">nanobot <span>内部原理学习手册</span></span></a><div class="header-actions"><a class="button" href="workshop.html#guide-nanobot-agent-loop-py-677" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py" title="阅读 nanobot/agent/loop.py:677–703 的代表性摘录与讲解">源码精讲</a><button class="icon-button" type="button" data-theme-toggle aria-label="切换主题">☾</button></div></header>
+<div class="layout"><aside class="sidebar" data-study-sidebar></aside><main class="content"><div class="content-inner"><select class="mobile-nav" data-mobile-nav aria-label="章节导航"></select><div class="breadcrumb" data-study-breadcrumb></div>
+<section class="hero"><p class="eyebrow">Commands · AgentLoop</p><h1>双入口分流：为什么命令既在 run()，也在 Turn 状态机</h1><p class="lead">命令必须兼顾两种场景：Agent 空闲时复用正常的 session 串行框架；Agent 正在思考或执行工具时，又要让 <code>/stop</code> 等控制动作立即生效。因此 nanobot 设置了外层快速路径与内层 COMMAND 状态。</p><div class="meta-row"><span class="chip">run loop</span><span class="chip">pending queue</span><span class="chip">TurnState.COMMAND</span><span class="chip">shortcut</span></div></section>
+<aside class="learning-bridge" id="learning-bridge" aria-label="本章学习闭环"><p><strong>把本页概念落实为实现：</strong>对照本章真实源码与数据流，再完成设计任务。本文骨架中的省略号和简化调用用于说明流程；可运行完整项目见第10章。</p><div class="learning-links"><a class="button" href="workshop.html#contract">输入输出契约</a><a class="button" href="workshop.html#dataflow">模块数据流图</a><a class="button primary" href="workshop.html#source-walkthrough">核心源码精讲</a><a class="button" href="workshop.html#build-it">动手设计与验收</a></div></aside>
+
+<h2 id="reading-section-01">外层 run() 的三岔路</h2><div class="code-block"><div class="code-head"><span>agent/loop.py:892–933</span><span>先命令，后任务/注入</span></div><pre><code>raw = msg.content.strip()
+if self.commands.is_priority(raw):
+    await self._dispatch_command_inline(..., self.commands.dispatch_priority)
+    continue
+
+effective_key = self._effective_session_key(msg)
+if effective_key in self._pending_queues:
+    if self.commands.is_dispatchable_command(raw):
+        await self._dispatch_command_inline(..., self.commands.dispatch)
+        continue
+    self._pending_queues[effective_key].put_nowait(msg)
+    continue
+
+task = asyncio.create_task(self._dispatch(msg))</code></pre></div>
+
+<h2 id="reading-section-02">根据运行状态追踪一条消息</h2><section data-stepper><div class="flow">
+  <button class="flow-node" data-step><small>always first</small><b>priority?</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>busy</small><b>known command?</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>busy</small><b>follow-up</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>idle</small><b>new task</b></button><span class="flow-arrow">→</span><button class="flow-node" data-step><small>turn</small><b>COMMAND</b></button>
+</div><div class="card flat step-detail">
+  <div data-step-panel><h3>优先命令立即执行</h3><p><code>/stop</code>、<code>/restart</code>、<code>/status</code> 在 pending queue 和 session lock 之前处理，否则停止命令可能永远等在它要停止的任务后面。</p></div>
+  <div data-step-panel><h3>忙碌期的已知非优先命令也直派</h3><p><code>/new</code>、<code>/history</code>、<code>/dream*</code>、<code>/help</code> 不被注入当前模型上下文，而是直接调用 Router 并发布结果。</p></div>
+  <div data-step-panel><h3>忙碌期的普通文本进入注入队列</h3><p>包括未知 <code>/foo</code>。AgentRunner 在安全点读取它作为 follow-up，使用户能在当前 Turn 中继续补充要求。</p></div>
+  <div data-step-panel><h3>空闲期先创建受控 task</h3><p><code>_dispatch()</code> 建立 effective session key、session lock、全局并发 gate 和 pending queue，再进入消息状态机。</p></div>
+  <div data-step-panel><h3>COMMAND 决定短路还是推理</h3><p>匹配 Handler 时写入 <code>ctx.outbound</code> 并返回 shortcut，直接到 DONE；无匹配返回 dispatch，继续 BUILD → RUN → SAVE → RESPOND。</p></div>
+</div><div class="step-controls"><button class="button" data-step-prev>← 上一步</button><span class="step-count" data-step-count></span><button class="button primary" data-step-next>下一步 →</button></div></section>
+
+<h2 id="reading-section-03">内层状态机的短路</h2><div class="architecture"><div class="arch-layer"><div class="arch-label">普通消息</div><div class="arch-items"><span class="arch-item">RESTORE</span><span>→</span><span class="arch-item">COMPACT</span><span>→</span><span class="arch-item">COMMAND: dispatch</span><span>→ BUILD → RUN → SAVE → RESPOND</span></div></div><div class="arch-layer"><div class="arch-label">已知命令</div><div class="arch-items"><span class="arch-item">RESTORE</span><span>→</span><span class="arch-item">COMPACT</span><span>→</span><span class="arch-item">COMMAND: shortcut</span><span>→ DONE</span></div></div></div>
+<div class="code-block"><div class="code-head"><span>agent/loop.py:1349–1358</span><span>确定性短路</span></div><pre><code>result = await self.commands.dispatch(cmd_ctx)
+if result is not None:
+    ctx.outbound = result
+    return "shortcut"
+return "dispatch"</code></pre></div>
+<p>“命令不经过 LLM”不等于“什么状态都不经过”：空闲期命令仍先执行 RESTORE 和 COMPACT。测试中特别记录了 auto-new 与 <code>/new</code> 可能连续清理但保持幂等。</p>
+
+<h2 id="reading-section-04">六类输入的最终路径</h2><table class="source-table"><thead><tr><th>输入与状态</th><th>路径</th><th>是否调用 LLM</th></tr></thead><tbody>
+  <tr><td>忙碌 + <code>/stop</code></td><td>priority inline → cancel → outbound</td><td>否，并取消现有调用</td></tr>
+  <tr><td>忙碌 + <code>/status</code></td><td>priority inline → outbound</td><td>否，现有调用继续</td></tr>
+  <tr><td>忙碌 + <code>/new</code></td><td>dispatch inline → cancel/clear → outbound</td><td>命令自身不调用</td></tr>
+  <tr><td>忙碌 + 普通文本或 <code>/foo</code></td><td>pending queue → 当前 Turn 注入</td><td>是</td></tr>
+  <tr><td>空闲 + 已知非优先命令</td><td>task/lock → RESTORE → COMPACT → COMMAND → DONE</td><td>否</td></tr>
+  <tr><td>空闲 + <code>/foo</code></td><td>COMMAND 未命中 → BUILD/RUN</td><td>是</td></tr>
+</tbody></table>
+
+<div class="callout warning"><strong>源码审阅提示：</strong>外层 priority 分支把 <code>msg.session_key</code> 传入上下文，而活动任务按 <code>_effective_session_key(msg)</code> 登记；<code>cmd_stop</code> 又直接使用 <code>msg.session_key</code>。在 unified-session 配置下应重点验证两者是否一致，不能仅依赖后方“先计算 effective key”的注释。</div>
+
+<h2 id="reading-section-05">源码索引与自测</h2><table class="source-table"><tbody><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-677" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:677" title="阅读 nanobot/agent/loop.py:677–703 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>inline dispatch 与结果发布</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-892" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:867" title="阅读 nanobot/agent/loop.py:892–934 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>run() 的外层三岔路</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-892" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:942" title="阅读 nanobot/agent/loop.py:892–934 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>session lock 与 pending queue</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-892" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1200" title="阅读 nanobot/agent/loop.py:892–934 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>Turn 状态驱动器</td></tr><tr><td><a href="workshop.html#guide-nanobot-agent-loop-py-892" data-original-href="../../../nanobot/agent/loop.py" data-source-label="loop.py:1349" title="阅读 nanobot/agent/loop.py:892–934 的代表性摘录与讲解">loop.py · 站内摘录</a></td><td>COMMAND 状态</td></tr></tbody></table>
+<ul class="check-list review-list"><li><span class="review-question">为什么 priority 必须在 session lock 之前？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>它必须取消或观察一个可能正持有 session lock 的活动任务。若先等锁，控制命令只能在目标 Turn 完成后执行；run 循环因此直接 inline dispatch priority。</p></div></details></li><li><span class="review-question">为什么忙碌期的 /new 不能作为 follow-up 注入模型？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p><code>/new</code> 的语义是取消活动任务、归档未整理快照并清空 Session。作为 user follow-up 注入只会让模型看到字符串，Router Handler 不执行，且可能与当前保存并发冲突。</p></div></details></li><li><span class="review-question">未知 slash 文本在忙碌和空闲时分别如何流动？</span><details class="answer-reveal"><summary><span class="answer-show">查看答案</span><span class="answer-hide">收起答案</span></summary><div class="answer-content"><p>忙碌时它不匹配 dispatchable command，因此作为普通 pending user message 注入当前 Runner；空闲时创建普通 <code>_dispatch()</code> task，COMMAND 未处理后继续 BUILD/RUN。</p></div></details></li></ul>
+<div class="page-nav" data-study-page-nav></div><footer class="footer">09.03 · AgentLoop 命令分流</footer></div></main></div></body></html>

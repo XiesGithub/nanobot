@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="description" content="基于 nanobot 项目的 40 道深度技术面试题，按八类递进，答案点击展开。">
+<title>个人事务 Agent · 40 道技术面试题</title>
+<style>
+:root{--ink:#202f32;--muted:#626e70;--line:#dce4e1;--paper:#f4f6f3;--white:#fff;--green:#186656;--soft:#e9f2ed;--nav-width:264px}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:170px}body{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;font-size:15px;line-height:1.8}button,input,select{font:inherit}button,summary,select{cursor:pointer}a{color:var(--green);text-underline-offset:4px}button,a,input,select,summary{touch-action:manipulation}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #ad742a;outline-offset:4px}[hidden]{display:none!important}.skip-link{position:fixed;top:-80px;left:20px;z-index:20;background:white;padding:12px}.skip-link:focus{top:8px}.shell{max-width:1560px;margin:auto;display:grid;grid-template-columns:var(--nav-width) minmax(0,1fr)}
+.sidebar{height:100vh;position:sticky;top:0;padding:35px 20px 24px;border-right:1px solid var(--line);background:#fbfcfa;display:flex;flex-direction:column;overflow-y:auto}.brand{display:flex;align-items:center;gap:12px;text-decoration:none;color:var(--ink);line-height:1.3}.brand-mark{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;background:var(--green);color:white;font-size:17px;font-weight:750;letter-spacing:-2px;padding-right:2px}.brand strong{font-size:17px}.brand small{display:block;font-size:10px;letter-spacing:1.9px;margin-top:5px;color:var(--muted)}.nav-label{font-size:11px;font-weight:700;letter-spacing:1.6px;color:var(--muted);margin:41px 12px 12px}.category-button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;border:1px solid transparent;color:#526162;padding:11px 10px;border-radius:8px;line-height:1.5;margin:3px 0;font-size:13px;min-height:44px}.category-button:hover{background:#f0f4ef}.category-button[aria-pressed=true]{background:var(--soft);color:#155644;border-color:#d3e6d9;font-weight:700}.nav-number{font:11px ui-monospace,Consolas,monospace;opacity:.8}.nav-count{margin-left:auto;font-size:11px}.sidebar-footer{margin-top:auto;padding:30px 12px 0;font-size:12px;color:var(--muted)}.sidebar-footer strong{display:block;color:var(--green);font-size:13px}.sidebar-footer a{display:block;margin-top:12px}.sidebar-line{height:3px;background:linear-gradient(to right,#82bca0,#175e50);border-radius:5px;margin:12px 0}
+main{min-width:0;padding:0 48px 50px}.topbar{display:flex;justify-content:space-between;gap:12px;align-items:center;height:78px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}.topbar strong{font-weight:500;color:var(--ink)}.status-dot{width:6px;height:6px;background:#278360;border-radius:50%;display:inline-block;margin-right:7px}.hero{padding:39px 0 30px}.eyebrow{display:block;font-size:10px;letter-spacing:1.6px;font-weight:750;color:var(--green);line-height:1.6}.hero h1{font-size:36px;font-weight:700;line-height:1.35;letter-spacing:-1.1px;margin:13px 0 13px}.hero h1 span{font-weight:400;color:#697a73}.hero p{margin:0;max-width:680px;font-size:14px;color:var(--muted)}.hero-stats{display:flex;gap:25px;flex-wrap:wrap;margin-top:24px;align-items:center}.hero-stats span{color:var(--muted);font-size:12px}.hero-stats b{font-size:22px;line-height:1.3;color:var(--ink);font-weight:650;margin-right:5px}.hero-stats .divider{height:23px;width:1px;background:var(--line)}.intro-details{background:#edf2eb;border:1px solid #dce5d7;border-radius:10px;margin-bottom:25px}.intro-details>summary{padding:13px 16px;list-style-position:inside;font-size:12px;color:#3e5748}.intro-content{padding:0 20px 17px;font-size:13px;color:#4b5b50}.intro-content p{margin:8px 0}.intro-content ul{padding-left:20px}.intro-content strong{color:#284632}
+.toolbar{position:sticky;top:0;z-index:5;background:var(--paper);padding:14px 0 12px;border-bottom:1px solid var(--line)}.filters{display:flex;gap:10px}.search{display:flex;align-items:center;flex:1;min-width:0;background:white;border:1px solid #cdd8d2;border-radius:8px;padding-left:13px;gap:9px}.search svg{width:18px;height:18px;flex-shrink:0;color:#788780}.search input{padding:10px 10px 10px 0;border:0;min-width:0;width:100%;border-radius:8px;background:none;font-size:13px;color:var(--ink)}.search input:focus{outline:none}.search:focus-within{outline:2px solid var(--green);outline-offset:1px}select{border:1px solid #cdd8d2;border-radius:8px;padding:8px 10px;background:white;font-size:13px;min-width:112px;color:var(--ink)}.button{border:1px solid #cdd8d2;border-radius:7px;background:white;color:#3d5349;padding:8px 12px;font-size:12px;min-height:40px}.button:hover{border-color:#759982;background:#edf4ed}.toolbar-bottom{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;font-size:12px;color:var(--muted)}.toolbar-actions{display:flex;gap:7px}.toolbar-actions .button{padding:4px 9px;min-height:32px;font-size:11px}.match-status{font-variant-numeric:tabular-nums}.group-header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin:30px 0 18px}.group-header h2{font-size:22px;line-height:1.4;margin:5px 0;color:#213e31;font-weight:650}.group-header p{margin:0;font-size:12px;color:var(--muted)}.group-count{font-size:12px;color:var(--muted);flex-shrink:0;border:1px solid var(--line);border-radius:20px;padding:2px 11px}
+.question-card{background:white;border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:17px;box-shadow:0 2px 4px #213a2503;scroll-margin-top:165px}.question-meta{display:flex;align-items:center;gap:8px;padding:22px 25px 0;flex-wrap:wrap}.question-number{font:600 13px ui-monospace,Consolas,monospace;color:var(--green);text-decoration:none;margin-right:2px}.badge{font-size:10px;line-height:1.7;padding:1px 8px;border:1px solid transparent;border-radius:4px}.level-1{background:#edf3e9;color:#46643c}.level-2{background:#edf2f6;color:#456477}.level-3{background:#f6f0e6;color:#87632e}.level-4{background:#f6ebeb;color:#8c5050}.new{background:#fff;border-color:#bcd9c5;color:#39734e}.resume-source{font-size:10px;color:#6e7c75;margin-left:auto}.question-card h3{font-size:18px;line-height:1.5;margin:11px 25px 14px;font-weight:650}.question-prompt{margin:0 25px 23px}.question-prompt .eyebrow{font-size:10px;color:#7a8580;letter-spacing:1px}.question-prompt p{margin:5px 0 0;font-size:14px;line-height:1.85;color:#46534d}.answer>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;padding:13px 25px;border-top:1px solid #e8ede8;background:#fbfcfa;font-size:12px;font-weight:600;color:#2c6550;gap:8px}.answer>summary::-webkit-details-marker{display:none}.answer>summary:hover{background:#f1f6ef}.toggle-hint{display:flex;align-items:center;gap:12px;font-size:11px;font-weight:400;color:#617467;white-space:nowrap}.chevron{font-size:17px;line-height:1;transition:transform .15s}.open-text{display:none}.answer[open] .open-text{display:inline}.answer[open] .closed-text{display:none}.answer[open] .chevron{transform:rotate(180deg)}.answer-body{padding:8px 25px 25px;border-top:1px solid #e8ede8;font-size:14px;line-height:1.95;color:#3a4941}.answer-body h4{font-size:13px;letter-spacing:.3px;color:#214f3a;margin:22px 0 10px}.answer-body p{margin:8px 0}.answer-body .intent{padding:0 0 15px;border-bottom:1px dashed var(--line)}.answer-body .intent p{font-size:13px;color:#637069}.answer-steps{padding-left:23px}.answer-steps li{padding-left:5px;margin-bottom:15px}.answer-steps li::marker{color:var(--green);font-weight:700}.answer-body strong{font-weight:650;color:#254c36}.answer-body code,.evidence code{padding:2px 4px;border-radius:3px;background:#f0f3ee;font:12px ui-monospace,Consolas,monospace;overflow-wrap:anywhere}.followups{background:#f1f5ee;border-radius:8px;padding:1px 17px 10px;margin-top:20px}.followups h4{margin-top:13px}.followups h4 span{font-size:10px;color:#697c65;margin-left:6px;font-weight:400}.followups ul{padding-left:18px;font-size:13px}.followups li+li{margin-top:8px}
+.empty-state{background:white;border:1px dashed #cbd8ce;border-radius:12px;text-align:center;padding:45px 20px;margin-top:26px}.empty-state h2{font-size:20px}.empty-state p{font-size:13px;color:var(--muted)}.evidence{margin-top:40px;border-top:1px solid var(--line);font-size:13px;scroll-margin-top:150px}.evidence>summary{padding:20px 0;color:var(--green);font-weight:600}.evidence-body{padding:0 4px 20px}.evidence h3{font-size:17px;margin-top:25px}.table-scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:12px;min-width:680px}th,td{border:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{background:#e8efe8}.page-footer{border-top:1px solid var(--line);padding-top:20px;margin-top:35px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:11px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}.no-script{background:#fff2db;padding:12px;font-size:13px}.no-script+.shell{}.print-note{display:none}
+@media(min-width:1350px){main{padding-left:65px;padding-right:65px}.hero h1{font-size:40px}}
+@media(max-width:1000px){:root{--nav-width:225px}.sidebar{padding:28px 12px 20px}main{padding:0 27px 35px}.category-button{font-size:12px;gap:7px}.hero h1{font-size:31px}}
+@media(max-width:760px){html{scroll-padding-top:165px}.shell{display:block}.sidebar{position:relative;height:auto;padding:18px 18px 10px;border-right:0;border-bottom:1px solid var(--line);overflow:visible}.brand small{font-size:9px}.brand{margin-bottom:16px}.nav-label,.sidebar-footer{display:none}.category-nav{display:flex;gap:6px;overflow-x:auto;padding:2px 2px 8px}.category-button{width:auto;flex-shrink:0;padding:9px 11px;margin:0;font-size:12px}.nav-count{margin-left:2px}.nav-number{display:none}main{padding:0 18px 30px}.topbar{height:52px;font-size:10px}.hero{padding:24px 0}.hero h1{font-size:29px}.hero p{font-size:13px}.hero-stats{gap:15px;margin-top:18px}.hero-stats b{font-size:20px}.intro-details{margin-bottom:12px}.filters{gap:7px}.search input{font-size:12px}select{font-size:12px;min-width:99px;max-width:105px}.toolbar{padding-top:11px}.toolbar-bottom{gap:8px;font-size:11px}.toolbar-actions{gap:4px}.toolbar-actions .button{padding:4px 7px}.group-header h2{font-size:20px}.group-header p{max-width:275px}.question-meta{padding:18px 18px 0}.question-card h3{margin:10px 18px 12px;font-size:17px}.question-prompt{margin:0 18px 20px}.question-prompt p{font-size:13px}.answer>summary{padding:13px 18px}.answer-body{padding:6px 18px 19px;font-size:13px}.resume-source{font-size:9px}.evidence{overflow-wrap:anywhere}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
+@media print{body{background:white;color:black;font-size:11pt}.shell{display:block}.sidebar,.toolbar,.intro-details,.topbar,.page-footer,.evidence,.toggle-hint,.skip-link,.new{display:none!important}main{padding:0}.hero{padding:0 0 15px}.hero h1{font-size:24pt}.hero-stats{display:none}.print-note{display:block!important;font-size:10pt;color:#555}.question-card{box-shadow:none;border:1px solid #ccc;border-radius:0;break-inside:auto}.question-meta,.question-card h3,.question-prompt{break-after:avoid}.answer>summary{background:white;color:black}.answer-body{display:block!important}.answer{content-visibility:visible}.answer::details-content{content-visibility:visible!important;display:block!important}.group-header{break-after:avoid}.answer-steps li,.followups li{break-inside:avoid}.question-number{text-decoration:none}.hero p{font-size:10pt}.group-header h2{font-size:17pt}.question-card h3{font-size:14pt}}
+.related-reading{margin:0 25px 20px;padding:14px 16px;background:var(--soft);border:1px solid var(--line);border-radius:8px}.related-reading h4{margin:0 0 8px;font-size:12px;color:var(--green)}.reading-links{display:flex;flex-wrap:wrap;gap:7px 15px}.reading-links a{font-size:12px;line-height:1.8}.reading-note{font-size:11px;color:var(--muted);margin:9px 0 0}@media(max-width:760px){.related-reading{margin-left:18px;margin-right:18px}}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#catalog">跳到题目列表</a>
+<noscript><div class="no-script">JavaScript 未启用：仍可阅读全部题目并点击展开答案；搜索和筛选需要启用 JavaScript。</div></noscript>
+<div class="shell">
+<aside class="sidebar" aria-label="题库导航">
+<a class="brand" href="#top"><span class="brand-mark" aria-hidden="true">n.</span><span><strong>nanobot</strong><small>INTERVIEW NOTEBOOK</small></span></a>
+<div class="nav-label">学习路径 · 由浅入深</div>
+<nav class="category-nav" aria-label="按问题类型筛选">
+<button class="category-button" data-category="all" aria-pressed="true"><span class="nav-number">◎</span><span>全部问题</span><span class="nav-count">40</span></button>
+{{NAVIGATION}}
+</nav>
+<div class="sidebar-footer"><strong>先回答，再展开。</strong><div class="sidebar-line"></div>从业务目标讲起，逐层落到机制、权衡与证据。<a href="#evidence" id="evidence-link">查看实现核验与简历差异 ↗</a></div>
+</aside>
+<main id="top">
+<div class="topbar"><span>项目备考 / <strong>个人事务 AI 助手</strong></span><span><i class="status-dot" aria-hidden="true"></i>离线阅读 · 无需登录</span></div>
+<header class="hero"><span class="eyebrow">PROJECT-BASED INTERVIEW / NANOBOT</span><h1>把项目讲清楚，<br><span>把技术细节答扎实。</span></h1><p>围绕个人事务 Agent 的真实场景，按八类问题逐层深入。先尝试独立作答，再展开考察意图、参考答案和条件式追问。</p><div class="hero-stats"><span><b>40</b>道主问题</span><span class="divider" aria-hidden="true"></span><span><b>8</b>类递进主题</span><span class="divider" aria-hidden="true"></span><span><b>80</b>个条件式追问</span></div><p class="print-note">打印范围为当前筛选结果，包含参考答案。核验依据：当前仓库与原始简历描述；扩展设计不等于已实现能力。</p></header>
+<details class="intro-details"><summary>使用说明与事实边界：问题来自简历，答案区分已有实现与扩展设计</summary><div class="intro-content"><p><strong>顺序：</strong>业务理解 → 架构编排 → 调度状态 → 工具邮件 → 记忆上下文 → 可靠性性能 → 评测监控 → 技术深挖。分类表示学习路径，单题难度用标签注明。</p><p><strong>提问规则：</strong>初始问题来自原始简历。追问中的“若候选人说……”只有在现场回答满足条件时才使用，不能把参考答案当作对方已经说过的话。建议按题目场景、业务目标、模块流转、核心机制与权衡的顺序回答。</p><p><strong>当前事实：</strong>代码可核实文件记忆、工具循环、Cron、邮件通道与 WebSocket 基础；未核实 ChromaDB 检索和 FastAPI 服务。相关题目保留为原简历的核验入口，答案中的“待核验／扩展设计”不能背成已完成成绩。优化后的简历如果删除了这些亮点，面试时不把它们当作已陈述事实。</p><ul><li><strong>S1</strong>：长期运行、日程与天气、提前提醒。</li><li><strong>S2</strong>：主动推送、事项提醒与任务打卡。</li><li><strong>S3</strong>：邮件检查、结构化摘要、待办与时间要求。</li><li><strong>S4</strong>：长期记忆、语义分块、ChromaDB 与 Top-K。</li><li><strong>S5</strong>：Dashboard、FastAPI + WebSocket、状态与调用追踪。</li></ul><p><strong>评分：</strong>每题 0—4 分：概念 → 闭环 → 异常与权衡 → 可复现证据。40 题满分 160，换算百分制为得分 ÷ 实答题目满分 × 100。诚实承认尚未实现，与缺乏设计能力分开评价。</p><p><strong>阅读操作：</strong>搜索涵盖问题与折叠答案；多个关键词同时匹配。分类、难度和搜索条件可组合。展开／收起与打印仅作用于当前筛选结果。</p></div></details>
+<div class="toolbar" aria-label="搜索和阅读控制"><div class="filters"><label class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span class="sr-only">搜索题目和答案</span><input id="search" type="search" placeholder="搜索问题、机制或关键词，如：幂等、记忆、重试" autocomplete="off"></label><label><span class="sr-only">筛选难度</span><select id="difficulty"><option value="all">全部难度</option><option value="1">基础</option><option value="2">进阶</option><option value="3">深入</option><option value="4">压力</option></select></label></div><div class="toolbar-bottom"><span id="match-status" class="match-status" role="status" aria-live="polite">全部问题 · 40 / 40 题</span><div class="toolbar-actions"><button class="button" id="expand-all" type="button">展开答案</button><button class="button" id="collapse-all" type="button">收起答案</button><button class="button" id="print" type="button">打印</button></div></div></div>
+<div id="catalog" tabindex="-1">{{QUESTIONS}}</div>
+<section class="empty-state" id="empty-state" hidden><span class="eyebrow">NO MATCHES</span><h2>没有找到匹配的问题</h2><p>试试更短的关键词，或清除分类与难度条件。</p><button class="button" id="reset-filters" type="button">清除全部筛选</button></section>
+<details class="evidence" id="evidence"><summary>实现核验与简历差异 · 备考参考附录</summary><div class="evidence-body">{{EVIDENCE}}</div></details>
+<footer class="page-footer"><span>基于项目的 40 题 · 文档核对基线 fc6a8a5</span><span>事实、个人贡献与设计推演，请分别说明。</span></footer>
+</main>
+</div>
+<script>
+(() => {
+  'use strict';
+  const cards = [...document.querySelectorAll('.question-card')];
+  const groups = [...document.querySelectorAll('.question-group')];
+  const categoryButtons = [...document.querySelectorAll('.category-button')];
+  const search = document.querySelector('#search');
+  const difficulty = document.querySelector('#difficulty');
+  const status = document.querySelector('#match-status');
+  let category = 'all';
+  let categoryName = '全部问题';
+  const searchable = new Map(cards.map(card => [card, card.textContent.toLocaleLowerCase()]));
+  const visibleCards = () => cards.filter(card => !card.hidden);
+  function filter() {
+    const tokens = search.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    cards.forEach(card => {
+      card.hidden = !((category === 'all' || card.dataset.category === category) &&
+        (difficulty.value === 'all' || card.dataset.level === difficulty.value) &&
+        tokens.every(token => searchable.get(card).includes(token)));
+    });
+    groups.forEach(group => {
+      const count = [...group.querySelectorAll('.question-card')].filter(card => !card.hidden).length;
+      group.hidden = count === 0;
+      group.querySelector('.group-count').textContent = count + ' 题';
+    });
+    categoryButtons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.category === category)));
+    const count = visibleCards().length;
+    status.textContent = categoryName + ' · ' + count + ' / 40 题' + (tokens.length ? ' · 全文匹配' : '');
+    document.querySelector('#empty-state').hidden = count !== 0;
+  }
+  function reset() {
+    category = 'all'; categoryName = '全部问题'; search.value = ''; difficulty.value = 'all'; filter();
+  }
+  categoryButtons.forEach(button => button.addEventListener('click', () => {
+    category = button.dataset.category;
+    categoryName = button.children[1].textContent;
+    filter();
+    document.querySelector('#catalog').scrollIntoView({block: 'start'});
+  }));
+  function filterAndReveal() {
+    filter();
+    document.querySelector('#catalog').scrollIntoView({block: 'start', behavior: 'instant'});
+  }
+  search.addEventListener('input', filterAndReveal);
+  difficulty.addEventListener('change', filterAndReveal);
+  document.querySelector('#reset-filters').addEventListener('click', () => {reset(); search.focus();});
+  document.querySelector('#expand-all').addEventListener('click', () => visibleCards().forEach(card => card.querySelector('.answer').open = true));
+  document.querySelector('#collapse-all').addEventListener('click', () => visibleCards().forEach(card => card.querySelector('.answer').open = false));
+  document.querySelector('#evidence-link').addEventListener('click', () => {document.querySelector('#evidence').open = true;});
+  function revealHash() {
+    const hash = location.hash.slice(1);
+    const card = cards.find(card => card.id === hash);
+    if (card) {
+      if (card.hidden) reset();
+      card.scrollIntoView({block: 'start', behavior: 'instant'});
+    } else if (hash === 'evidence') {
+      document.querySelector('#evidence').open = true;
+    }
+  }
+  window.addEventListener('hashchange', revealHash);
+  let printState;
+  window.addEventListener('beforeprint', () => {
+    if (printState) return;
+    printState = new Map(cards.map(card => {const answer = card.querySelector('.answer'); return [answer, answer.open];}));
+    visibleCards().forEach(card => card.querySelector('.answer').open = true);
+  });
+  window.addEventListener('afterprint', () => {if (printState) {printState.forEach((open, answer) => answer.open = open); printState = undefined;}});
+  document.querySelector('#print').addEventListener('click', () => window.print());
+  filter();
+  if (location.hash) requestAnimationFrame(revealHash);
+})();
+</script>
+</body>
+</html>
