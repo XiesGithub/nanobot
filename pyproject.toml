@@ -65,6 +65,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mail-rag = [
+    "sentence-transformers>=3.0,<6.0",
+    "numpy>=1.26,<3.0",
+    "psutil>=5.9,<8.0",
+]
 api = [
     "aiohttp>=3.9.0,<4.0.0",
 ]

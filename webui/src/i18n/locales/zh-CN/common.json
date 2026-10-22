@@ -53,7 +53,8 @@
     },
     "nav": {
       "general": "通用",
-      "byok": "BYOK"
+      "byok": "BYOK",
+      "mail": "邮件知识库"
     },
     "sections": {
       "interface": "界面",
@@ -344,6 +345,94 @@
     "messageTooBig": {
       "title": "消息过大",
       "body": "服务端因超过大小限制拒收了上一条消息。可移除部分图片或使用更小的图片后重试。"
+    }
+  },
+  "mail": {
+    "sources": "邮件来源",
+    "sourceNotice": "证据来自本地归档。历史引用不代表新的承诺；移除来源会使旧引用失效。",
+    "accessRevoked": "私有来源访问权限已失效。",
+    "loading": "正在加载…",
+    "unknownTime": "收信时间未知",
+    "body": "邮件正文",
+    "partial": "解析不完整：",
+    "download": "下载附件",
+    "next": "下一页",
+    "cancel": "取消",
+    "confirmAction": "确认执行此操作",
+    "confirmExpiry": "确认令牌 5 分钟内有效，仅可使用一次。",
+    "privacy": "邮件和附件保存在本机私有目录。有据问答会把选中的证据发送给配置的 deepseek-v4-flash 服务。仅归档启用后收到且获准的邮件，不回填历史邮箱。外部会话使用受限工具。",
+    "refresh": "刷新状态",
+    "mode": "收信模式",
+    "archive": "归档获准邮件",
+    "archiveHint": "在本地索引邮件正文和支持的附件。",
+    "trigger": "允许收信触发 Agent",
+    "triggerHint": "可能调用模型、执行工具并按配置回复邮件。关闭后停止新任务派发；已执行的影响无法撤销。",
+    "modes": {
+      "00": "归档和 Agent 交互均关闭。",
+      "01": "仅交互，不新增归档。",
+      "10": "仅归档，不调用模型、执行工具或自动回复。",
+      "11": "归档和 Agent 交互均启用。"
+    },
+    "save": "应用收信模式",
+    "health": "归档健康状态",
+    "worker": "归档服务",
+    "online": "正在运行",
+    "offline": "当前服务未运行 Worker",
+    "semantic": "语义索引",
+    "pending": "待处理输入",
+    "admissionWaiting": "接纳前等待",
+    "admissionWaitingHint": "这些来源尚未可靠归档，等待记录不等于已接纳任务；磁盘不可写时只能尽力报告。来源被其他客户端标已读或移除后，不会自动回填。",
+    "indexPending": "待建索引文档",
+    "durableJobs": "已持久接纳任务（按处理阶段）",
+    "types": "附件类型 / 数量 / 大小限制",
+    "inventory": "维护记录",
+    "inventoryKinds": {
+      "documents": "未完整处理文档",
+      "interactions": "不确定交互",
+      "deliveries": "回复发送记录",
+      "removed": "已移除来源",
+      "actions": "操作回执"
+    },
+    "inventoryHint": "重试仅使用本地输入；重新获取和恢复会在确认后连接邮箱。已接受表示任务排队，不代表完成，请刷新查看结果。重新解析和重建索引可通过 CLI 执行。",
+    "empty": "本页没有记录。",
+    "deliveryHint": "交互完成与发送结果分别记录。submitted 仅表示 SMTP 提交返回成功，不保证收件人收到；uncertain 表示结果不确定，不会自动重发；suppressed 表示模式切换后已丢弃。",
+    "cleanupPending": "等待物理清理",
+    "removed": "已从本地移除",
+    "roles": {
+      "current": "当前正文",
+      "quoted": "历史引用",
+      "signature": "签名",
+      "unknown": "未分类正文"
+    },
+    "actions": {
+      "retry": "本地重试",
+      "prepare_remove": "移除来源",
+      "request_restore": "恢复来源",
+      "prepare_refetch": "重新获取附件",
+      "dismiss_interaction": "忽略不确定状态",
+      "prepare_interaction_retry": "重试交互"
+    },
+    "confirm": {
+      "prepare_remove": "将此邮件及附件从本地知识库移除，旧引用将失效。不会删除邮箱服务器中的邮件。",
+      "request_restore": "连接原邮箱，重新获取此封邮件并作为新内容建立索引；旧引用仍然失效。不会自动触发 Agent 或回复邮件。",
+      "prepare_refetch": "连接原邮箱，重新下载指定附件，可能传输私有数据。不会运行 Agent 或发送邮件。",
+      "prepare_interaction_retry": "此前交互可能已经执行工具或发送回复。重试可能重复这些影响，请核对先前结果后再确认。"
+    },
+    "receipts": {
+      "accepted": "已接受，等待处理",
+      "accepted_waiting_service": "已接受，等待 Gateway 启动",
+      "completed": "已完成",
+      "failed": "失败"
+    },
+    "locations": {
+      "page": "页",
+      "paragraph": "段落",
+      "line": "行",
+      "table": "表格",
+      "row": "表格行",
+      "column": "列",
+      "sheet": "工作表",
+      "slide": "幻灯片"
     }
   }
 }

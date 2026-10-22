@@ -16,6 +16,7 @@ from nanobot.agent.tools.schema import (
     tool_parameters_schema,
 )
 from nanobot.config.paths import get_media_dir
+from nanobot.security.media import assert_media_path_allowed
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 
 _FS_WORKSPACE_BOUNDARY_NOTE = (
@@ -36,6 +37,11 @@ def _resolve_path(
     if not p.is_absolute() and workspace:
         p = workspace / p
     resolved = p.resolve()
+    try:
+        assert_media_path_allowed(resolved)
+    except PermissionError as exc:
+        raise PermissionError(f"Path {path} is outside the current chat's allowed media directory"
+                              + _FS_WORKSPACE_BOUNDARY_NOTE) from exc
     if allowed_dir:
         media_path = get_media_dir().resolve()
         all_dirs = [allowed_dir] + [media_path] + (extra_allowed_dirs or [])
@@ -928,6 +934,10 @@ class ListDirTool(_FsTool):
                 for item in sorted(dp.rglob("*")):
                     if any(p in self._IGNORE_DIRS for p in item.parts):
                         continue
+                    try:
+                        assert_media_path_allowed(item)
+                    except PermissionError:
+                        continue
                     total += 1
                     if len(items) < cap:
                         rel = item.relative_to(dp)
@@ -935,6 +945,10 @@ class ListDirTool(_FsTool):
             else:
                 for item in sorted(dp.iterdir()):
                     if item.name in self._IGNORE_DIRS:
+                        continue
+                    try:
+                        assert_media_path_allowed(item)
+                    except PermissionError:
                         continue
                     total += 1
                     if len(items) < cap:

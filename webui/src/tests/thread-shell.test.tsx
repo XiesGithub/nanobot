@@ -86,6 +86,58 @@ describe("ThreadShell", () => {
     );
   });
 
+  it("hydrates an offscreen completion from history without mixing A and B", async () => {
+    const client = makeClient();
+    let aCompleted = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("websocket%3Achat-a/messages")) {
+        return httpJson({ messages: aCompleted ? [
+          { role: "user", content: "task A" },
+          { role: "assistant", content: "waiting A", tool_calls: [
+            { id: "gate-a", function: { name: "exec" } },
+          ] },
+          { role: "tool", content: "gate released", tool_call_id: "gate-a" },
+          { role: "assistant", content: "A_RESULT=17" },
+        ] : [] });
+      }
+      return httpJson({ messages: [] });
+    }));
+    const view = (id: string) => wrap(client, <ThreadShell
+      session={session(id)} title={id} onToggleSidebar={() => {}}
+    />);
+    const { rerender } = render(view("chat-a"));
+    await act(async () => {});
+    fireEvent.change(screen.getByLabelText("Message input"), { target: { value: "task A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await act(async () => client._emitChat("chat-a", {
+      event: "message", chat_id: "chat-a", turn_id: "turn-a", kind: "progress", text: "waiting A",
+    }));
+    await act(async () => rerender(view("chat-b")));
+    expect(screen.queryByText("task A")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Message input"), { target: { value: "task B" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await act(async () => {
+      client._emitChat("chat-b", { event: "message", chat_id: "chat-b", turn_id: "turn-b", text: "B_RESULT=23" });
+      client._emitChat("chat-b", { event: "turn_end", chat_id: "chat-b", turn_id: "turn-b" });
+      aCompleted = true;
+      // There is no A subscription while B is selected. Only persisted history
+      // can supply this result when the user returns to A.
+      client._emitChat("chat-a", { event: "message", chat_id: "chat-a", turn_id: "turn-a", text: "A_RESULT=17" });
+      client._emitChat("chat-a", { event: "turn_end", chat_id: "chat-a", turn_id: "turn-a" });
+    });
+    expect(screen.getByText("B_RESULT=23")).toBeInTheDocument();
+    expect(screen.queryByText("A_RESULT=17")).not.toBeInTheDocument();
+    await act(async () => rerender(view("chat-a")));
+    await waitFor(() => expect(screen.getByText("A_RESULT=17")).toBeInTheDocument());
+    expect(screen.queryByText("B_RESULT=23")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop generating" })).not.toBeInTheDocument();
+    await act(async () => rerender(view("chat-b")));
+    expect(screen.getByText("B_RESULT=23")).toBeInTheDocument();
+    expect(screen.queryByText("A_RESULT=17")).not.toBeInTheDocument();
+    expect(client.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
   it("does not navigate away when clicking the chat title", async () => {
     const client = makeClient();
     const onGoHome = vi.fn();

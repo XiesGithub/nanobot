@@ -50,6 +50,7 @@ class EmailConfig(Base):
     from_address: str = ""
 
     auto_reply_enabled: bool = True
+    trigger_agent: bool = True
     poll_interval_seconds: int = 30
     mark_seen: bool = True
     max_body_chars: int = 12000
@@ -114,7 +115,7 @@ class EmailChannel(BaseChannel):
     def default_config(cls) -> dict[str, Any]:
         return EmailConfig().model_dump(by_alias=True)
 
-    def __init__(self, config: Any, bus: MessageBus):
+    def __init__(self, config: Any, bus: MessageBus, mail_service=None):
         if isinstance(config, dict):
             config = EmailConfig.model_validate(config)
         super().__init__(config, bus)
@@ -122,8 +123,18 @@ class EmailChannel(BaseChannel):
         self._self_addresses = self._collect_self_addresses()
         self._last_subject_by_chat: dict[str, str] = {}
         self._last_message_id_by_chat: dict[str, str] = {}
+        self._degraded_delivery_attempts: set[tuple[str, int]] = set()
         self._processed_uids: set[str] = set()  # Capped to prevent unbounded growth
         self._MAX_PROCESSED_UIDS = 100000
+        self.mail_service = mail_service
+        self._mail_ingress = None
+        if mail_service is not None:
+            mail_service.email_config = self.config
+            from nanobot.knowledge.mail.email_ingress import MailIngress
+            self._mail_ingress = MailIngress(self, mail_service)
+            if mail_service.worker is not None:
+                from nanobot.knowledge.mail.source_fetch import SourceFetcher
+                mail_service.worker.maintenance.source_fetcher = SourceFetcher(self._mail_ingress)
 
     async def start(self) -> None:
         """Start polling IMAP for inbound emails."""
@@ -151,6 +162,10 @@ class EmailChannel(BaseChannel):
             try:
                 inbound_items = await asyncio.to_thread(self._fetch_new_messages)
                 for item in inbound_items:
+                    security = item.get("_security")
+                    if self._mail_ingress is not None and security is not None and security.task_id:
+                        if not self._mail_ingress.dispatch.transition(security.task_id, "pending", "dispatching", attempt_id=security.attempt_id):
+                            continue
                     sender = item["sender"]
                     subject = item.get("subject", "")
                     message_id = item.get("message_id", "")
@@ -166,28 +181,43 @@ class EmailChannel(BaseChannel):
                         content=item["content"],
                         media=item.get("media") or None,
                         metadata=item.get("metadata", {}),
+                        security=security,
                     )
             except Exception:
                 self.logger.exception("Polling error")
 
-            await asyncio.sleep(poll_seconds)
+            if self.mail_service is not None:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self.mail_service.capacity_changed.wait(), poll_seconds)
+                    self.mail_service.capacity_changed.clear()
+                    try:
+                        await asyncio.to_thread(self._mail_ingress.capacity_available)
+                    except Exception:
+                        self._mail_ingress._health("admission_resume_unavailable")
+            else:
+                await asyncio.sleep(poll_seconds)
 
     async def stop(self) -> None:
         """Stop polling loop."""
         self._running = False
+        if self.mail_service is not None:
+            self.mail_service.capacity_changed.set()
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send email via SMTP."""
         if not self.config.consent_granted:
+            await self._record_skipped_delivery(msg, "consent_required")
             self.logger.warning("Skip email send: consent_granted is false")
             return
 
         if not self.config.smtp_host:
+            await self._record_skipped_delivery(msg, "smtp_not_configured")
             self.logger.warning("SMTP host not configured")
             return
 
         to_addr = msg.chat_id.strip()
         if not to_addr:
+            await self._record_skipped_delivery(msg, "recipient_missing")
             self.logger.warning("Missing recipient address")
             return
 
@@ -197,6 +227,7 @@ class EmailChannel(BaseChannel):
 
         # autoReplyEnabled only controls automatic replies, not proactive sends
         if is_reply and not self.config.auto_reply_enabled and not force_send:
+            await self._record_skipped_delivery(msg, "auto_reply_disabled")
             self.logger.info("Skip automatic reply to {}: auto_reply_enabled is false", to_addr)
             return
 
@@ -219,10 +250,58 @@ class EmailChannel(BaseChannel):
             email_msg["References"] = in_reply_to
 
         try:
-            await asyncio.to_thread(self._smtp_send, email_msg)
+            await asyncio.to_thread(self._guarded_smtp_send, email_msg, msg.security)
         except Exception:
             self.logger.exception("Error sending to {}", to_addr)
             raise
+
+    async def _record_skipped_delivery(self, msg, code):
+        security = msg.security
+        if self._mail_ingress and security and security.origin_kind == "email_ingress" and security.task_id:
+            await asyncio.to_thread(self._mail_ingress.dispatch.delivery_result, security.task_id, security.attempt_id, "not_sent", code)
+
+    def _guarded_smtp_send(self, email_msg: EmailMessage, security) -> None:
+        if self.mail_service is not None:
+            with self.mail_service.mode_gate:
+                mode = self.mail_service.mode()
+                if not mode["trigger_agent"] and (
+                    security is None or security.origin_kind == "email_ingress"
+                ):
+                    return
+                tracked = security and security.origin_kind == "email_ingress" and security.task_id
+                if security and security.origin_kind == "email_ingress" and not tracked:
+                    if security.mode_revision != mode["mode_revision"]:
+                        return
+                    key = (security.source_key or "", security.mode_revision)
+                    if not key[0] or key in self._degraded_delivery_attempts:
+                        return
+                    if len(self._degraded_delivery_attempts) >= 100000:
+                        if self._mail_ingress:
+                            self._mail_ingress._health("delivery_tracking_capacity")
+                        return
+                    # No durable receipt is available. Fence duplicates in this
+                    # process before SMTP; an ambiguous failure must not auto-retry.
+                    self._degraded_delivery_attempts.add(key)
+                if tracked:
+                    with self.mail_service.store.connect(write=True) as db:
+                        changed = db.execute("""UPDATE interaction_deliveries SET status='sending'
+                            WHERE status='queued' AND attempt_id=(SELECT attempt_id FROM
+                            interaction_dispatches WHERE task_id=? AND attempt_id=? AND state='completed')""",
+                            (security.task_id, security.attempt_id)).rowcount
+                        if not changed:
+                            return  # Never automatically replay an uncertain SMTP attempt.
+                try:
+                    self._smtp_send(email_msg)
+                except Exception:
+                    if not tracked:
+                        raise
+                    self._mail_ingress.dispatch.delivery_result(security.task_id, security.attempt_id, "uncertain", "smtp_result_uncertain")
+                    self.logger.warning("Tracked email send result is uncertain; automatic retry suppressed")
+                    return
+                if tracked:
+                    self._mail_ingress.dispatch.delivery_result(security.task_id, security.attempt_id, "submitted")
+        elif self.config.trigger_agent or (security is not None and security.origin_kind != "email_ingress"):
+            self._smtp_send(email_msg)
 
     def _validate_config(self) -> bool:
         missing = []
@@ -232,11 +311,11 @@ class EmailChannel(BaseChannel):
             missing.append("imap_username")
         if not self.config.imap_password:
             missing.append("imap_password")
-        if not self.config.smtp_host:
+        if self.config.trigger_agent and not self.config.smtp_host:
             missing.append("smtp_host")
-        if not self.config.smtp_username:
+        if self.config.trigger_agent and not self.config.smtp_username:
             missing.append("smtp_username")
-        if not self.config.smtp_password:
+        if self.config.trigger_agent and not self.config.smtp_password:
             missing.append("smtp_password")
 
         if missing:
@@ -264,6 +343,10 @@ class EmailChannel(BaseChannel):
 
     def _fetch_new_messages(self) -> list[dict[str, Any]]:
         """Poll IMAP and return parsed unread messages."""
+        if self._mail_ingress is not None:
+            return self._mail_ingress.poll()
+        if not self.config.trigger_agent:
+            return []
         return self._fetch_messages(
             search_criteria=("UNSEEN",),
             mark_seen=self.config.mark_seen,

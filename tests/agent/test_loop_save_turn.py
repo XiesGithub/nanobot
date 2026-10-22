@@ -269,6 +269,86 @@ def test_restore_runtime_checkpoint_dedupes_overlapping_tail() -> None:
     assert session.messages[2]["tool_call_id"] == "call_pending"
 
 
+def test_runtime_checkpoint_keeps_completed_results_from_earlier_iterations() -> None:
+    loop = _mk_loop()
+    loop.sessions = MagicMock()
+    read_call = {
+        "id": "call_read",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": '{"path":"fact.txt"}'},
+    }
+    read_assistant = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [read_call],
+    }
+    read_result = {
+        "role": "tool",
+        "tool_call_id": "call_read",
+        "name": "read_file",
+        "content": "值73",
+    }
+    gate_call = {
+        "id": "call_gate",
+        "type": "function",
+        "function": {"name": "evaluation_gate", "arguments": "{}"},
+    }
+    gate_assistant = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [gate_call],
+    }
+    session = Session(key="test:checkpoint-multiple-iterations")
+
+    loop._set_runtime_checkpoint(
+        session,
+        {
+            "phase": "awaiting_tools",
+            "iteration": 0,
+            "assistant_message": read_assistant,
+            "completed_tool_results": [],
+            "pending_tool_calls": [read_call],
+        },
+    )
+    loop._set_runtime_checkpoint(
+        session,
+        {
+            "phase": "tools_completed",
+            "iteration": 0,
+            "assistant_message": read_assistant,
+            "completed_tool_results": [read_result],
+            "pending_tool_calls": [],
+        },
+    )
+    loop._set_runtime_checkpoint(
+        session,
+        {
+            "phase": "awaiting_tools",
+            "iteration": 1,
+            "assistant_message": gate_assistant,
+            "completed_tool_results": [],
+            "pending_tool_calls": [gate_call],
+        },
+    )
+
+    assert loop._restore_runtime_checkpoint(session) is True
+    assert [(message.get("role"), message.get("tool_call_id")) for message in session.messages] == [
+        ("assistant", None),
+        ("tool", "call_read"),
+        ("assistant", None),
+        ("tool", "call_gate"),
+    ]
+    assert session.messages[1]["content"] == "值73"
+    assert "interrupted before this tool finished" in session.messages[3]["content"].lower()
+    restored_history = session.get_history()
+    assert sum(
+        message.get("tool_call_id") == "call_read" for message in restored_history
+    ) == 1
+    assert next(
+        message for message in restored_history if message.get("tool_call_id") == "call_read"
+    )["content"] == "值73"
+
+
 @pytest.mark.asyncio
 async def test_process_message_persists_user_message_before_turn_completes(tmp_path: Path) -> None:
     loop = _make_full_loop(tmp_path)

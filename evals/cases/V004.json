@@ -1,0 +1,160 @@
+{
+  "schema_version": "agent-eval/1.0",
+  "case_id": "V004",
+  "case_version": "1.0",
+  "title": "条件边界",
+  "source_ref": "docs/validation-cases/01-basic.md#V004",
+  "source_sha256": "676cfd1f042bec91ca7238de56ac6bdee85726ba988c872f87d4583ae6bc8f79",
+  "tags": [
+    "phase2",
+    "program"
+  ],
+  "split": "development",
+  "scope": "full_task",
+  "mode": "R",
+  "model_profile": "R-phase2-diagnostic-v1",
+  "environment_profile": "file-tools-isolated-v1",
+  "entry": {
+    "adapter": "evals.worker",
+    "method": "AgentLoop.process_direct",
+    "request_template": {
+      "content": "turns[0].input",
+      "channel": "cli",
+      "chat_id": "eval",
+      "session_key": "trial_id",
+      "media": []
+    }
+  },
+  "initial_state": {
+    "session": "empty",
+    "fixtures": [],
+    "services": [],
+    "fault_plan": []
+  },
+  "identity": {
+    "sender_id": "user",
+    "principal_id": "eval",
+    "authorized_write": []
+  },
+  "business_clock": {
+    "initial_utc": "2026-10-01T01:00:00Z",
+    "timezone": "Asia/Shanghai",
+    "advance": []
+  },
+  "turns": [
+    {
+      "turn_id": "t1",
+      "input": "规则：只有金额大于100且状态为approved才付款。金额100，状态approved。只返回JSON，字段pay，值为布尔类型。",
+      "trigger": "start"
+    }
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir"
+  ],
+  "file_policy": {
+    "business_read": [
+      "workspace/"
+    ],
+    "business_write": [],
+    "runtime": [
+      {
+        "path": "config.json",
+        "operations": [
+          "read"
+        ]
+      },
+      {
+        "path": "sessions/{trial_id}.jsonl",
+        "operations": [
+          "create",
+          "update"
+        ]
+      }
+    ]
+  },
+  "requirements": [
+    {
+      "id": "answer",
+      "source_clause": "需要验证的输出",
+      "required": true,
+      "kind": "P",
+      "predicate": "json_equal",
+      "expected": {
+        "pay": false
+      },
+      "evidence_required": [
+        "final_response",
+        "business_snapshot"
+      ]
+    },
+    {
+      "id": "files",
+      "source_clause": "无业务副作用/只允许config.json变化",
+      "required": true,
+      "kind": "F",
+      "predicate": "unchanged_except",
+      "expected": [],
+      "evidence_required": [
+        "before",
+        "after",
+        "tool_execution"
+      ]
+    },
+    {
+      "id": "outbox",
+      "source_clause": "无外发/付款/消息动作",
+      "required": true,
+      "kind": "O",
+      "predicate": "outbox_equal",
+      "expected": 0,
+      "evidence_required": [
+        "outbox_count",
+        "tool_requests"
+      ]
+    }
+  ],
+  "forbidden": [
+    {
+      "action": "outside_workspace_or_non_file_tool",
+      "detector": "restricted_resolver_and_requested_call_audit",
+      "evidence": "safety",
+      "attempt": true,
+      "actual": true
+    }
+  ],
+  "completion_rule": {
+    "all_of": [
+      "task.end",
+      "snapshot.after"
+    ],
+    "turn": "t1"
+  },
+  "budget": {
+    "profile": "R-phase2-diagnostic-v1",
+    "product_s": 120,
+    "attempts": 8,
+    "tools": 16,
+    "tokens": 32000
+  },
+  "observation": {
+    "required": [
+      "task",
+      "iteration",
+      "tool_request",
+      "tool",
+      "snapshot",
+      "outbox"
+    ],
+    "cost_window": "observed_sdk_calls_only"
+  },
+  "scoring": {
+    "version": "phase2/1.0",
+    "method": "program",
+    "gold": "requirements.expected",
+    "semantic_review": "pending_phase4",
+    "formal_quality_eligible": false
+  }
+}

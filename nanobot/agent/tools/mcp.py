@@ -28,6 +28,8 @@ _TRANSIENT_EXC_NAMES: frozenset[str] = frozenset((
 ))
 
 _WINDOWS_SHELL_LAUNCHERS: frozenset[str] = frozenset(("npx", "npm", "pnpm", "yarn", "bunx"))
+_WINDOWS_CMD_UNSAFE_ARG_RE = re.compile(r'[\r\n"%]')
+_WINDOWS_CMD_UNQUOTED_META_RE = re.compile(r'[&|<>^()]')
 
 # Characters allowed in tool names by model providers (Anthropic, OpenAI, etc.).
 # Replace anything outside [a-zA-Z0-9_-] with underscore and collapse runs.
@@ -49,12 +51,27 @@ def _windows_command_basename(command: str) -> str:
     return command.replace("\\", "/").rsplit("/", maxsplit=1)[-1].lower()
 
 
+def _is_safe_windows_cmd_token(value: str) -> bool:
+    """Check whether list2cmdline quotes a token that contains cmd metacharacters."""
+    if _WINDOWS_CMD_UNSAFE_ARG_RE.search(value):
+        return False
+    if " " in value or "\t" in value:
+        return True
+    return _WINDOWS_CMD_UNQUOTED_META_RE.search(value) is None
+
+
 def _normalize_windows_stdio_command(
     command: str,
     args: list[str] | None,
     env: dict[str, str] | None,
 ) -> tuple[str, list[str], dict[str, str] | None]:
-    """Wrap Windows shell launchers so MCP stdio servers start reliably."""
+    """Wrap Windows shell launchers so MCP stdio servers start reliably.
+
+    ``cmd /c`` treats the remaining command line as shell syntax. The ``@``
+    token keeps a quoted batch path from being mistaken for a quote around the
+    whole /c payload. Arguments that cmd cannot preserve through its parse
+    stages are rejected instead of being passed as shell syntax.
+    """
     normalized_args = list(args or [])
     if os.name != "nt":
         return command, normalized_args, env
@@ -76,8 +93,15 @@ def _normalize_windows_stdio_command(
     if not should_wrap:
         return command, normalized_args, env
 
+    if not _is_safe_windows_cmd_token(command) or any(
+        not _is_safe_windows_cmd_token(arg) for arg in normalized_args
+    ):
+        raise ValueError(
+            "Windows cmd launchers cannot safely pass cmd syntax in command paths or arguments"
+        )
+
     comspec = (env or {}).get("COMSPEC") or os.environ.get("COMSPEC") or "cmd.exe"
-    return comspec, ["/d", "/c", command, *normalized_args], env
+    return comspec, ["/d", "/v:off", "/c", "@", command, *normalized_args], env
 
 
 def _extract_nullable_branch(options: Any) -> tuple[dict[str, Any], bool] | None:

@@ -1,0 +1,651 @@
+{
+  "version": "phase3-selfcheck/1.0",
+  "created_at": "2026-10-09T07:48:45.696894+00:00",
+  "run_id": "selfcheck-7ef75e6bd2154f308fd581408da5367f",
+  "profile": "runner_contract",
+  "data_kind": "deterministic_control",
+  "model": "deepseek-v4-flash",
+  "real_model_calls": 0,
+  "full_task_validation": false,
+  "ok": true,
+  "controls": [
+    {
+      "control": "retry_503",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 2,
+        "linked_retry": true,
+        "retry_waits": 1
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 2,
+        "linked_retry": true,
+        "retry_waits": 1
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 4,
+          "retry_wait": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "retry_503.jsonl",
+        "sha256": "c0c5dee1cdfaa1c934e3e589f078b915849996b27dad028bd699b3bb71dc70b5",
+        "events": 12
+      }
+    },
+    {
+      "control": "image_fallback",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 2,
+        "linked_retry": true,
+        "input_changed": true
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 2,
+        "linked_retry": true,
+        "input_changed": true
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 4
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "image_fallback.jsonl",
+        "sha256": "fe20bdeb6484266eb907e81710ccd2d04bf0edfe6698373a3a3acc12b7a30da6",
+        "events": 10
+      }
+    },
+    {
+      "control": "parameter_rejection",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_requested": 1,
+        "tool_executed": 0,
+        "rejected": true
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_requested": 1,
+        "tool_executed": 0,
+        "rejected": true
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 4,
+          "model_request": 4,
+          "scripted_response": 4,
+          "tool": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 1,
+        "tool_executed": 0
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "parameter_rejection.jsonl",
+        "sha256": "7bbfcd688a101ed3d76b5d332ffcaf5380335101d339151fb6e734c69d521e28",
+        "events": 16
+      }
+    },
+    {
+      "control": "empty_finalization",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 3,
+        "finalization_requests": 1
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 3,
+        "finalization_requests": 1
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 4,
+          "model_request": 6,
+          "scripted_response": 6
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "empty_finalization.jsonl",
+        "sha256": "4a83378e6c0c9ce463ca1e3cc984c1909e7b426b99361180a135b4ab41cd7f2f",
+        "events": 18
+      }
+    },
+    {
+      "control": "parallel_tools",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_requested": 2,
+        "tool_executed": 2,
+        "completed": [
+          0,
+          1
+        ],
+        "overlap": true
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_requested": 2,
+        "tool_executed": 2,
+        "completed": [
+          0,
+          1
+        ],
+        "overlap": true
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 4,
+          "model_request": 4,
+          "scripted_response": 4,
+          "tool": 4,
+          "tool_admitted": 2,
+          "tool_execution": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 2,
+        "tool_executed": 2
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "parallel_tools.jsonl",
+        "sha256": "16e300a9182989efecd94428c1cd5e7abd75ede8c68c2a3efeb189b3f8c1a742",
+        "events": 22
+      }
+    },
+    {
+      "control": "tool_exception",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_error_kind": "ValueError"
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_error_kind": "ValueError"
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 4,
+          "model_request": 4,
+          "scripted_response": 4,
+          "tool": 2,
+          "tool_admitted": 1,
+          "tool_execution": 1
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 1,
+        "tool_executed": 1
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "tool_exception.jsonl",
+        "sha256": "0eccca144c0c1089eb4b278905c61f63928b41b771652e511e6834711935f325",
+        "events": 18
+      }
+    },
+    {
+      "control": "request_cancel",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "request_cancel.jsonl",
+        "sha256": "56c08043ec30175ca6ebac9da6f68d910f55a338f01ccfc9155bc5d799e34f89",
+        "events": 8
+      }
+    },
+    {
+      "control": "tool_cancel",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 2,
+          "tool": 2,
+          "tool_admitted": 1,
+          "tool_execution": 1
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 1,
+        "tool_executed": 1
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "tool_cancel.jsonl",
+        "sha256": "666714853a07d1a5cabad45baa73d1fcf71a759a319f265e21e4ad06ba5953c1",
+        "events": 12
+      }
+    },
+    {
+      "control": "retry_wait_cancel",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 2,
+          "retry_wait": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "retry_wait_cancel.jsonl",
+        "sha256": "314fd2cd58cc014072e79d23d192ee2b0173cb43f4ca9f14d37053364f499988",
+        "events": 10
+      }
+    },
+    {
+      "control": "collector_failure",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "collector_error_detected": true
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "collector_error_detected": true
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "span_start_missing"
+        ],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 1,
+          "collector_error": 1
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [
+        {
+          "type": "scripted_response",
+          "phase": "start",
+          "span_id": "8756bd0eb60a4b6fad7a2cb80927d858",
+          "error_kind": "OSError"
+        }
+      ],
+      "evidence": {
+        "path": "collector_failure.jsonl",
+        "sha256": "b5f29c4a49b968da3b0bdd1487df7f23d810a24ed5433d4e4066388b1ba75ecd",
+        "events": 8
+      }
+    },
+    {
+      "control": "self_cancel_sibling",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "tool_terminals": [
+          [
+            "0",
+            "cancelled"
+          ],
+          [
+            "1",
+            "end"
+          ]
+        ],
+        "completed": [
+          1
+        ]
+      },
+      "actual": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "tool_terminals": [
+          [
+            "0",
+            "cancelled"
+          ],
+          [
+            "1",
+            "end"
+          ]
+        ],
+        "completed": [
+          1
+        ]
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": true,
+        "closed": true,
+        "errors": [],
+        "suspended_span_ids": [],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "task": 2,
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 2,
+          "tool": 4,
+          "tool_admitted": 2,
+          "tool_execution": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": 0,
+        "amount": null,
+        "tool_requested": 2,
+        "tool_executed": 2
+      },
+      "collector_errors": [],
+      "evidence": {
+        "path": "self_cancel_sibling.jsonl",
+        "sha256": "6a1b6544720d3f7213e95d0400222805a8d0c46fbbf906c81d8de14dae206e2d",
+        "events": 16
+      }
+    }
+  ]
+}

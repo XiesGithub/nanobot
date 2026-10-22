@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import UUID
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -21,6 +22,68 @@ class Base(BaseModel):
     """Base model that accepts both camelCase and snake_case keys."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class MailOwnerBinding(Base):
+    """Explicit server-authenticated principal; never derived from email From."""
+
+    model_config = ConfigDict(extra="forbid")
+    binding_id: str = Field(min_length=1, max_length=128)
+    principal_id: str = Field(min_length=1, max_length=256)
+    owner_id: str = Field(default="local-owner", min_length=1, max_length=128)
+    channel: str = Field(min_length=1, max_length=64)
+    private_chat: Literal[True] = True
+    scopes: set[Literal["read", "manage"]] = Field(default_factory=lambda: {"read"})
+
+    @model_validator(mode="after")
+    def validate_principal(self) -> MailOwnerBinding:
+        if any("*" in value or "?" in value or not value.strip() for value in (
+            self.binding_id, self.principal_id, self.owner_id, self.channel,
+        )):
+            raise ValueError("Mail owner bindings must be explicit, nonempty identities")
+        if self.channel in {"email", "system", "cron", "subagent"}:
+            raise ValueError("This origin cannot own a mail knowledge binding")
+        if not self.scopes or "manage" in self.scopes and "read" not in self.scopes:
+            raise ValueError("Mail bindings require read scope")
+        return self
+
+
+class MailKnowledgeConfig(Base):
+    """Opt-in private mail archive. Heavy dependencies are loaded only at runtime."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    archive_enabled: bool = False
+    account_id: UUID | None = None  # Generated and saved by explicit initialization.
+    owner_bindings: list[MailOwnerBinding] = Field(default_factory=list)
+    external_interaction_policy: Literal["restricted"] = "restricted"
+    semantic_enabled: bool = True
+    embedding_model_path: str = ""
+    attachment_types: list[str] = Field(default_factory=lambda: [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/plain",
+    ])
+    max_attachment_bytes: int = Field(default=20 * 1024**2, gt=0)
+    max_attachments: int = Field(default=20, ge=0, le=100)
+    max_message_bytes: int = Field(default=50 * 1024**2, gt=0)
+    max_pending_bytes: int = Field(default=1024**3, gt=0)
+    max_extracted_chars: int = Field(default=2_000_000, gt=0)
+    worker_concurrency: int = Field(default=1, ge=1, le=4)
+
+    @model_validator(mode="after")
+    def validate_limits(self) -> MailKnowledgeConfig:
+        if self.max_pending_bytes < self.max_message_bytes:
+            raise ValueError("maxPendingBytes must be >= maxMessageBytes")
+        if self.archive_enabled and not self.enabled:
+            raise ValueError("archiveEnabled requires mailKnowledge.enabled")
+        ids = [b.binding_id for b in self.owner_bindings]
+        identities = [(b.channel, b.principal_id) for b in self.owner_bindings]
+        if len(ids) != len(set(ids)) or len(identities) != len(set(identities)):
+            raise ValueError("Duplicate mail owner binding")
+        if len({b.owner_id for b in self.owner_bindings}) > 1:
+            raise ValueError("Mail knowledge supports one owner")
+        return self
 
 
 class ChannelsConfig(Base):
@@ -254,6 +317,30 @@ class Config(BaseSettings):
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    mail_knowledge: MailKnowledgeConfig = Field(
+        default_factory=MailKnowledgeConfig,
+        validation_alias=AliasChoices("mailKnowledge", "mail_knowledge"),
+        serialization_alias="mailKnowledge",
+    )
+
+    @model_validator(mode="after")
+    def validate_mail_knowledge(self) -> Config:
+        mail = self.mail_knowledge
+        if mail.enabled and self.agents.defaults.unified_session:
+            raise ValueError("Mail knowledge requires separate sessions (unifiedSession=false)")
+        if mail.enabled and self.agents.defaults.model != "deepseek-v4-flash":
+            raise ValueError("Mail knowledge requires model deepseek-v4-flash")
+        if mail.enabled and self.agents.defaults.dream.model_override not in (
+            None, "deepseek-v4-flash",
+        ):
+            raise ValueError("Mail knowledge requires Dream model deepseek-v4-flash")
+        if mail.archive_enabled:
+            email = getattr(self.channels, "email", {})
+            if not isinstance(email, dict) or not email.get("enabled") or not email.get(
+                "consentGranted", email.get("consent_granted", False)
+            ):
+                raise ValueError("Mail archiving requires enabled email and consentGranted")
+        return self
 
     @property
     def workspace_path(self) -> Path:

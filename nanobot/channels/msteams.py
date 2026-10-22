@@ -324,6 +324,7 @@ class MSTeamsChannel(BaseChannel):
             sender_id=sender_id,
             chat_id=conversation_id,
             content=text,
+            verified_private_principal=sender_id if conversation_type == "personal" else None,
             metadata={
                 "msteams": {
                     "activity_id": activity_id,

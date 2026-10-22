@@ -5,17 +5,16 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-from loguru import logger
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.security.private_logging import private_logger as logger
 from nanobot.utils.helpers import (
     build_assistant_message,
     estimate_message_tokens,
@@ -25,6 +24,14 @@ from nanobot.utils.helpers import (
     strip_think,
     truncate_text,
 )
+from nanobot.utils.observability import (
+    activate_span,
+    model_input_summary,
+    point,
+    span,
+    usage_payload,
+)
+from nanobot.utils.progress_events import build_tool_execution_event
 from nanobot.utils.prompt_templates import render_template
 from nanobot.utils.runtime import (
     EMPTY_FINAL_RESPONSE_MESSAGE,
@@ -76,6 +83,7 @@ class AgentRunSpec:
     context_block_limit: int | None = None
     provider_retry_mode: str = "standard"
     progress_callback: Any | None = None
+    tool_event_callback: Any | None = None
     stream_progress_deltas: bool = True
     retry_wait_callback: Any | None = None
     checkpoint_callback: Any | None = None
@@ -95,6 +103,8 @@ class AgentRunResult:
     error: str | None = None
     tool_events: list[dict[str, str]] = field(default_factory=list)
     had_injections: bool = False
+    # Trusted caller diagnostics; never persist or display as assistant content.
+    error_details: dict[str, Any] | None = field(default=None, repr=False)
 
 
 class AgentRunner:
@@ -238,6 +248,7 @@ class AgentRunner:
         tools_used: list[str] = []
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         error: str | None = None
+        error_details: dict[str, Any] | None = None
         stop_reason = "completed"
         tool_events: list[dict[str, str]] = []
         external_lookup_counts: dict[str, int] = {}
@@ -245,6 +256,7 @@ class AgentRunner:
         workspace_violation_counts: dict[str, int] = {}
         empty_content_retries = 0
         length_recovery_count = 0
+        length_content = ""
         had_injections = False
         injection_cycles = 0
 
@@ -276,6 +288,7 @@ class AgentRunner:
             context = AgentHookContext(iteration=iteration, messages=messages)
             await hook.before_iteration(context)
             response = await self._request_model(spec, messages_for_model, hook, context)
+            response_purpose = "iteration"
             raw_usage = self._usage_dict(response.usage)
             context.response = response
             context.usage = dict(raw_usage)
@@ -283,110 +296,120 @@ class AgentRunner:
             self._accumulate_usage(usage, raw_usage)
 
             if response.should_execute_tools:
+                length_content = ""
                 tool_calls = list(response.tool_calls)
-                ask_index = next((i for i, tc in enumerate(tool_calls) if tc.name == "ask_user"), None)
-                if ask_index is not None:
-                    tool_calls = tool_calls[: ask_index + 1]
-                context.tool_calls = list(tool_calls)
-                if hook.wants_streaming():
-                    await hook.on_stream_end(context, resuming=True)
+                with self._observe_tool_requests(tool_calls) as observations:
+                    preflight = getattr(type(spec.tools), "preflight", None)
+                    if callable(preflight):
+                        await preflight(spec.tools, tool_calls, spec.checkpoint_callback)
+                    ask_index = next((i for i, tc in enumerate(tool_calls) if tc.name == "ask_user"), None)
+                    if ask_index is not None:
+                        for skipped in tool_calls[ask_index + 1:]:
+                            observations[id(skipped)].close(
+                                status="not_executed", reason="after_ask_user",
+                            )
+                        tool_calls = tool_calls[: ask_index + 1]
+                    context.tool_calls = list(tool_calls)
+                    if hook.wants_streaming():
+                        await hook.on_stream_end(context, resuming=True)
 
-                assistant_message = build_assistant_message(
-                    response.content or "",
-                    tool_calls=[tc.to_openai_tool_call() for tc in tool_calls],
-                    reasoning_content=response.reasoning_content,
-                    thinking_blocks=response.thinking_blocks,
-                )
-                messages.append(assistant_message)
-                tools_used.extend(tc.name for tc in tool_calls)
-                await self._emit_checkpoint(
-                    spec,
-                    {
-                        "phase": "awaiting_tools",
-                        "iteration": iteration,
-                        "model": spec.model,
-                        "assistant_message": assistant_message,
-                        "completed_tool_results": [],
-                        "pending_tool_calls": [tc.to_openai_tool_call() for tc in tool_calls],
-                    },
-                )
-
-                await hook.before_execute_tools(context)
-
-                results, new_events, fatal_error = await self._execute_tools(
-                    spec,
-                    tool_calls,
-                    external_lookup_counts,
-                    workspace_violation_counts,
-                )
-                tool_events.extend(new_events)
-                context.tool_results = list(results)
-                context.tool_events = list(new_events)
-                completed_tool_results: list[dict[str, Any]] = []
-                for tool_call, result in zip(tool_calls, results):
-                    if isinstance(fatal_error, AskUserInterrupt) and tool_call.name == "ask_user":
-                        continue
-                    tool_message = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.name,
-                        "content": self._normalize_tool_result(
-                            spec,
-                            tool_call.id,
-                            tool_call.name,
-                            result,
-                        ),
-                    }
-                    messages.append(tool_message)
-                    completed_tool_results.append(tool_message)
-                if fatal_error is not None:
-                    if isinstance(fatal_error, AskUserInterrupt):
-                        final_content = fatal_error.question
-                        stop_reason = "ask_user"
-                        context.final_content = final_content
-                        context.stop_reason = stop_reason
-                        if hook.wants_streaming():
-                            await hook.on_stream_end(context, resuming=False)
-                        await hook.after_iteration(context)
-                        break
-                    error = f"Error: {type(fatal_error).__name__}: {fatal_error}"
-                    final_content = error
-                    stop_reason = "tool_error"
-                    self._append_final_message(messages, final_content)
-                    context.final_content = final_content
-                    context.error = error
-                    context.stop_reason = stop_reason
-                    await hook.after_iteration(context)
-                    should_continue, injection_cycles = await self._try_drain_injections(
-                        spec, messages, None, injection_cycles,
-                        phase="after tool error",
+                    assistant_message = build_assistant_message(
+                        response.content or "",
+                        tool_calls=[tc.to_openai_tool_call() for tc in tool_calls],
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
                     )
-                    if should_continue:
+                    messages.append(assistant_message)
+                    tools_used.extend(tc.name for tc in tool_calls)
+                    await self._emit_checkpoint(
+                        spec,
+                        {
+                            "phase": "awaiting_tools",
+                            "iteration": iteration,
+                            "model": spec.model,
+                            "assistant_message": assistant_message,
+                            "completed_tool_results": [],
+                            "pending_tool_calls": [tc.to_openai_tool_call() for tc in tool_calls],
+                        },
+                    )
+
+                    await hook.before_execute_tools(context)
+
+                    results, new_events, fatal_error = await self._execute_tools(
+                        spec,
+                        tool_calls,
+                        external_lookup_counts,
+                        workspace_violation_counts,
+                        observations=observations,
+                    )
+                    tool_events.extend(new_events)
+                    context.tool_results = list(results)
+                    context.tool_events = list(new_events)
+                    completed_tool_results: list[dict[str, Any]] = []
+                    for tool_call, result in zip(tool_calls, results):
+                        if isinstance(fatal_error, AskUserInterrupt) and tool_call.name == "ask_user":
+                            continue
+                        tool_message = {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "content": self._normalize_tool_result(
+                                spec,
+                                tool_call.id,
+                                tool_call.name,
+                                result,
+                            ),
+                        }
+                        messages.append(tool_message)
+                        completed_tool_results.append(tool_message)
+                    if fatal_error is not None:
+                        if isinstance(fatal_error, AskUserInterrupt):
+                            final_content = fatal_error.question
+                            stop_reason = "ask_user"
+                            context.final_content = final_content
+                            context.stop_reason = stop_reason
+                            if hook.wants_streaming():
+                                await hook.on_stream_end(context, resuming=False)
+                            await hook.after_iteration(context)
+                            break
+                        error = f"Error: {type(fatal_error).__name__}: {fatal_error}"
+                        final_content = error
+                        stop_reason = "tool_error"
+                        self._append_final_message(messages, final_content)
+                        context.final_content = final_content
+                        context.error = error
+                        context.stop_reason = stop_reason
+                        await hook.after_iteration(context)
+                        should_continue, injection_cycles = await self._try_drain_injections(
+                            spec, messages, None, injection_cycles,
+                            phase="after tool error",
+                        )
+                        if should_continue:
+                            had_injections = True
+                            continue
+                        break
+                    await self._emit_checkpoint(
+                        spec,
+                        {
+                            "phase": "tools_completed",
+                            "iteration": iteration,
+                            "model": spec.model,
+                            "assistant_message": assistant_message,
+                            "completed_tool_results": completed_tool_results,
+                            "pending_tool_calls": [],
+                        },
+                    )
+                    empty_content_retries = 0
+                    length_recovery_count = 0
+                    # Checkpoint 1: drain injections after tools, before next LLM call
+                    _drained, injection_cycles = await self._try_drain_injections(
+                        spec, messages, None, injection_cycles,
+                        phase="after tool execution",
+                    )
+                    if _drained:
                         had_injections = True
-                        continue
-                    break
-                await self._emit_checkpoint(
-                    spec,
-                    {
-                        "phase": "tools_completed",
-                        "iteration": iteration,
-                        "model": spec.model,
-                        "assistant_message": assistant_message,
-                        "completed_tool_results": completed_tool_results,
-                        "pending_tool_calls": [],
-                    },
-                )
-                empty_content_retries = 0
-                length_recovery_count = 0
-                # Checkpoint 1: drain injections after tools, before next LLM call
-                _drained, injection_cycles = await self._try_drain_injections(
-                    spec, messages, None, injection_cycles,
-                    phase="after tool execution",
-                )
-                if _drained:
-                    had_injections = True
-                await hook.after_iteration(context)
-                continue
+                    await hook.after_iteration(context)
+                    continue
 
             if response.has_tool_calls:
                 logger.warning(
@@ -395,7 +418,7 @@ class AgentRunner:
                     spec.session_key or "default",
                 )
 
-            clean = hook.finalize_content(context, response.content)
+            clean = None if response.finish_reason == "error" else hook.finalize_content(context, response.content)
             if response.finish_reason != "error" and is_blank_text(clean):
                 empty_content_retries += 1
                 if empty_content_retries < _MAX_EMPTY_RETRIES:
@@ -419,13 +442,14 @@ class AgentRunner:
                 if hook.wants_streaming():
                     await hook.on_stream_end(context, resuming=False)
                 response = await self._request_finalization_retry(spec, messages_for_model)
+                response_purpose = "empty_finalization"
                 retry_usage = self._usage_dict(response.usage)
                 self._accumulate_usage(usage, retry_usage)
                 raw_usage = self._merge_usage(raw_usage, retry_usage)
                 context.response = response
                 context.usage = dict(raw_usage)
                 context.tool_calls = list(response.tool_calls)
-                clean = hook.finalize_content(context, response.content)
+                clean = None if response.finish_reason == "error" else hook.finalize_content(context, response.content)
 
             if response.finish_reason == "length" and not is_blank_text(clean):
                 length_recovery_count += 1
@@ -445,6 +469,7 @@ class AgentRunner:
                         thinking_blocks=response.thinking_blocks,
                     ))
                     messages.append(build_length_recovery_message())
+                    length_content += clean
                     await hook.after_iteration(context)
                     continue
 
@@ -466,6 +491,7 @@ class AgentRunner:
             )
             if should_continue:
                 had_injections = True
+                length_content = ""
 
             if hook.wants_streaming():
                 await hook.on_stream_end(context, resuming=should_continue)
@@ -475,9 +501,20 @@ class AgentRunner:
                 continue
 
             if response.finish_reason == "error":
-                final_content = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
+                final_content = spec.error_message or _DEFAULT_ERROR_MESSAGE
                 stop_reason = "error"
                 error = final_content
+                error_details = {
+                    "content": response.content,
+                    "status_code": response.error_status_code,
+                    "kind": response.error_kind,
+                    "type": response.error_type,
+                    "code": response.error_code,
+                    "should_retry": response.error_should_retry,
+                    "retry_after_s": response.error_retry_after_s,
+                    "model": spec.model,
+                    "purpose": response_purpose,
+                }
                 self._append_model_error_placeholder(messages)
                 context.final_content = final_content
                 context.error = error
@@ -489,6 +526,7 @@ class AgentRunner:
                 )
                 if should_continue:
                     had_injections = True
+                    length_content = ""
                     continue
                 break
             if is_blank_text(clean):
@@ -506,6 +544,7 @@ class AgentRunner:
                 )
                 if should_continue:
                     had_injections = True
+                    length_content = ""
                     continue
                 break
 
@@ -525,7 +564,9 @@ class AgentRunner:
                     "pending_tool_calls": [],
                 },
             )
-            final_content = clean
+            # History already contains each continuation fragment exactly once.
+            # Assemble only the delivered text; appending it would duplicate history.
+            final_content = length_content + clean
             context.final_content = final_content
             context.stop_reason = stop_reason
             await hook.after_iteration(context)
@@ -564,6 +605,7 @@ class AgentRunner:
             error=error,
             tool_events=tool_events,
             had_injections=had_injections,
+            error_details=error_details,
         )
 
     def _build_request_kwargs(
@@ -653,16 +695,31 @@ class AgentRunner:
         else:
             coro = self.provider.chat_with_retry(**kwargs)
 
-        if timeout_s is None:
-            return await coro
-        try:
-            return await asyncio.wait_for(coro, timeout=timeout_s)
-        except asyncio.TimeoutError:
-            return LLMResponse(
-                content=f"Error calling LLM: timed out after {timeout_s:g}s",
-                finish_reason="error",
-                error_kind="timeout",
+        with span(
+            "model_request", model=spec.model, purpose="iteration",
+            streaming=wants_streaming or wants_progress_streaming,
+            **model_input_summary(messages, kwargs["tools"]),
+        ) as request:
+            if timeout_s is None:
+                response = await coro
+            else:
+                try:
+                    response = await asyncio.wait_for(coro, timeout=timeout_s)
+                except asyncio.TimeoutError:
+                    response = LLMResponse(
+                        content=f"Error calling LLM: timed out after {timeout_s:g}s",
+                        finish_reason="error",
+                        error_kind="timeout",
+                    )
+            request.update(
+                finish_reason=response.finish_reason, error_kind=response.error_kind,
+                error_status_code=response.error_status_code,
+                error_should_retry=response.error_should_retry,
+                **usage_payload(response.usage),
             )
+            if response.finish_reason == "error":
+                request.close("error")
+            return response
 
     async def _request_finalization_retry(
         self,
@@ -672,7 +729,20 @@ class AgentRunner:
         retry_messages = list(messages)
         retry_messages.append(build_finalization_retry_message())
         kwargs = self._build_request_kwargs(spec, retry_messages, tools=None)
-        return await self.provider.chat_with_retry(**kwargs)
+        with span(
+            "model_request", model=spec.model, purpose="empty_finalization", streaming=False,
+            **model_input_summary(retry_messages),
+        ) as request:
+            response = await self.provider.chat_with_retry(**kwargs)
+            request.update(
+                finish_reason=response.finish_reason, error_kind=response.error_kind,
+                error_status_code=response.error_status_code,
+                error_should_retry=response.error_should_retry,
+                **usage_payload(response.usage),
+            )
+            if response.finish_reason == "error":
+                request.close("error")
+            return response
 
     @staticmethod
     def _usage_dict(usage: dict[str, Any] | None) -> dict[str, int]:
@@ -698,20 +768,73 @@ class AgentRunner:
             merged[key] = merged.get(key, 0) + value
         return merged
 
+    @staticmethod
+    @contextmanager
+    def _observe_tool_requests(tool_calls):
+        """Keep requested calls visible even when preflight or a later call aborts."""
+        observations = {}
+        phase = "end"
+        error_kind = None
+        try:
+            for call in tool_calls:
+                observation = span(
+                    "tool", detached=True, name=call.name, call_id=call.id,
+                    stage="requested", execution_started=False,
+                    **model_input_summary(call.arguments),
+                )
+                observation.__enter__()
+                observations[id(call)] = observation
+            yield observations
+        except BaseException as exc:
+            phase = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+            error_kind = type(exc).__name__
+            raise
+        finally:
+            for observation in observations.values():
+                # gather preserves siblings when one coroutine cancels itself. Their
+                # _run_tool wrappers own the eventual terminal event, not this scope.
+                if not observation.payload.get("execution_started"):
+                    observation.close(phase, status="not_executed", error_kind=error_kind)
+
     async def _execute_tools(
         self,
         spec: AgentRunSpec,
         tool_calls: list[ToolCallRequest],
         external_lookup_counts: dict[str, int],
         workspace_violation_counts: dict[str, int],
+        observations=None,
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
+        if observations is None:
+            with self._observe_tool_requests(tool_calls) as observations:
+                return await self._execute_tools_impl(
+                    spec, tool_calls, external_lookup_counts, workspace_violation_counts,
+                    observations,
+                )
+        return await self._execute_tools_impl(
+            spec, tool_calls, external_lookup_counts, workspace_violation_counts, observations,
+        )
+
+    async def _execute_tools_impl(
+        self,
+        spec: AgentRunSpec,
+        tool_calls: list[ToolCallRequest],
+        external_lookup_counts: dict[str, int],
+        workspace_violation_counts: dict[str, int],
+        observations,
+    ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
+        preflight = getattr(type(spec.tools), "preflight", None)
+        if callable(preflight):
+            await preflight(spec.tools, tool_calls, spec.checkpoint_callback)
         batches = self._partition_tool_batches(spec, tool_calls)
         tool_results: list[tuple[Any, dict[str, str], BaseException | None]] = []
-        for batch in batches:
+        for batch_index, batch in enumerate(batches):
+            for tool_call in batch:
+                observations[id(tool_call)].update(batch_id=batch_index)
             if spec.concurrent_tools and len(batch) > 1:
                 batch_results = await asyncio.gather(*(
                     self._run_tool(
                         spec, tool_call, external_lookup_counts, workspace_violation_counts,
+                        observation=observations[id(tool_call)],
                     )
                     for tool_call in batch
                 ))
@@ -721,6 +844,7 @@ class AgentRunner:
                 for tool_call in batch:
                     result = await self._run_tool(
                         spec, tool_call, external_lookup_counts, workspace_violation_counts,
+                        observation=observations[id(tool_call)],
                     )
                     tool_results.append(result)
                     batch_results.append(result)
@@ -739,12 +863,148 @@ class AgentRunner:
                 fatal_error = error
         return results, events, fatal_error
 
+    @staticmethod
+    async def _emit_tool_event(
+        spec: AgentRunSpec,
+        tool_call: ToolCallRequest,
+        phase: str,
+        *,
+        execution_started: bool,
+        error_kind: str | None = None,
+    ) -> None:
+        """Report a minimal lifecycle event without affecting tool execution."""
+        payload = build_tool_execution_event(
+            tool_call,
+            phase,
+            execution_started=execution_started,
+            error_kind=error_kind,
+        )
+        callback = spec.tool_event_callback
+        if callback is None:
+            point(
+                "tool_progress_delivery",
+                delivery="missing",
+                event_phase=phase,
+                call_id=tool_call.id,
+                name=tool_call.name,
+            )
+            return
+        try:
+            outcome = callback(payload)
+            if inspect.isawaitable(outcome):
+                await outcome
+        except asyncio.CancelledError as exc:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                point(
+                    "tool_progress_delivery",
+                    delivery="cancelled",
+                    event_phase=phase,
+                    call_id=tool_call.id,
+                    name=tool_call.name,
+                    error_kind=type(exc).__name__,
+                )
+                raise
+            # A callback may independently signal cancellation. That is a
+            # delivery failure, not a request to cancel the agent/tool task.
+            logger.warning(
+                "Tool progress callback cancelled for {}",
+                tool_call.name,
+            )
+            point(
+                "tool_progress_delivery",
+                delivery="error",
+                event_phase=phase,
+                call_id=tool_call.id,
+                name=tool_call.name,
+                error_kind=type(exc).__name__,
+            )
+        except Exception as exc:
+            # Progress delivery must not turn a successful tool into a failed one.
+            logger.warning(
+                "Tool progress callback failed for {} ({})",
+                tool_call.name,
+                type(exc).__name__,
+            )
+            point(
+                "tool_progress_delivery",
+                delivery="error",
+                event_phase=phase,
+                call_id=tool_call.id,
+                name=tool_call.name,
+                error_kind=type(exc).__name__,
+            )
+        else:
+            point(
+                "tool_progress_delivery",
+                delivery="sent",
+                event_phase=phase,
+                call_id=tool_call.id,
+                name=tool_call.name,
+            )
+
     async def _run_tool(
         self,
         spec: AgentRunSpec,
         tool_call: ToolCallRequest,
         external_lookup_counts: dict[str, int],
         workspace_violation_counts: dict[str, int],
+        observation=None,
+    ) -> tuple[Any, dict[str, str], BaseException | None]:
+        if observation is None:
+            with self._observe_tool_requests([tool_call]) as observations:
+                return await self._run_tool(
+                    spec, tool_call, external_lookup_counts, workspace_violation_counts,
+                    observation=observations[id(tool_call)],
+                )
+        with activate_span(observation.span_id):
+            try:
+                result = await self._run_tool_impl(
+                    spec, tool_call, external_lookup_counts, workspace_violation_counts,
+                    observation,
+                )
+            except BaseException as exc:
+                started = bool(observation.payload.get("execution_started"))
+                observation.close(
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                    error_kind=type(exc).__name__,
+                )
+                await self._emit_tool_event(
+                    spec,
+                    tool_call,
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                    execution_started=started,
+                    error_kind=type(exc).__name__,
+                )
+                raise
+            started = bool(observation.payload.get("execution_started"))
+            observation.close(
+                "error" if result[1]["status"] == "error" else "end",
+                status=result[1]["status"],
+            )
+            if started:
+                status = result[1].get("status")
+                phase = (
+                    "waiting_confirmation"
+                    if status == "waiting"
+                    else "error" if status == "error" else "end"
+                )
+                await self._emit_tool_event(
+                    spec,
+                    tool_call,
+                    phase,
+                    execution_started=True,
+                    error_kind=observation.payload.get("error_kind") if phase == "error" else None,
+                )
+            return result
+
+    async def _run_tool_impl(
+        self,
+        spec: AgentRunSpec,
+        tool_call: ToolCallRequest,
+        external_lookup_counts: dict[str, int],
+        workspace_violation_counts: dict[str, int],
+        observation,
     ) -> tuple[Any, dict[str, str], BaseException | None]:
         hint = "\n\n[Analyze the error above and try a different approach.]"
         lookup_error = repeated_external_lookup_error(
@@ -753,6 +1013,10 @@ class AgentRunner:
             external_lookup_counts,
         )
         if lookup_error:
+            observation.update(rejected=True, rejection_kind="repeated_lookup")
+            await self._emit_tool_event(
+                spec, tool_call, "rejected", execution_started=False,
+            )
             event = {
                 "name": tool_call.name,
                 "status": "error",
@@ -769,6 +1033,10 @@ class AgentRunner:
                 if isinstance(prepared, tuple) and len(prepared) == 3:
                     tool, params, prep_error = prepared
         if prep_error:
+            observation.update(rejected=True, rejection_kind="prepare_call")
+            await self._emit_tool_event(
+                spec, tool_call, "rejected", execution_started=False,
+            )
             event = {
                 "name": tool_call.name,
                 "status": "error",
@@ -786,6 +1054,15 @@ class AgentRunner:
             return prep_error + hint, event, (
                 RuntimeError(prep_error) if spec.fail_on_tool_error else None
             )
+        # The start event is a provisional notification. Mark the span as truly
+        # started only after delivery returns; cancellation during delivery is
+        # reconciled by _run_tool's cancelled event with execution_started=False.
+        await self._emit_tool_event(
+            spec, tool_call, "start", execution_started=True,
+        )
+        observation.update(execution_started=True, rejected=False)
+        point("tool_admitted", stage="admitted", name=tool_call.name, call_id=tool_call.id)
+        point("tool_execution", stage="execution_started", name=tool_call.name, call_id=tool_call.id)
         try:
             if tool is not None:
                 result = await tool.execute(**params)
@@ -794,6 +1071,7 @@ class AgentRunner:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
+            observation.update(error_kind=type(exc).__name__)
             event = {
                 "name": tool_call.name,
                 "status": "error",
@@ -943,6 +1221,9 @@ class AgentRunner:
     ) -> None:
         callback = spec.checkpoint_callback
         if callback is not None:
+            snapshot = getattr(type(spec.tools), "policy_snapshot", None)
+            if callable(snapshot):
+                payload = {**payload, "tool_policy": snapshot(spec.tools)}
             await callback(payload)
 
     @staticmethod

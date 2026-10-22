@@ -27,6 +27,7 @@ from nanobot.utils.helpers import (
     strip_think,
     truncate_text,
 )
+from nanobot.utils.observability import observed
 from nanobot.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
@@ -631,6 +632,7 @@ class Consolidator:
         except Exception:
             return truncate_text(text, budget * 4)
 
+    @observed("background", purpose="memory_archive", accounting_domain="execution")
     async def archive(self, messages: list[dict]) -> str | None:
         """Summarize messages via LLM and append to history.jsonl.
 
@@ -666,6 +668,7 @@ class Consolidator:
             self.store.raw_archive(messages)
             return None
 
+    @observed("background", purpose="memory_consolidation", accounting_domain="execution")
     async def maybe_consolidate_by_tokens(
         self,
         session: Session,
@@ -931,6 +934,7 @@ class Dream:
             result += "\n"
         return result
 
+    @observed("background", purpose="memory_dream", accounting_domain="execution")
     async def run(self) -> bool:
         """Process unprocessed history entries. Returns True if work was done."""
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR

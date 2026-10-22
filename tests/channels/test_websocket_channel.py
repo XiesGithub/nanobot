@@ -1,9 +1,11 @@
 """Unit and lightweight integration tests for the WebSocket channel."""
 
 import asyncio
+import base64
 import functools
 import json
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,10 +30,41 @@ from nanobot.channels.websocket import (
 )
 from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import Config
+from nanobot.session.manager import SessionManager
 
 # -- Shared helpers (aligned with test_websocket_integration.py) ---------------
 
 _PORT = 29876
+
+
+@pytest.mark.asyncio
+async def test_stream_and_tool_progress_keep_execution_identity(bus: MagicMock) -> None:
+    channel = _ch(bus)
+    connection = MagicMock()
+    connection.send = AsyncMock()
+    channel._attach(connection, "progress-chat")
+    await channel.send_delta("progress-chat", "准备读取", {
+        "_turn_id": "turn-1", "_stream_id": "stream-1",
+    })
+    await channel.send_delta("progress-chat", "", {
+        "_turn_id": "turn-1", "_stream_id": "stream-1",
+        "_stream_end": True, "_resuming": True,
+    })
+    event = {"version": 1, "phase": "start", "call_id": "read-1",
+             "name": "read_file", "execution_started": True}
+    await channel.send(OutboundMessage(channel="websocket", chat_id="progress-chat", content="",
+        metadata={"_progress": True, "_turn_id": "turn-1", "_tool_events": [event]}))
+    await channel.send_turn_end("progress-chat", turn_id="turn-1")
+    frames = [json.loads(call.args[0]) for call in connection.send.await_args_list]
+    assert frames == [
+        {"event": "delta", "chat_id": "progress-chat", "text": "准备读取",
+         "turn_id": "turn-1", "stream_id": "stream-1"},
+        {"event": "stream_end", "chat_id": "progress-chat", "resuming": True,
+         "turn_id": "turn-1", "stream_id": "stream-1"},
+        {"event": "message", "chat_id": "progress-chat", "text": "", "kind": "progress",
+         "turn_id": "turn-1", "tool_events": [event]},
+        {"event": "turn_end", "chat_id": "progress-chat", "turn_id": "turn-1"},
+    ]
 
 
 def _ch(bus: Any, **kw: Any) -> WebSocketChannel:
@@ -172,6 +205,7 @@ async def test_webui_message_envelope_marks_inbound_metadata(bus: MagicMock) -> 
     channel = _ch(bus)
     conn = MagicMock()
     conn.remote_address = ("127.0.0.1", 50123)
+    channel._conn_operator.add(conn)  # Test the envelope routing after operator authorization.
 
     await channel._dispatch_envelope(
         conn,
@@ -190,6 +224,7 @@ async def test_webui_message_envelope_marks_inbound_metadata(bus: MagicMock) -> 
 async def test_plain_websocket_message_does_not_mark_webui(bus: MagicMock) -> None:
     channel = _ch(bus)
     conn = MagicMock()
+    channel._conn_operator.add(conn)  # Test metadata behavior after operator authorization.
 
     await channel._dispatch_envelope(
         conn,
@@ -338,6 +373,17 @@ async def test_send_turn_end_emits_turn_end_event() -> None:
     mock_ws.send.assert_awaited_once()
     body = json.loads(mock_ws.send.await_args.args[0])
     assert body == {"event": "turn_end", "chat_id": "chat-1"}
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_end_is_explicitly_failed() -> None:
+    channel = WebSocketChannel({"enabled": True, "allowFrom": ["*"]}, MagicMock())
+    connection = AsyncMock()
+    channel._attach(connection, "chat-1")
+    await channel.send(OutboundMessage(channel="websocket", chat_id="chat-1", content="",
+        metadata={"_turn_end": True, "_turn_error": True}))
+    assert json.loads(connection.send.await_args.args[0]) == {
+        "event": "turn_end", "chat_id": "chat-1", "outcome": "error"}
 
 
 @pytest.mark.asyncio
@@ -1079,3 +1125,280 @@ def test_parse_envelope_rejects_legacy_and_garbage() -> None:
 )
 def test_is_valid_chat_id(value: Any, expected: bool) -> None:
     assert _is_valid_chat_id(value) is expected
+
+
+@pytest.mark.asyncio
+async def test_v065_text_upload_chat_authorization_and_resume(bus: MagicMock, tmp_path: Path, monkeypatch) -> None:
+    import nanobot.channels.websocket as websocket_module
+
+    media_root = tmp_path / "media"
+    monkeypatch.setattr(
+        websocket_module, "websocket_media_dir", lambda chat_id: media_root / chat_id
+    )
+    channel = _ch(bus, port=29941)
+    server_task = asyncio.create_task(channel.start())
+    await asyncio.sleep(0.3)
+    payload = base64.b64encode("会议日期2026-10-12".encode()).decode()
+    media = [{"data_url": f"data:text/plain;base64,{payload}", "name": "notice.txt"}]
+    try:
+        async with websockets.connect("ws://127.0.0.1:29941/ws?client_id=shared") as a:
+            ready_a = json.loads(await a.recv())
+            await a.send(json.dumps({
+                "type": "message", "chat_id": ready_a["chat_id"], "content": "",
+                "media": media,
+            }))
+            await asyncio.sleep(0.1)
+            uploaded = Path(bus.publish_inbound.await_args_list[-1].args[0].media[0])
+            assert uploaded.read_bytes() == "会议日期2026-10-12".encode()
+            assert uploaded.name == "notice.txt"
+            assert uploaded.is_relative_to(media_root / ready_a["chat_id"])
+            file_set = {p for p in media_root.rglob("*") if p.is_file()}
+
+            async with websockets.connect("ws://127.0.0.1:29941/ws?client_id=shared") as b:
+                ready_b = json.loads(await b.recv())
+                assert ready_b["chat_id"] != ready_a["chat_id"]
+                for envelope in (
+                    {"type": "attach", "chat_id": ready_a["chat_id"]},
+                    {"type": "message", "chat_id": ready_a["chat_id"], "content": "steal", "media": media},
+                ):
+                    await b.send(json.dumps(envelope))
+                    rejected = json.loads(await b.recv())
+                    assert rejected == {"event": "error", "detail": "chat_unauthorized"}
+                assert {p for p in media_root.rglob("*") if p.is_file()} == file_set
+                assert bus.publish_inbound.await_count == 1
+
+            async with websockets.connect("ws://127.0.0.1:29941/ws?client_id=spoofed-A") as resumed:
+                await resumed.recv()
+                await resumed.send(json.dumps({
+                    "type": "attach", "chat_id": ready_a["chat_id"],
+                    "chat_token": ready_a["chat_token"],
+                }))
+                assert json.loads(await resumed.recv())["event"] == "attached"
+                await resumed.send(json.dumps({
+                    "type": "message", "chat_id": ready_a["chat_id"], "content": "read notice",
+                }))
+                await asyncio.sleep(0.1)
+                assert bus.publish_inbound.await_count == 2
+                assert bus.publish_inbound.await_args_list[-1].args[0].chat_id == ready_a["chat_id"]
+                await channel.send(OutboundMessage(
+                    channel="websocket", chat_id=ready_a["chat_id"], content="A private reply",
+                ))
+                resumed_frame = json.loads(await resumed.recv())
+                original_frame = json.loads(await a.recv())
+                assert resumed_frame["chat_id"] == original_frame["chat_id"] == ready_a["chat_id"]
+                assert resumed_frame["text"] == original_frame["text"] == "A private reply"
+    finally:
+        await channel.stop()
+        await server_task
+
+
+@pytest.mark.asyncio
+async def test_v065_image_upload_remains_supported(bus: MagicMock, tmp_path: Path, monkeypatch) -> None:
+    import nanobot.channels.websocket as websocket_module
+
+    monkeypatch.setattr(websocket_module, "websocket_media_dir", lambda chat_id: tmp_path / chat_id)
+    channel = _ch(bus, port=29942)
+    server_task = asyncio.create_task(channel.start())
+    await asyncio.sleep(0.3)
+    png_bytes = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"
+    )
+    png = base64.b64encode(png_bytes).decode()
+    try:
+        async with websockets.connect("ws://127.0.0.1:29942/ws?client_id=image") as client:
+            ready = json.loads(await client.recv())
+            await client.send(json.dumps({
+                "type": "message", "chat_id": ready["chat_id"], "content": "image",
+                "media": [{"data_url": f"data:image/png;base64,{png}", "name": "image.png"}],
+            }))
+            await asyncio.sleep(0.1)
+            inbound = bus.publish_inbound.await_args_list[-1].args[0]
+            assert Path(inbound.media[0]).read_bytes() == png_bytes
+    finally:
+        await channel.stop()
+        await server_task
+
+
+@pytest.mark.asyncio
+async def test_valid_protected_bootstrap_token_is_operator_but_arbitrary_token_is_not(
+    bus: MagicMock,
+) -> None:
+    channel = _ch(bus, port=29943, tokenIssueSecret="bootstrap-secret")
+    server_task = asyncio.create_task(channel.start())
+    await asyncio.sleep(0.3)
+    try:
+        async with websockets.connect("ws://127.0.0.1:29943/ws?client_id=owner") as owner:
+            owner_chat = json.loads(await owner.recv())["chat_id"]
+            async with httpx.AsyncClient() as http_client:
+                response = await http_client.get(
+                    "http://127.0.0.1:29943/webui/bootstrap",
+                    headers={"Authorization": "Bearer bootstrap-secret"},
+                )
+            assert response.status_code == 200
+            api_token = response.json()["token"]
+            async with websockets.connect(
+                f"ws://127.0.0.1:29943/ws?client_id=operator&token={api_token}"
+            ) as operator:
+                await operator.recv()
+                await operator.send(json.dumps({"type": "attach", "chat_id": owner_chat}))
+                assert json.loads(await operator.recv())["event"] == "attached"
+
+            async with websockets.connect(
+                "ws://127.0.0.1:29943/ws?client_id=owner&token=made-up"
+            ) as spoof:
+                await spoof.recv()
+                await spoof.send(json.dumps({"type": "attach", "chat_id": owner_chat}))
+                assert json.loads(await spoof.recv()) == {
+                    "event": "error", "detail": "chat_unauthorized",
+                }
+    finally:
+        await channel.stop()
+        await server_task
+
+
+@pytest.mark.asyncio
+async def test_public_local_bootstrap_token_keeps_single_user_operator_contract(bus: MagicMock) -> None:
+    """The localhost-only public bootstrap matches the existing single-user REST API contract."""
+    channel = _ch(bus, port=29944, tokenIssueSecret="")
+    server_task = asyncio.create_task(channel.start())
+    await asyncio.sleep(0.3)
+    try:
+        async with websockets.connect("ws://127.0.0.1:29944/ws?client_id=owner") as owner:
+            owner_chat = json.loads(await owner.recv())["chat_id"]
+            async with httpx.AsyncClient() as http_client:
+                response = await http_client.get("http://127.0.0.1:29944/webui/bootstrap")
+            assert response.status_code == 200
+            api_token = response.json()["token"]
+            async with websockets.connect(
+                f"ws://127.0.0.1:29944/ws?client_id=single-user-operator&token={api_token}"
+            ) as operator:
+                await operator.recv()
+                await operator.send(json.dumps({"type": "attach", "chat_id": owner_chat}))
+                attached = json.loads(await operator.recv())
+                assert attached == {"event": "attached", "chat_id": owner_chat}
+    finally:
+        await channel.stop()
+        await server_task
+
+
+@pytest.mark.asyncio
+async def test_websocket_session_history_lifecycle_and_access_boundary(
+    bus: MagicMock, tmp_path: Path,
+) -> None:
+    port = 29945
+    manager = SessionManager(tmp_path, allow_legacy=False)
+    base = _ch(bus, port=port)
+    channel = WebSocketChannel(base.config, bus, session_manager=manager)
+    channel._api_tokens["history-test"] = time.monotonic() + 300
+    server_task = asyncio.create_task(channel.start())
+    await asyncio.sleep(0.3)
+    headers = {"Authorization": "Bearer history-test"}
+
+    def messages_url(key: str) -> str:
+        return f"http://127.0.0.1:{port}/api/sessions/{key.replace(':', '%3A')}/messages"
+
+    try:
+        async with websockets.connect(f"ws://127.0.0.1:{port}/ws?client_id=history-owner") as client:
+            ready = json.loads(await client.recv())
+            ready_key = f"websocket:{ready['chat_id']}"
+            assert not manager._get_session_path(ready_key).exists()
+            listed = await _http_get(f"http://127.0.0.1:{port}/api/sessions", headers)
+            assert listed.status_code == 200
+            assert ready_key not in {row["key"] for row in listed.json()["sessions"]}
+
+            await client.send(json.dumps({
+                "type": "message", "chat_id": ready["chat_id"], "content": "first default turn",
+            }))
+            await asyncio.sleep(0.05)
+            assert bus.publish_inbound.await_count == 1
+            assert manager._get_session_path(ready_key).is_file()
+            first_history = await _http_get(messages_url(ready_key), headers)
+            assert first_history.status_code == 200
+            assert first_history.json()["messages"] == []
+
+            # Explicit new chats become readable before the attached ack lets
+            # the WebUI select the ID and start its eager history request.
+            await client.send(json.dumps({"type": "new_chat"}))
+            attached = json.loads(await client.recv())
+            assert attached["event"] == "attached"
+            new_key = f"websocket:{attached['chat_id']}"
+            assert manager._get_session_path(new_key).is_file()
+            new_history = await _http_get(messages_url(new_key), headers)
+            assert new_history.status_code == 200
+            assert new_history.json()["messages"] == []
+
+            session = manager.get_or_create(new_key)
+            session.add_message("user", "persisted history")
+            manager.save(session)
+            saved_history = await _http_get(messages_url(new_key), headers)
+            assert saved_history.status_code == 200
+            assert saved_history.json()["messages"][0]["content"] == "persisted history"
+
+            unauthorized = await _http_get(messages_url(new_key))
+            assert unauthorized.status_code == 401
+            unknown_key = "websocket:unknown-server-id"
+            unknown = await _http_get(messages_url(unknown_key), headers)
+            assert unknown.status_code == 404
+
+            corrupt_key = "websocket:corrupt-session"
+            manager._get_session_path(corrupt_key).write_text("not-json\n", encoding="utf-8")
+            corrupt = await _http_get(messages_url(corrupt_key), headers)
+            assert corrupt.status_code == 404
+
+            await client.send(json.dumps({"type": "attach", "chat_id": "not-server-issued"}))
+            attach_error = json.loads(await client.recv())
+            assert attach_error == {"event": "error", "detail": "chat_unauthorized"}
+            assert not manager._get_session_path("websocket:not-server-issued").exists()
+
+            deleted = await _http_get(
+                f"http://127.0.0.1:{port}/api/sessions/{new_key.replace(':', '%3A')}/delete",
+                headers,
+            )
+            assert deleted.status_code == 200
+            assert deleted.json()["deleted"] is True
+            assert (await _http_get(messages_url(new_key), headers)).status_code == 404
+
+        # A reconnect's default ready ID remains provisional and does not add
+        # an empty session to either disk or the WebUI session list.
+        async with websockets.connect(f"ws://127.0.0.1:{port}/ws?client_id=reconnect") as client:
+            reconnect = json.loads(await client.recv())
+            reconnect_key = f"websocket:{reconnect['chat_id']}"
+            assert not manager._get_session_path(reconnect_key).exists()
+            listed = await _http_get(f"http://127.0.0.1:{port}/api/sessions", headers)
+            assert reconnect_key not in {row["key"] for row in listed.json()["sessions"]}
+    finally:
+        await channel.stop()
+        await server_task
+
+
+@pytest.mark.asyncio
+async def test_failed_server_chat_session_save_blocks_ack_and_message_ingress(
+    bus: MagicMock,
+) -> None:
+    from nanobot.session.manager import Session
+
+    base = _ch(bus)
+    manager = MagicMock()
+    manager.get_or_create.return_value = Session(key="websocket:pending")
+    manager.save.side_effect = PermissionError("session storage unavailable")
+    channel = WebSocketChannel(base.config, bus, session_manager=manager)
+
+    new_chat_connection = MagicMock()
+    new_chat_connection.send = AsyncMock()
+    with pytest.raises(PermissionError, match="session storage unavailable"):
+        await channel._dispatch_envelope(new_chat_connection, "owner", {"type": "new_chat"})
+    new_chat_connection.send.assert_not_awaited()
+    assert not channel._subs
+
+    default_connection = MagicMock()
+    default_connection.send = AsyncMock()
+    channel._unpersisted_default_chats.add("default-pending")
+    channel._conn_owned_chats[default_connection] = {"default-pending"}
+    with pytest.raises(PermissionError, match="session storage unavailable"):
+        await channel._dispatch_envelope(default_connection, "owner", {
+            "type": "message", "chat_id": "default-pending", "content": "do not publish",
+        })
+    assert bus.publish_inbound.await_count == 0
+    assert not channel._subs
+    assert "default-pending" in channel._unpersisted_default_chats

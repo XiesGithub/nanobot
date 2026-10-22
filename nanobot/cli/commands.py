@@ -652,8 +652,11 @@ def _run_gateway(
     cron = CronService(cron_store_path)
 
     # Create agent with cron service
+    from nanobot.knowledge.mail.factory import create_mail_service
+    mail_service = create_mail_service(config, role="gateway")
     agent = AgentLoop.from_config(
         config, bus,
+        mail_service=mail_service,
         provider=provider_snapshot.provider,
         model=provider_snapshot.model,
         context_window_tokens=provider_snapshot.context_window_tokens,
@@ -787,7 +790,7 @@ def _run_gateway(
 
     # Create channel manager (forwards SessionManager so the WebSocket channel
     # can serve the embedded webui's REST surface).
-    channels = ChannelManager(config, bus, session_manager=session_manager)
+    channels = ChannelManager(config, bus, session_manager=session_manager, mail_service=mail_service)
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
@@ -961,6 +964,8 @@ def _run_gateway(
 
     async def run():
         try:
+            if mail_service is not None:
+                await mail_service.start()
             await cron.start()
             await heartbeat.start()
             tasks = [
@@ -984,6 +989,8 @@ def _run_gateway(
             cron.stop()
             agent.stop()
             await channels.stop_all()
+            if mail_service is not None:
+                await mail_service.close()
             # Flush all cached sessions to durable storage before exit.
             # This prevents data loss on filesystems with write-back
             # caching (rclone VFS, NFS, FUSE mounts, etc.).
@@ -1007,6 +1014,7 @@ def agent(
     config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    mail_owner: bool = typer.Option(False, "--mail-owner", help="Use the explicitly bound local OS account for private mail"),
 ):
     """Interact with the agent directly."""
     from loguru import logger
@@ -1046,6 +1054,41 @@ def agent(
             format_restart_completed_message(restart_notice.started_at_raw),
             render_markdown=False,
         )
+
+    if mail_owner:
+        from nanobot.cli.mail import owner_turn
+        from nanobot.knowledge.mail.contracts import MailError
+
+        async def run_owner():
+            def render(response):
+                _print_agent_response(response.content if response else "", render_markdown=markdown,
+                                      metadata=response.metadata if response else None)
+
+            try:
+                if message:
+                    await owner_turn(agent_loop, message, session_id, render)
+                else:
+                    _init_prompt_session()
+                    console.print("Private mail owner mode — type exit or Ctrl+C to quit")
+                    while True:
+                        try:
+                            content = _sanitize_surrogates(await _read_interactive_input_async()).strip()
+                        except (EOFError, KeyboardInterrupt):
+                            break
+                        if _is_exit_command(content):
+                            break
+                        if content:
+                            await owner_turn(agent_loop, content, session_id, render)
+            finally:
+                await agent_loop.close_mcp()
+                if agent_loop.mail_service is not None:
+                    await agent_loop.mail_service.close()
+        try:
+            asyncio.run(run_owner())
+        except MailError as error:
+            console.print("Mail request failed: " + error.code)
+            raise typer.Exit(1) from None
+        return
 
     # Shared reference for progress callbacks
     _thinking: ThinkingSpinner | None = None
@@ -1638,6 +1681,14 @@ def _login_github_copilot() -> None:
     except Exception as e:
         console.print(f"[red]Authentication error: {e}[/red]")
         raise typer.Exit(1)
+
+
+def _register_mail_commands():
+    from nanobot.cli.mail import app as mail_app
+    app.add_typer(mail_app, name="mail")
+
+
+_register_mail_commands()
 
 
 if __name__ == "__main__":

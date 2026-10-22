@@ -129,9 +129,21 @@ export function useSessionHistory(key: string | null): {
       try {
         const body = await fetchSessionMessages(token, key);
         if (cancelled) return;
-        const ui: UIMessage[] = body.messages.flatMap((m, idx) => {
+        const ui: UIMessage[] = body.messages.flatMap<UIMessage>((m, idx) => {
           if (m.role !== "user" && m.role !== "assistant") return [];
           if (typeof m.content !== "string") return [];
+          if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+            const names = m.tool_calls.flatMap((call: unknown) => {
+              if (!call || typeof call !== "object") return [];
+              const fn = (call as { function?: { name?: unknown } }).function;
+              return typeof fn?.name === "string" ? [fn.name] : [];
+            });
+            // Persisted tool requests identify narration, but do not prove execution.
+            // Keep them as progress without inventing an execution count from history.
+            return [{ id: `hist-${idx}`, role: "tool" as const, kind: "trace" as const,
+              content: m.content, traces: [m.content, ...names].filter(Boolean),
+              createdAt: m.timestamp ? Date.parse(m.timestamp) : Date.now() }];
+          }
           // Hydrate signed media URLs into generic UI attachments. Image-only
           // user turns still populate the legacy ``images`` slot so the
           // existing optimistic-send and lightbox paths remain unchanged.
@@ -148,6 +160,8 @@ export function useSessionHistory(key: string | null): {
               id: `hist-${idx}`,
               role: m.role,
               content: m.content,
+              citations: m.citations,
+              mailChatId: key.slice(key.indexOf(":") + 1),
               createdAt: m.timestamp ? Date.parse(m.timestamp) : Date.now(),
               ...(images ? { images } : {}),
               ...(media ? { media } : {}),

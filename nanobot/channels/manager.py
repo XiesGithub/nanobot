@@ -14,6 +14,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Config
+from nanobot.utils.observability import point, span
 from nanobot.utils.restart import consume_restart_notice_from_env, format_restart_completed_message
 
 if TYPE_CHECKING:
@@ -54,10 +55,12 @@ class ChannelManager:
         bus: MessageBus,
         *,
         session_manager: "SessionManager | None" = None,
+        mail_service=None,
     ):
         self.config = config
         self.bus = bus
         self._session_manager = session_manager
+        self.mail_service = mail_service
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
         self._origin_reply_fingerprints: dict[tuple[str, str, str], str] = {}
@@ -86,6 +89,8 @@ class ChannelManager:
                 continue
             try:
                 kwargs: dict[str, Any] = {}
+                if cls.__module__ in {"nanobot.channels.email", "nanobot.channels.websocket"} and self.mail_service is not None:
+                    kwargs["mail_service"] = self.mail_service
                 # Only the WebSocket channel currently hosts the embedded webui
                 # surface; other channels stay oblivious to these knobs.
                 if cls.name == "websocket" and self._session_manager is not None:
@@ -94,6 +99,10 @@ class ChannelManager:
                     if static_path is not None:
                         kwargs["static_dist_path"] = static_path
                 channel = cls(section, self.bus, **kwargs)
+                if cls.__module__ in {"nanobot.channels." + name for name in (
+                    "telegram", "discord", "slack", "feishu", "qq", "wecom", "msteams",
+                )}:
+                    channel._mail_service = self.mail_service
                 channel.transcription_provider = transcription_provider
                 channel.transcription_api_key = transcription_key
                 channel.transcription_api_base = transcription_base
@@ -309,9 +318,21 @@ class ChannelManager:
                     ):
                         if self._should_suppress_outbound(msg):
                             logger.info("Suppressing duplicate outbound message to {}:{}", msg.channel, msg.chat_id)
+                            point(
+                                "delivery_suppressed",
+                                channel=msg.channel,
+                                chat_id_sha256=hashlib.sha256(msg.chat_id.encode("utf-8")).hexdigest()[:16],
+                                reason="duplicate_origin_reply",
+                            )
                             continue
                     await self._send_with_retry(channel, msg)
                 else:
+                    point(
+                        "delivery_unavailable",
+                        channel=msg.channel,
+                        chat_id_sha256=hashlib.sha256(msg.chat_id.encode("utf-8")).hexdigest()[:16],
+                        reason="unknown_channel",
+                    )
                     logger.warning("Unknown channel: {}", msg.channel)
 
             except asyncio.TimeoutError:
@@ -322,10 +343,33 @@ class ChannelManager:
     @staticmethod
     async def _send_once(channel: BaseChannel, msg: OutboundMessage) -> None:
         """Send one outbound message without retry policy."""
-        if msg.metadata.get("_stream_delta") or msg.metadata.get("_stream_end"):
-            await channel.send_delta(msg.chat_id, msg.content, msg.metadata)
-        elif not msg.metadata.get("_streamed"):
-            await channel.send(msg)
+        operation = (
+            "send_delta"
+            if msg.metadata.get("_stream_delta") or msg.metadata.get("_stream_end")
+            else "send"
+        )
+        if operation == "send_delta" or not msg.metadata.get("_streamed"):
+            with span(
+                "delivery_write",
+                channel=msg.channel,
+                adapter=type(channel).__name__,
+                operation=operation,
+                chat_id_sha256=hashlib.sha256(msg.chat_id.encode("utf-8")).hexdigest()[:16],
+                stream_id=msg.metadata.get("_stream_id"),
+            ) as observation:
+                if operation == "send_delta":
+                    await channel.send_delta(msg.chat_id, msg.content, msg.metadata)
+                else:
+                    await channel.send(msg)
+                observation.update(status="adapter_send_returned")
+            point(
+                "delivery_result",
+                channel=msg.channel,
+                operation=operation,
+                status="adapter_send_returned",
+                chat_id_sha256=hashlib.sha256(msg.chat_id.encode("utf-8")).hexdigest()[:16],
+                stream_id=msg.metadata.get("_stream_id"),
+            )
 
     def _coalesce_stream_deltas(
         self, first_msg: OutboundMessage
@@ -352,7 +396,9 @@ class ChannelManager:
                 break
 
             # Check if this message belongs to the same stream
-            same_target = (next_msg.channel, next_msg.chat_id) == target_key
+            same_target = ((next_msg.channel, next_msg.chat_id) == target_key
+                           and next_msg.security == first_msg.security
+                           and next_msg.metadata.get("_stream_id") == first_msg.metadata.get("_stream_id"))
             is_delta = next_msg.metadata and next_msg.metadata.get("_stream_delta")
             is_end = next_msg.metadata and next_msg.metadata.get("_stream_end")
 
@@ -374,6 +420,7 @@ class ChannelManager:
             chat_id=first_msg.chat_id,
             content=combined_content,
             metadata=final_metadata,
+            security=first_msg.security,
         )
         return merged, non_matching
 
@@ -385,27 +432,70 @@ class ChannelManager:
         max_attempts = max(self.config.channels.send_max_retries, 1)
 
         for attempt in range(max_attempts):
-            try:
-                await self._send_once(channel, msg)
-                return  # Send succeeded
-            except asyncio.CancelledError:
-                raise  # Propagate cancellation for graceful shutdown
-            except Exception as e:
-                if attempt == max_attempts - 1:
-                    logger.exception(
-                        "Failed to send to {} after {} attempts",
-                        msg.channel, max_attempts
-                    )
-                    return
-                delay = _SEND_RETRY_DELAYS[min(attempt, len(_SEND_RETRY_DELAYS) - 1)]
-                logger.warning(
-                    "Send to {} failed (attempt {}/{}): {}, retrying in {}s",
-                    msg.channel, attempt + 1, max_attempts, type(e).__name__, delay
-                )
+            with span(
+                "delivery_attempt",
+                channel=msg.channel,
+                adapter=type(channel).__name__,
+                attempt_index=attempt + 1,
+                chat_id_sha256=hashlib.sha256(msg.chat_id.encode("utf-8")).hexdigest()[:16],
+                stream_id=msg.metadata.get("_stream_id"),
+            ) as observation:
                 try:
-                    await asyncio.sleep(delay)
+                    await self._send_guarded(channel, msg)
+                    observation.update(status="adapter_send_returned")
+                    return  # Send succeeded
                 except asyncio.CancelledError:
-                    raise  # Propagate cancellation during sleep
+                    observation.update(status="cancelled")
+                    point("delivery_result", channel=msg.channel, status="cancelled",
+                          attempt_index=attempt + 1)
+                    raise  # Propagate cancellation for graceful shutdown
+                except Exception as e:
+                    observation.update(status="error", error_kind=type(e).__name__)
+                    point("delivery_result", channel=msg.channel, status="error",
+                          attempt_index=attempt + 1, error_kind=type(e).__name__)
+                    from nanobot.knowledge.mail.contracts import MailError
+                    if isinstance(e, MailError):
+                        logger.warning("Private channel delivery blocked: {}", e.code)
+                        return
+                    if attempt == max_attempts - 1:
+                        if msg.security and msg.security.authenticated:
+                            logger.error("Private send failed to {} after {} attempts ({})",
+                                         msg.channel, max_attempts, type(e).__name__)
+                        else:
+                            logger.exception("Failed to send to {} after {} attempts",
+                                             msg.channel, max_attempts)
+                        return
+                    delay = _SEND_RETRY_DELAYS[min(attempt, len(_SEND_RETRY_DELAYS) - 1)]
+                    logger.warning(
+                        "Send to {} failed (attempt {}/{}): {}, retrying in {}s",
+                        msg.channel, attempt + 1, max_attempts, type(e).__name__, delay
+                    )
+                    try:
+                        await asyncio.sleep(delay)
+                    except asyncio.CancelledError:
+                        raise  # Propagate cancellation during sleep
+
+    async def _send_guarded(self, channel, msg):
+        private = msg.metadata.get("private_mail") or (msg.security and msg.security.authenticated)
+        if private and not self.mail_service:
+            from nanobot.knowledge.mail.contracts import MailError
+            raise MailError("authorization_unavailable")
+        if not private or msg.channel == "websocket":
+            # WebSocket gates each actual socket write, including queued responses.
+            await self._send_once(channel, msg)
+            return
+        from nanobot.knowledge.mail.contracts import AccessContext, MailError, SourceRead
+        from nanobot.knowledge.mail.delivery import async_delivery
+        security = msg.security
+        if (not security or not security.authenticated or security.reply_channel != msg.channel
+            or security.reply_chat_id != msg.chat_id or msg.metadata.get("_stream_delta")
+            or msg.metadata.get("_stream_end")):
+            raise MailError("private_delivery_target_mismatch")
+        access = AccessContext.from_security(security, msg.metadata.get("mail_session_key", ""))
+        async with async_delivery(self.mail_service, access):
+            for citation in msg.metadata.get("citations", []):
+                self.mail_service.retrieval.read_source(access, SourceRead(evidence_id=citation["evidence_id"]))
+            await self._send_once(channel, msg)
 
     def get_channel(self, name: str) -> BaseChannel | None:
         """Get a channel by name."""

@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
 
+from nanobot.security.context import SecurityContext
+
 
 @dataclass(frozen=True)
 class RequestContext:
@@ -13,6 +15,7 @@ class RequestContext:
     message_id: str | None = None
     session_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    security: SecurityContext | None = None
 
 
 @runtime_checkable
@@ -32,3 +35,4 @@ class ToolContext:
     provider_snapshot_loader: Callable[[], Any] | None = None
     image_generation_provider_configs: dict[str, Any] | None = None
     timezone: str = "UTC"
+    mail_service: Any | None = None

@@ -4,16 +4,22 @@ import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
-from contextlib import suppress
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
-from loguru import logger
-
+from nanobot.security.private_logging import private_logger as logger
 from nanobot.utils.helpers import image_placeholder_text
+from nanobot.utils.observability import (
+    has_active_span,
+    model_input_summary,
+    point,
+    span,
+    usage_payload,
+)
 
 
 @dataclass
@@ -298,6 +304,8 @@ class LLMProvider(ABC):
     @classmethod
     def _is_transient_response(cls, response: LLMResponse) -> bool:
         """Prefer structured error metadata, fallback to text markers for legacy providers."""
+        if response.error_status_code == 400:
+            return False
         if response.error_should_retry is not None:
             return bool(response.error_should_retry)
 
@@ -487,6 +495,7 @@ class LLMProvider(ABC):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            point("provider_exception", error_kind=type(exc).__name__, handled=True)
             return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
 
     async def chat_stream(
@@ -512,7 +521,7 @@ class LLMProvider(ABC):
             max_tokens=max_tokens, temperature=temperature,
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
         )
-        if on_content_delta and response.content:
+        if on_content_delta and response.finish_reason != "error" and response.content:
             await on_content_delta(response.content)
         return response
 
@@ -523,6 +532,7 @@ class LLMProvider(ABC):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            point("provider_exception", error_kind=type(exc).__name__, handled=True)
             return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
 
     async def chat_stream_with_retry(
@@ -705,15 +715,84 @@ class LLMProvider(ABC):
         retry_mode: str,
         on_retry_wait: Callable[[str], Awaitable[None]] | None,
     ) -> LLMResponse:
+        if has_active_span("model_request"):
+            return await self._run_retry_loop(
+                call, kw, original_messages, retry_mode=retry_mode,
+                on_retry_wait=on_retry_wait,
+            )
+
+        model_request = span(
+            "model_request",
+            model=kw.get("model"),
+            purpose="provider_direct",
+            streaming="on_content_delta" in kw,
+            **model_input_summary(kw.get("messages"), kw.get("tools")),
+        )
+        with model_request as request_span:
+            response = await self._run_retry_loop(
+                call, kw, original_messages, retry_mode=retry_mode,
+                on_retry_wait=on_retry_wait,
+            )
+            request_span.update(
+                finish_reason=response.finish_reason,
+                error_kind=response.error_kind,
+                error_status_code=response.error_status_code,
+                error_should_retry=response.error_should_retry,
+                **usage_payload(response.usage),
+            )
+            if response.finish_reason == "error":
+                request_span.close("error")
+            return response
+
+    async def _run_retry_loop(
+        self,
+        call: Callable[..., Awaitable[LLMResponse]],
+        kw: dict[str, Any],
+        original_messages: list[dict[str, Any]],
+        *,
+        retry_mode: str,
+        on_retry_wait: Callable[[str], Awaitable[None]] | None,
+    ) -> LLMResponse:
         attempt = 0
         delays = list(self._CHAT_RETRY_DELAYS)
         persistent = retry_mode == "persistent"
         last_response: LLMResponse | None = None
         last_error_key: str | None = None
         identical_error_count = 0
+        call_index = 0
+        previous_call_id = None
+
+        async def observed_call(arguments, cause):
+            nonlocal call_index, previous_call_id
+            call_index += 1
+            kind = (
+                "scripted_response"
+                if getattr(self, "observation_mode", None) == "scripted"
+                else "model_attempt"
+            )
+            with span(
+                kind, source="provider_call", sdk_attempts="unknown",
+                sdk_retries=getattr(self, "observation_sdk_retries", None),
+                attempt_index=call_index, retry_of=previous_call_id, cause=cause,
+                requested_model=arguments.get("model"),
+                **model_input_summary(arguments.get("messages"), arguments.get("tools")),
+                **usage_payload(None),
+            ) as attempt_span:
+                previous_call_id = attempt_span.span_id
+                result = await call(**arguments)
+                attempt_span.update(
+                    finish_reason=result.finish_reason,
+                    error_status_code=result.error_status_code,
+                    error_kind=result.error_kind,
+                    **usage_payload(result.usage),
+                )
+                if result.finish_reason == "error":
+                    attempt_span.close("error")
+                return result
+
         while True:
             attempt += 1
-            response = await call(**kw)
+            response = await observed_call(kw, "initial" if attempt == 1 else "transient_error")
             if response.finish_reason != "error":
                 return response
             last_response = response
@@ -725,14 +804,20 @@ class LLMProvider(ABC):
                 identical_error_count = 1 if error_key else 0
 
             if not self._is_transient_response(response):
-                stripped = self._strip_image_content(original_messages)
+                allow_image_fallback = (
+                    response.error_status_code != 400
+                    and response.error_should_retry is not False
+                )
+                stripped = (
+                    self._strip_image_content(original_messages) if allow_image_fallback else None
+                )
                 if stripped is not None and stripped != kw["messages"]:
                     logger.warning(
                         "Non-transient LLM error with image content, retrying without images"
                     )
                     retry_kw = dict(kw)
                     retry_kw["messages"] = stripped
-                    result = await call(**retry_kw)
+                    result = await observed_call(retry_kw, "image_fallback")
                     # Permanently strip images from the original messages so
                     # subsequent iterations do not repeat the error-retry cycle.
                     if result.finish_reason != "error":
@@ -776,14 +861,18 @@ class LLMProvider(ABC):
                 int(round(delay)),
                 (response.content or "")[:120].lower(),
             )
-            await self._sleep_with_heartbeat(
-                delay,
-                attempt=attempt,
-                persistent=persistent,
-                on_retry_wait=on_retry_wait,
-            )
+            with span(
+                "retry_wait", retry_of=previous_call_id, attempt_index=call_index,
+                delay_seconds=delay, persistent=persistent, cause="transient_error",
+            ):
+                await self._sleep_with_heartbeat(
+                    delay,
+                    attempt=attempt,
+                    persistent=persistent,
+                    on_retry_wait=on_retry_wait,
+                )
 
-        return last_response if last_response is not None else await call(**kw)
+        return last_response if last_response is not None else await observed_call(kw, "final_fallback")
 
     @abstractmethod
     def get_default_model(self) -> str:

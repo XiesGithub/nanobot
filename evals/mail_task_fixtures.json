@@ -1,0 +1,88 @@
+{
+  "V085": {
+    "question": "竹桥样机稳定性测试要做多久？",
+    "origin_corpus_uids": [],
+    "origin_mapping": "Original requirement exact text; existing synthetic archive adapter reused.",
+    "mails": [
+      {
+        "uid": 1,
+        "subject": "竹桥样机",
+        "body": "竹桥样机需连续运行两昼夜，合格后交付",
+        "attachments": [],
+        "received_at": "2026-09-28T09:00:00+00:00"
+      },
+      {
+        "uid": 2,
+        "subject": "竹桥运输",
+        "body": "竹桥运输时间五天",
+        "attachments": [],
+        "received_at": "2026-09-29T09:00:00+00:00"
+      }
+    ]
+  },
+  "V088": {
+    "question": "QZ-710协调组的联系电话是什么？",
+    "origin_corpus_uids": [
+      1008
+    ],
+    "mails": [
+      {
+        "uid": 1,
+        "subject": "QZ-710联系窗口",
+        "body": "QZ-710联系窗口为项目协调组，未提供电话号码",
+        "attachments": [],
+        "received_at": "2026-09-28T09:00:00+00:00"
+      },
+      {
+        "uid": 2,
+        "subject": "其他项目",
+        "body": "其他项目联系电话010-55550000",
+        "attachments": [],
+        "received_at": "2026-09-29T09:00:00+00:00"
+      }
+    ]
+  },
+  "V089": {
+    "question": "TP-711最终付款期限是30日还是60日？",
+    "origin_corpus_uids": [
+      1009,
+      1010
+    ],
+    "mails": [
+      {
+        "uid": 1,
+        "subject": "TP-711付款期限方案A",
+        "body": "TP-711付款期限为验收后30日，最终是否获批待核实",
+        "attachments": [],
+        "received_at": "2026-09-28T09:00:00+00:00"
+      },
+      {
+        "uid": 2,
+        "subject": "TP-711付款期限方案B",
+        "body": "TP-711付款期限为验收后60日，最终是否获批待核实",
+        "attachments": [],
+        "received_at": "2026-09-29T09:00:00+00:00"
+      }
+    ]
+  },
+  "V091": {
+    "question": "WT-707的预付款比例是多少？",
+    "origin_corpus_uids": [
+      1006
+    ],
+    "mails": [
+      {
+        "uid": 1,
+        "subject": "WT-707与WT-708通用条款待核对",
+        "body": "同时提到WT-707和WT-708；附件为待核对通用条款，尚未确认属于哪份订单",
+        "attachments": [
+          {
+            "filename": "general.txt",
+            "text": "预付款比例40%"
+          }
+        ],
+        "received_at": "2026-09-28T09:00:00+00:00"
+      }
+    ]
+  }
+}

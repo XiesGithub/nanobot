@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,7 @@ class Nanobot:
 
         loop = AgentLoop.from_config(
             config,
+            mail_config_path=resolved,
             image_generation_provider_configs={
                 "openrouter": config.providers.openrouter,
                 "aihubmix": config.providers.aihubmix,
@@ -76,6 +78,7 @@ class Nanobot:
         *,
         session_key: str = "sdk:default",
         hooks: list[AgentHook] | None = None,
+        principal: str | None = None,
     ) -> RunResult:
         """Run the agent once and return the result.
 
@@ -90,17 +93,32 @@ class Nanobot:
         base_hooks = list(hooks) if hooks is not None else list(prev or [])
         self._loop._extra_hooks = [capture, *base_hooks]
         try:
+            security = None
+            direct_options = {}
+            if self._loop.mail_service is not None:
+                direct_options.update(channel="sdk", chat_id=session_key)
+            if principal is not None and self._loop.mail_service is not None:
+                await self._loop.mail_service.start()
+                security = self._loop.mail_service.access.authenticate("sdk", principal, private_chat=True)
+                direct_options["security"] = security
             response = await self._loop.process_direct(
-                message, session_key=session_key,
+                message, session_key=session_key, **direct_options,
             )
         finally:
             self._loop._extra_hooks = prev
 
-        content = (response.content if response else None) or ""
-        return RunResult(
-            content=content,
-            tools_used=capture.tools_used,
-            messages=capture.messages,
-        )
+        guard = nullcontext()
+        if self._loop.mail_service is not None:
+            from nanobot.knowledge.mail.delivery import delivery
+            guard = delivery(self._loop.mail_service, response)
+        with guard:
+            content = (response.content if response else None) or ""
+            return RunResult(content=content, tools_used=capture.tools_used, messages=capture.messages)
+
+    async def close(self) -> None:
+        """Release this SDK instance's query resources (never starts a Worker)."""
+        await self._loop.close_mcp()
+        if self._loop.mail_service is not None:
+            await self._loop.mail_service.close()
 
 

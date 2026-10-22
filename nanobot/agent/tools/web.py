@@ -81,6 +81,18 @@ def _validate_url_safe(url: str) -> tuple[bool, str]:
     return validate_url_target(url)
 
 
+class _URLBlockedError(ValueError):
+    """A safety rejection must not trigger another fetch strategy."""
+
+
+async def _validate_fetch_request(request: httpx.Request) -> None:
+    # httpx invokes request hooks for the initial request and every redirect,
+    # before handing the request to the transport (including streaming fetches).
+    is_valid, error_msg = _validate_url_safe(str(request.url))
+    if not is_valid:
+        raise _URLBlockedError(f"Redirect blocked: {error_msg}")
+
+
 def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
     """Format provider results into shared plaintext output."""
     if not items:
@@ -474,7 +486,10 @@ class WebFetchTool(Tool):
 
         # Detect and fetch images directly to avoid Jina's textual image captioning
         try:
-            async with httpx.AsyncClient(proxy=self.proxy, follow_redirects=True, max_redirects=MAX_REDIRECTS, timeout=15.0) as client:
+            async with httpx.AsyncClient(
+                proxy=self.proxy, follow_redirects=True, max_redirects=MAX_REDIRECTS,
+                timeout=15.0, event_hooks={"request": [_validate_fetch_request]},
+            ) as client:
                 async with client.stream("GET", url, headers={"User-Agent": self.user_agent}) as r:
                     from nanobot.security.network import validate_resolved_url
 
@@ -487,6 +502,8 @@ class WebFetchTool(Tool):
                         r.raise_for_status()
                         raw = await r.aread()
                         return build_image_content_blocks(raw, ctype, url, f"(Image fetched from: {url})")
+        except _URLBlockedError as e:
+            return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
         except Exception as e:
             logger.debug("Pre-fetch image detection failed for {}: {}", url, e)
 
@@ -543,6 +560,7 @@ class WebFetchTool(Tool):
                 max_redirects=MAX_REDIRECTS,
                 timeout=30.0,
                 proxy=self.proxy,
+                event_hooks={"request": [_validate_fetch_request]},
             ) as client:
                 r = await client.get(url, headers={"User-Agent": self.user_agent})
                 r.raise_for_status()
@@ -576,6 +594,8 @@ class WebFetchTool(Tool):
                 "extractor": extractor, "truncated": truncated, "length": len(text),
                 "untrusted": True, "text": text,
             }, ensure_ascii=False)
+        except _URLBlockedError as e:
+            return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
         except httpx.ProxyError as e:
             logger.exception("WebFetch proxy error for {}", url)
             return json.dumps({"error": f"Proxy error: {e}", "url": url}, ensure_ascii=False)

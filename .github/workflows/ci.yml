@@ -24,25 +24,51 @@ jobs:
         python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.11","3.14"]') || fromJSON('["3.11","3.12","3.13","3.14"]') }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
         with:
-          python-version: ${{ matrix.python-version }}
+          persist-credentials: false
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
+      - name: Initialize engineering evidence
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/ci | Out-Null
+          @{ source_sha = $env:GITHUB_SHA; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH; image_os = $env:ImageOS; image_version = $env:ImageVersion; python_requested = "${{ matrix.python-version }}"; conda_environment = "nanobot"; remote_run_url = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"; quality_passed = $false } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/ci/runner-start.json
+
+      - name: Set up Conda nanobot / Python ${{ matrix.python-version }}
+        uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: nanobot
+          auto-activate: true
+          python-version: ${{ matrix.python-version }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libolm-dev build-essential
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        shell: pwsh
+        run: conda run --no-capture-output --name nanobot python -m pip install --editable ".[dev,mail-rag,api,wecom,weixin,matrix,discord,langsmith,pdf,olostep,msteams]"
 
       - name: Lint with ruff
-        run: uv run ruff check nanobot --select F
+        shell: pwsh
+        run: |
+          conda run --no-capture-output --name nanobot python -m pip list --format=json | Set-Content -Encoding utf8 reports/ci/packages.json
+          conda run --no-capture-output --name nanobot python -m ruff check nanobot --select F 2>&1 | Tee-Object -FilePath reports/ci/ruff.log
+          exit $LASTEXITCODE
 
       - name: Run tests
-        run: uv run pytest tests/
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/ci | Out-Null
+          conda run --no-capture-output --name nanobot python -m pytest tests/ --ignore=tests/evals/test_holdout.py --junitxml=reports/ci/junit.xml 2>&1 | Tee-Object -FilePath reports/ci/pytest.log
+          exit $LASTEXITCODE
+
+      - name: Upload engineering results (not Agent quality approval)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tests-${{ matrix.os }}-${{ matrix.python-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/ci/
+          if-no-files-found: error
+          retention-days: 30

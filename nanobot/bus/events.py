@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from nanobot.security.context import SecurityContext
+
 
 @dataclass
 class InboundMessage:
@@ -17,6 +19,7 @@ class InboundMessage:
     media: list[str] = field(default_factory=list)  # Media URLs
     metadata: dict[str, Any] = field(default_factory=dict)  # Channel-specific data
     session_key_override: str | None = None  # Optional override for thread-scoped sessions
+    security: SecurityContext | None = None
 
     @property
     def session_key(self) -> str:
@@ -35,4 +38,5 @@ class OutboundMessage:
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     buttons: list[list[str]] = field(default_factory=list)
+    security: SecurityContext | None = None
 

@@ -37,12 +37,14 @@ from nanobot.command import CommandContext, CommandRouter, register_builtin_comm
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import LLMProvider
 from nanobot.providers.factory import ProviderSnapshot
+from nanobot.security.media import assert_media_path_allowed, bind_media_scope
 from nanobot.session.manager import Session, SessionManager
 from nanobot.utils.artifacts import generated_image_paths_from_messages
 from nanobot.utils.document import extract_documents
 from nanobot.utils.helpers import image_placeholder_text
 from nanobot.utils.helpers import truncate_text as truncate_text_fn
 from nanobot.utils.image_generation_intent import image_generation_prompt
+from nanobot.utils.observability import observed, point, span
 from nanobot.utils.progress_events import (
     build_tool_event_finish_payloads,
     build_tool_event_start_payload,
@@ -127,7 +129,8 @@ class _LoopHook(AgentHook):
                 if thought:
                     await self._on_progress(thought)
             tool_hint = self._loop._strip_think(self._loop._tool_hint(context.tool_calls))
-            tool_events = [build_tool_event_start_payload(tc) for tc in context.tool_calls]
+            tool_events = ([build_tool_event_start_payload(tc) for tc in context.tool_calls]
+                           if self._channel != "websocket" else None)
             await invoke_on_progress(
                 self._on_progress,
                 tool_hint,
@@ -148,6 +151,7 @@ class _LoopHook(AgentHook):
     async def after_iteration(self, context: AgentHookContext) -> None:
         if (
             self._on_progress
+            and self._channel != "websocket"
             and context.tool_calls
             and context.tool_events
             and on_progress_accepts_tool_events(self._on_progress)
@@ -291,6 +295,8 @@ class AgentLoop:
         image_generation_provider_configs: dict[str, ProviderConfig] | None = None,
         provider_snapshot_loader: Callable[[], ProviderSnapshot] | None = None,
         provider_signature: tuple[object, ...] | None = None,
+        turn_extension=None,
+        mail_service=None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -323,6 +329,8 @@ class AgentLoop:
             else defaults.tool_hint_max_length
         )
         self.tools_config = _tc
+        self.turn_extension = turn_extension
+        self.mail_service = mail_service
         self.web_config = _tc.web
         self.exec_config = _tc.exec
         self._image_generation_provider_configs = dict(image_generation_provider_configs or {})
@@ -422,6 +430,13 @@ class AgentLoop:
         provider = extra.pop("provider", None) or make_provider(config)
         model = extra.pop("model", None) or defaults.model
         context_window_tokens = extra.pop("context_window_tokens", None) or defaults.context_window_tokens
+        mail_config_path = extra.pop("mail_config_path", None)
+        if "mail_service" not in extra:
+            from nanobot.knowledge.mail.factory import create_mail_service
+            extra["mail_service"] = create_mail_service(config, config_path=mail_config_path)
+        if extra.get("mail_service") is not None and "turn_extension" not in extra:
+            from nanobot.knowledge.mail.agent_bridge import MailTurnExtension
+            extra["turn_extension"] = MailTurnExtension(extra["mail_service"], timezone=defaults.timezone)
         return cls(
             bus=bus,
             provider=provider,
@@ -494,6 +509,7 @@ class AgentLoop:
             provider_snapshot_loader=self._provider_snapshot_loader,
             image_generation_provider_configs=self._image_generation_provider_configs,
             timezone=self.context.timezone or "UTC",
+            mail_service=self.mail_service,
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools)
@@ -607,10 +623,11 @@ class AgentLoop:
     async def _build_retry_wait_callback(
         self, msg: InboundMessage
     ) -> Callable[[str], Awaitable[None]]:
-        """Build a retry-wait callback that publishes to the message bus."""
+        """Publish retry waits as internal progress, with a local-display subtype."""
 
         async def _on_retry_wait(content: str) -> None:
             meta = dict(msg.metadata or {})
+            meta["_progress"] = True
             meta["_retry_wait"] = True
             await self.bus.publish_outbound(
                 OutboundMessage(
@@ -672,6 +689,7 @@ class AgentLoop:
             chat_id=self._runtime_chat_id(msg),
             sender_id=msg.sender_id,
             session_summary=pending_summary,
+            current_attachment_count=msg.metadata.get("_current_message_attachment_count"),
         )
 
     async def _dispatch_command_inline(
@@ -704,6 +722,8 @@ class AgentLoop:
 
     def _effective_session_key(self, msg: InboundMessage) -> str:
         """Return the session key used for task routing and mid-turn injections."""
+        if self.turn_extension is not None:
+            return self.turn_extension.session_key(msg)
         if self._unified_session and not msg.session_key_override:
             return UNIFIED_SESSION_KEY
         return msg.session_key
@@ -783,6 +803,8 @@ class AgentLoop:
                 content = pending_msg.content
                 media = pending_msg.media if pending_msg.media else None
                 if media:
+                    for media_path in media:
+                        assert_media_path_allowed(media_path)
                     content, media = extract_documents(content, media)
                     media = media or None
                 user_content = self.context._build_user_content(content, media)
@@ -845,6 +867,10 @@ class AgentLoop:
                 context_block_limit=self.context_block_limit,
                 provider_retry_mode=self.provider_retry_mode,
                 progress_callback=on_progress,
+                tool_event_callback=(
+                    (lambda event: invoke_on_progress(on_progress, "", tool_events=[event]))
+                    if channel == "websocket" and on_progress is not None else None
+                ),
                 stream_progress_deltas=on_stream is not None,
                 retry_wait_callback=on_retry_wait,
                 checkpoint_callback=_checkpoint,
@@ -890,7 +916,7 @@ class AgentLoop:
                 continue
 
             raw = msg.content.strip()
-            if self.commands.is_priority(raw):
+            if self.turn_extension is None and self.commands.is_priority(raw):
                 await self._dispatch_command_inline(
                     msg, msg.session_key, raw,
                     self.commands.dispatch_priority,
@@ -900,7 +926,7 @@ class AgentLoop:
             # If this session already has an active pending queue (i.e. a task
             # is processing this session), route the message there for mid-turn
             # injection instead of creating a competing task.
-            if effective_key in self._pending_queues:
+            if self.turn_extension is None and effective_key in self._pending_queues:
                 # Non-priority commands must not be queued for injection;
                 # dispatch them directly (same pattern as priority commands).
                 if self.commands.is_dispatchable_command(raw):
@@ -940,6 +966,11 @@ class AgentLoop:
             )
 
     async def _dispatch(self, msg: InboundMessage) -> None:
+        """Bind media access to the inbound channel/chat for this turn."""
+        with bind_media_scope(msg.channel, msg.chat_id):
+            await self._dispatch_scoped(msg)
+
+    async def _dispatch_scoped(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
         session_key = self._effective_session_key(msg)
         if session_key != msg.session_key:
@@ -955,10 +986,14 @@ class AgentLoop:
         try:
             async with lock, gate:
                 try:
+                    msg = dataclasses.replace(msg, metadata={
+                        **msg.metadata, "_turn_id": f"{session_key}:{time.time_ns()}",
+                    })
                     on_stream = on_stream_end = None
+                    last_stream_id = None
                     if msg.metadata.get("_wants_stream"):
                         # Split one answer into distinct stream segments.
-                        stream_base_id = f"{msg.session_key}:{time.time_ns()}"
+                        stream_base_id = msg.metadata["_turn_id"]
                         stream_segment = 0
 
                         def _current_stream_id() -> str:
@@ -975,11 +1010,12 @@ class AgentLoop:
                             ))
 
                         async def on_stream_end(*, resuming: bool = False) -> None:
-                            nonlocal stream_segment
+                            nonlocal stream_segment, last_stream_id
                             meta = dict(msg.metadata or {})
                             meta["_stream_end"] = True
                             meta["_resuming"] = resuming
                             meta["_stream_id"] = _current_stream_id()
+                            last_stream_id = meta["_stream_id"]
                             await self.bus.publish_outbound(OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
                                 content="",
@@ -992,6 +1028,9 @@ class AgentLoop:
                         pending_queue=pending,
                     )
                     if response is not None:
+                        response.metadata["_message_id"] = msg.metadata["_turn_id"] + ":final"
+                        if response.metadata.get("_streamed") and last_stream_id is not None:
+                            response.metadata["_stream_id"] = last_stream_id
                         await self.bus.publish_outbound(response)
                     elif msg.channel == "cli":
                         await self.bus.publish_outbound(OutboundMessage(
@@ -1051,12 +1090,21 @@ class AgentLoop:
                             exc_info=True,
                         )
                     raise
-                except Exception:
+                except Exception as exc:
                     logger.exception("Error processing message for session {}", session_key)
+                    point("turn_failure", error_kind=type(exc).__name__)
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id,
                         content="Sorry, I encountered an error.",
+                        security=msg.security,
+                        metadata={"_turn_id": msg.metadata["_turn_id"],
+                                  "_message_id": msg.metadata["_turn_id"] + ":error"},
                     ))
+                    if msg.channel == "websocket":
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id, content="",
+                            metadata={**msg.metadata, "_turn_end": True, "_turn_error": True},
+                        ))
         finally:
             # Drain any messages still in the pending queue and re-publish
             # them to the bus so they are processed as fresh inbound messages
@@ -1091,6 +1139,8 @@ class AgentLoop:
 
     def _schedule_background(self, coro) -> None:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
+        point("background_scheduled", purpose=getattr(coro, "__qualname__", "background"),
+              accounting_domain="execution")
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
@@ -1190,6 +1240,7 @@ class AgentLoop:
             metadata=outbound_metadata,
         )
 
+    @observed("task", entry="AgentLoop._process_message")
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -1201,6 +1252,11 @@ class AgentLoop:
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         self._refresh_provider_snapshot()
+
+        if self.turn_extension is not None:
+            handled, result = await self.turn_extension.intercept(self, msg)
+            if handled:
+                return result
 
         if msg.channel == "system":
             return await self._process_system_message(
@@ -1218,7 +1274,7 @@ class AgentLoop:
             session=None,
             session_key=key,
             state=TurnState.RESTORE,
-            turn_id=f"{key}:{time.time_ns()}",
+            turn_id=msg.metadata.get("_turn_id") or f"{key}:{time.time_ns()}",
             on_progress=on_progress,
             on_stream=on_stream,
             on_stream_end=on_stream_end,
@@ -1232,22 +1288,28 @@ class AgentLoop:
                 raise RuntimeError(f"Missing state handler for {ctx.state}")
 
             t0 = time.perf_counter()
+            stage = span("stage", stage_name=ctx.state.name, turn_id=ctx.turn_id)
+            stage.__enter__()
             try:
                 event = await handler(ctx)
-            except Exception:
+            except BaseException as exc:
                 duration = (time.perf_counter() - t0) * 1000
+                stage.update(stage_duration_ms=duration)
+                stage.__exit__(type(exc), exc, exc.__traceback__)
                 ctx.trace.append(
                     StateTraceEntry(
                         state=ctx.state,
                         started_at=t0,
                         duration_ms=duration,
                         event="",
-                        error="exception",
+                        error="cancelled" if isinstance(exc, asyncio.CancelledError) else "exception",
                     )
                 )
                 raise
 
             duration = (time.perf_counter() - t0) * 1000
+            stage.update(stage_duration_ms=duration, transition=event, stop_reason=ctx.stop_reason)
+            stage.__exit__(None, None, None)
             ctx.trace.append(
                 StateTraceEntry(
                     state=ctx.state,
@@ -1320,7 +1382,13 @@ class AgentLoop:
         """Restore checkpoint / pending user turn; extract documents."""
         msg = ctx.msg
 
+        metadata = dict(msg.metadata or {})
+        metadata["_current_message_attachment_count"] = len(msg.media)
+        msg = dataclasses.replace(msg, metadata=metadata)
+        ctx.msg = msg
         if msg.media:
+            for media_path in msg.media:
+                assert_media_path_allowed(media_path)
             new_content, image_only = extract_documents(msg.content, msg.media)
             ctx.msg = dataclasses.replace(msg, content=new_content, media=image_only)
             msg = ctx.msg
@@ -1567,7 +1635,40 @@ class AgentLoop:
 
     def _set_runtime_checkpoint(self, session: Session, payload: dict[str, Any]) -> None:
         """Persist the latest in-flight turn state into session metadata."""
-        session.metadata[self._RUNTIME_CHECKPOINT_KEY] = payload
+        previous = session.metadata.get(self._RUNTIME_CHECKPOINT_KEY)
+        checkpoint = dict(payload)
+        prior_context = previous.get("context_messages", []) if isinstance(previous, dict) else []
+        context_messages = list(prior_context) if isinstance(prior_context, list) else []
+        if isinstance(previous, dict):
+            same_tool_cycle = (
+                previous.get("phase") == "awaiting_tools"
+                and payload.get("phase") == "tools_completed"
+                and previous.get("iteration") == payload.get("iteration")
+            )
+            if not same_tool_cycle:
+                assistant_message = previous.get("assistant_message")
+                if isinstance(assistant_message, dict):
+                    context_messages.append(dict(assistant_message))
+                context_messages.extend(
+                    dict(message)
+                    for message in previous.get("completed_tool_results", [])
+                    if isinstance(message, dict)
+                )
+                for tool_call in previous.get("pending_tool_calls", []):
+                    if not isinstance(tool_call, dict):
+                        continue
+                    tool_id = tool_call.get("id")
+                    name = ((tool_call.get("function") or {}).get("name")) or "tool"
+                    context_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_id,
+                            "name": name,
+                            "content": "Error: Task interrupted before this tool finished.",
+                        }
+                    )
+        checkpoint["context_messages"] = context_messages
+        session.metadata[self._RUNTIME_CHECKPOINT_KEY] = checkpoint
         self.sessions.save(session)
 
     def _mark_pending_user_turn(self, session: Session) -> None:
@@ -1605,6 +1706,11 @@ class AgentLoop:
         pending_tool_calls = checkpoint.get("pending_tool_calls") or []
 
         restored_messages: list[dict[str, Any]] = []
+        for message in checkpoint.get("context_messages", []):
+            if isinstance(message, dict):
+                restored = dict(message)
+                restored.setdefault("timestamp", datetime.now().isoformat())
+                restored_messages.append(restored)
         if isinstance(assistant_message, dict):
             restored = dict(assistant_message)
             restored.setdefault("timestamp", datetime.now().isoformat())
@@ -1676,17 +1782,20 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        security=None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
         msg = InboundMessage(
             channel=channel, sender_id="user", chat_id=chat_id,
             content=content, media=media or [],
+            security=security,
         )
-        return await self._process_message(
-            msg,
-            session_key=session_key,
-            on_progress=on_progress,
-            on_stream=on_stream,
-            on_stream_end=on_stream_end,
-        )
+        with bind_media_scope(channel, chat_id):
+            return await self._process_message(
+                msg,
+                session_key=session_key,
+                on_progress=on_progress,
+                on_stream=on_stream,
+                on_stream_end=on_stream_end,
+            )

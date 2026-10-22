@@ -171,6 +171,7 @@ class Tool(ABC):
     config_key: str = ""
     _plugin_discoverable: bool = True
     _scopes: set[str] = {"core"}
+    private_capability: str | None = None
 
     @classmethod
     def config_cls(cls) -> type[BaseModel] | None:
@@ -220,8 +221,8 @@ class Tool(ABC):
             except ValueError:
                 return val
 
-        if t == "string":
-            return val if val is None else str(val)
+        if t == "string" and isinstance(val, (int, float, bool)):
+            return str(val)
 
         if t == "boolean" and isinstance(val, str):
             low = val.lower()

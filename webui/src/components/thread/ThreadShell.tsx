@@ -101,6 +101,7 @@ export function ThreadShell({
     send,
     stop,
     setMessages,
+    hydrateHistory,
     streamError,
     dismissStreamError,
   } = useNanobotStream(chatId, initial, hasPendingToolCalls, onTurnEnd);
@@ -124,16 +125,25 @@ export function ThreadShell({
   useEffect(() => {
     if (!chatId || loading) return;
     const cached = messageCacheRef.current.get(chatId);
-    // When the user switches away and back, keep the local in-memory thread
-    // state (including not-yet-persisted messages) instead of replacing it with
-    // whatever the history endpoint currently knows about.
-    setMessages((prev) => {
-      if (cached && cached.length > 0) return cached;
-      if (historical.length === 0 && prev.length > 0) return prev;
-      return historical;
-    });
+    const localConversation = (cached ?? []).filter((message) => message.kind !== "trace");
+    const historyConversation = historical.filter((message) => message.kind !== "trace");
+    // Accept a persisted completion only when it covers this chat's local
+    // conversation. Stale history must not erase an optimistic send or reply.
+    const coversLocal = historyConversation.length >= localConversation.length &&
+      localConversation.every((message, index) => {
+        const persisted = historyConversation[index];
+        return message.role === persisted.role && (message.content === persisted.content ||
+          (message.isStreaming && persisted.content.startsWith(message.content)));
+      });
+    const hasPersistedTurn = localConversation.length === 0 || hasPendingToolCalls ||
+      historyConversation.at(-1)?.role === "assistant";
+    if (historical.length > 0 && coversLocal && hasPersistedTurn) {
+      hydrateHistory(historical, hasPendingToolCalls);
+    } else if (cached?.length) {
+      setMessages(cached);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, chatId, historical]);
+  }, [loading, chatId, historical, hasPendingToolCalls, hydrateHistory]);
 
   useEffect(() => {
     if (chatId) return;
@@ -145,17 +155,14 @@ export function ThreadShell({
       lastCachedChatIdRef.current = null;
       return;
     }
-    if (loading) return;
     // Skip the first cache write after a chat switch. During that render,
     // `messages` can still belong to the previous chat until the stream hook
     // resets its local state for the new session.
     if (lastCachedChatIdRef.current !== chatId) {
       lastCachedChatIdRef.current = chatId;
-      if (messages.length > 0) {
-        messageCacheRef.current.set(chatId, messages);
-      }
       return;
     }
+    if (loading) return;
     messageCacheRef.current.set(chatId, messages);
   }, [chatId, loading, messages]);
 

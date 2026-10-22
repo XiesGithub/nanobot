@@ -1,0 +1,341 @@
+{
+  "schema_version": "phase8-holdout-registry/1.2",
+  "case_version": "phase8-holdout/1.2",
+  "split": "holdout",
+  "scope": "full_task",
+  "construction_origin": "prospective_synthetic",
+  "creation_source": "fresh v1.2 synthetic facts authored after phase7 v1.1 holdout results were exposed; no v1.1 facts, inputs, gold, or public input/gold copied",
+  "construction_seed": "phase8-holdout-v1.2-2026-10-10-hand-authored-after-phase7-exposure",
+  "data_sha256": "9f7e1ff29107eca67475a51e3130e89c9d318d6f8c7ea4da96cee9a9b33b1c5c",
+  "exposure_statement": "The cases are synthetic and share skill families with public tasks. No claim is made that a model has never encountered similar facts or patterns.",
+  "result_policy": "Only an explicit release evaluation may load this set. Development, smoke, and nightly profiles must not call holdout_cases or expose its inputs or gold. Reservation consumes the set; once reserved or disclosed, use for diagnosis only and replace it before any later independent release evaluation.",
+  "reporting_boundary": "Diagnostic full-task protocol under the frozen release profile only. Twenty synthetic cases do not establish model generalization or external business performance.",
+  "cases": [
+    {
+      "case_id": "H101",
+      "family": "arithmetic",
+      "input": "新造价目单：每件商品57元，购入5件；整单消费满300元立减19元。求优惠后的支付总额，仅输出JSON字段total。",
+      "facts": {
+        "unit_price": 57,
+        "quantity": 5,
+        "threshold": 300,
+        "discount": 19
+      },
+      "expected": {
+        "total": 285
+      }
+    },
+    {
+      "case_id": "H102",
+      "family": "arithmetic",
+      "input": "新造价目单：每件商品92元，购入6件；整单消费满500元立减67元。求优惠后的支付总额，仅输出JSON字段total。",
+      "facts": {
+        "unit_price": 92,
+        "quantity": 6,
+        "threshold": 500,
+        "discount": 67
+      },
+      "expected": {
+        "total": 485
+      }
+    },
+    {
+      "case_id": "H103",
+      "family": "arithmetic",
+      "input": "新造价目单：每件商品48元，购入9件；整单消费满435元立减24元。求优惠后的支付总额，仅输出JSON字段total。",
+      "facts": {
+        "unit_price": 48,
+        "quantity": 9,
+        "threshold": 435,
+        "discount": 24
+      },
+      "expected": {
+        "total": 432
+      }
+    },
+    {
+      "case_id": "H104",
+      "family": "arithmetic",
+      "input": "新造价目单：每件商品63元，购入7件；整单消费满400元立减58元。求优惠后的支付总额，仅输出JSON字段total。",
+      "facts": {
+        "unit_price": 63,
+        "quantity": 7,
+        "threshold": 400,
+        "discount": 58
+      },
+      "expected": {
+        "total": 383
+      }
+    },
+    {
+      "case_id": "H105",
+      "family": "arithmetic",
+      "input": "新造价目单：每件商品75元，购入8件；整单消费满610元立减32元。求优惠后的支付总额，仅输出JSON字段total。",
+      "facts": {
+        "unit_price": 75,
+        "quantity": 8,
+        "threshold": 610,
+        "discount": 32
+      },
+      "expected": {
+        "total": 600
+      }
+    },
+    {
+      "case_id": "H106",
+      "family": "field_extraction",
+      "input": "物流凭证记载：编号YT-184；货品数5件；单件标价39元。抽取编号、货品数和标价，结果只用JSON表示，键为order_id、quantity、unit_price。",
+      "facts": {
+        "order_id": "YT-184",
+        "quantity": 5,
+        "unit_price": 39
+      },
+      "expected": {
+        "order_id": "YT-184",
+        "quantity": 5,
+        "unit_price": 39
+      }
+    },
+    {
+      "case_id": "H107",
+      "family": "field_extraction",
+      "input": "物流凭证记载：编号BM-593；货品数7件；单件标价67元。抽取编号、货品数和标价，结果只用JSON表示，键为order_id、quantity、unit_price。",
+      "facts": {
+        "order_id": "BM-593",
+        "quantity": 7,
+        "unit_price": 67
+      },
+      "expected": {
+        "order_id": "BM-593",
+        "quantity": 7,
+        "unit_price": 67
+      }
+    },
+    {
+      "case_id": "H108",
+      "family": "field_extraction",
+      "input": "物流凭证记载：编号QA-827；货品数8件；单件标价91元。抽取编号、货品数和标价，结果只用JSON表示，键为order_id、quantity、unit_price。",
+      "facts": {
+        "order_id": "QA-827",
+        "quantity": 8,
+        "unit_price": 91
+      },
+      "expected": {
+        "order_id": "QA-827",
+        "quantity": 8,
+        "unit_price": 91
+      }
+    },
+    {
+      "case_id": "H109",
+      "family": "field_extraction",
+      "input": "物流凭证记载：编号LK-346；货品数11件；单件标价156元。抽取编号、货品数和标价，结果只用JSON表示，键为order_id、quantity、unit_price。",
+      "facts": {
+        "order_id": "LK-346",
+        "quantity": 11,
+        "unit_price": 156
+      },
+      "expected": {
+        "order_id": "LK-346",
+        "quantity": 11,
+        "unit_price": 156
+      }
+    },
+    {
+      "case_id": "H110",
+      "family": "field_extraction",
+      "input": "物流凭证记载：编号ZR-915；货品数12件；单件标价214元。抽取编号、货品数和标价，结果只用JSON表示，键为order_id、quantity、unit_price。",
+      "facts": {
+        "order_id": "ZR-915",
+        "quantity": 12,
+        "unit_price": 214
+      },
+      "expected": {
+        "order_id": "ZR-915",
+        "quantity": 12,
+        "unit_price": 214
+      }
+    },
+    {
+      "case_id": "H111",
+      "family": "sort_dedup",
+      "input": "请把整数列表（14，63，14，36，51，63，17）整理为升序并删除重复数字，返回JSON数组。",
+      "facts": {
+        "values": [
+          14,
+          63,
+          14,
+          36,
+          51,
+          63,
+          17
+        ]
+      },
+      "expected": [
+        14,
+        17,
+        36,
+        51,
+        63
+      ]
+    },
+    {
+      "case_id": "H112",
+      "family": "sort_dedup",
+      "input": "请把整数列表（45，25，25，60，48，20，45）整理为升序并删除重复数字，返回JSON数组。",
+      "facts": {
+        "values": [
+          45,
+          25,
+          25,
+          60,
+          48,
+          20,
+          45
+        ]
+      },
+      "expected": [
+        20,
+        25,
+        45,
+        48,
+        60
+      ]
+    },
+    {
+      "case_id": "H113",
+      "family": "sort_dedup",
+      "input": "请把整数列表（53，21，64，53，16，61）整理为升序并删除重复数字，返回JSON数组。",
+      "facts": {
+        "values": [
+          53,
+          21,
+          64,
+          53,
+          16,
+          61
+        ]
+      },
+      "expected": [
+        16,
+        21,
+        53,
+        61,
+        64
+      ]
+    },
+    {
+      "case_id": "H114",
+      "family": "sort_dedup",
+      "input": "请把整数列表（40，62，19，40，54，22，62）整理为升序并删除重复数字，返回JSON数组。",
+      "facts": {
+        "values": [
+          40,
+          62,
+          19,
+          40,
+          54,
+          22,
+          62
+        ]
+      },
+      "expected": [
+        19,
+        22,
+        40,
+        54,
+        62
+      ]
+    },
+    {
+      "case_id": "H115",
+      "family": "sort_dedup",
+      "input": "请把整数列表（65，56，13，59，65，18，53，13）整理为升序并删除重复数字，返回JSON数组。",
+      "facts": {
+        "values": [
+          65,
+          56,
+          13,
+          59,
+          65,
+          18,
+          53,
+          13
+        ]
+      },
+      "expected": [
+        13,
+        18,
+        53,
+        56,
+        59,
+        65
+      ]
+    },
+    {
+      "case_id": "H116",
+      "family": "strict_boundary",
+      "input": "判定标准：记录金额必须严格高于225元且状态必须是approved才通过。当前记录金额226元，状态approved。仅用JSON给出eligible布尔值。",
+      "facts": {
+        "amount": 226,
+        "threshold": 225,
+        "status": "approved"
+      },
+      "expected": {
+        "eligible": true
+      }
+    },
+    {
+      "case_id": "H117",
+      "family": "strict_boundary",
+      "input": "判定标准：记录金额必须严格高于333元且状态必须是approved才通过。当前记录金额334元，状态pending。仅用JSON给出eligible布尔值。",
+      "facts": {
+        "amount": 334,
+        "threshold": 333,
+        "status": "pending"
+      },
+      "expected": {
+        "eligible": false
+      }
+    },
+    {
+      "case_id": "H118",
+      "family": "strict_boundary",
+      "input": "判定标准：记录金额必须严格高于468元且状态必须是approved才通过。当前记录金额468元，状态approved。仅用JSON给出eligible布尔值。",
+      "facts": {
+        "amount": 468,
+        "threshold": 468,
+        "status": "approved"
+      },
+      "expected": {
+        "eligible": false
+      }
+    },
+    {
+      "case_id": "H119",
+      "family": "strict_boundary",
+      "input": "判定标准：记录金额必须严格高于590元且状态必须是approved才通过。当前记录金额590元，状态approved。仅用JSON给出eligible布尔值。",
+      "facts": {
+        "amount": 590,
+        "threshold": 590,
+        "status": "approved"
+      },
+      "expected": {
+        "eligible": false
+      }
+    },
+    {
+      "case_id": "H120",
+      "family": "strict_boundary",
+      "input": "判定标准：记录金额必须严格高于735元且状态必须是approved才通过。当前记录金额800元，状态approved。仅用JSON给出eligible布尔值。",
+      "facts": {
+        "amount": 800,
+        "threshold": 735,
+        "status": "approved"
+      },
+      "expected": {
+        "eligible": true
+      }
+    }
+  ]
+}

@@ -22,6 +22,13 @@ from nanobot.cron.types import (
     CronSchedule,
     CronStore,
 )
+from nanobot.utils.observability import (
+    current_observation,
+    current_span_id,
+    observation_context,
+    point,
+    span,
+)
 
 
 def _now_ms() -> int:
@@ -418,6 +425,35 @@ class CronService:
         self._arm_timer()
 
     async def _execute_job(self, job: CronJob) -> None:
+        parent = current_observation()
+        if parent is None:
+            await self._execute_job_body(job)
+            return
+
+        task_id = f"cron:{job.id}:{uuid.uuid4().hex[:12]}"
+        with observation_context(
+            parent.sink,
+            task_id=task_id,
+            parent_task_id=parent.task_id,
+            parent_span_id=current_span_id(),
+        ):
+            with span("task", role="background", background_kind="cron", job_id=job.id):
+                point("background_job", action="started", background_kind="cron", job_id=job.id)
+                try:
+                    await self._execute_job_body(job)
+                except asyncio.CancelledError:
+                    point("background_job", action="cancelled", background_kind="cron", job_id=job.id)
+                    raise
+                point(
+                    "background_job",
+                    action="finished",
+                    background_kind="cron",
+                    job_id=job.id,
+                    status=job.state.last_status,
+                    run_at_ms=job.state.last_run_at_ms,
+                )
+
+    async def _execute_job_body(self, job: CronJob) -> None:
         """Execute a single job."""
         start_ms = _now_ms()
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)

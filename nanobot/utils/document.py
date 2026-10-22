@@ -7,7 +7,6 @@ from loguru import logger
 
 from nanobot.utils.helpers import detect_image_mime
 
-
 # Supported file extensions for text extraction
 SUPPORTED_EXTENSIONS: set[str] = {
     # Document formats
@@ -98,15 +97,24 @@ def _extract_pdf(path: Path) -> str:
 
 
 def _extract_docx(path: Path) -> str:
-    """Extract text from DOCX using python-docx."""
+    """Extract body paragraphs and table rows in document order using python-docx."""
     try:
         from docx import Document as DocxDocument
+        from docx.table import Table
     except ImportError:
         return "[error: python-docx not installed]"
     try:
         doc = DocxDocument(path)
-        paragraphs: list[str] = [p.text for p in doc.paragraphs if p.text.strip()]
-        return _truncate("\n\n".join(paragraphs), _MAX_TEXT_LENGTH)
+        blocks: list[str] = []
+        for item in doc.iter_inner_content():
+            if isinstance(item, Table):
+                rows = ["\t".join(cell.text for cell in row.cells) for row in item.rows]
+                text = "\n".join(row for row in rows if row.strip())
+            else:
+                text = item.text
+            if text.strip():
+                blocks.append(text)
+        return _truncate("\n\n".join(blocks), _MAX_TEXT_LENGTH)
     except Exception as e:
         logger.exception("Failed to extract DOCX {}", path)
         return f"[error: failed to extract DOCX: {e!s}]"

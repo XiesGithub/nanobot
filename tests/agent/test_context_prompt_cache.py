@@ -123,6 +123,114 @@ def test_runtime_context_excludes_sender_id_when_not_provided(tmp_path) -> None:
     assert "Sender ID:" not in user_content
 
 
+def test_runtime_context_reports_current_message_attachment_count(tmp_path) -> None:
+    builder = ContextBuilder(_make_workspace(tmp_path))
+    messages = builder.build_messages(
+        history=[], current_message="Please read the uploaded document.",
+        channel="websocket", chat_id="chat-1", current_attachment_count=0,
+    )
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, str)
+    assert "Current message attachments: 0" in user_content
+
+
+def test_current_attachment_count_is_explicit_and_independent_of_history(tmp_path) -> None:
+    builder = ContextBuilder(_make_workspace(tmp_path))
+    messages = builder.build_messages(
+        history=[{"role": "user", "content": "Earlier I uploaded a file."}],
+        current_message="Read the file I just uploaded.",
+        channel="websocket", chat_id="chat-1", current_attachment_count=0,
+    )
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, str)
+    assert "Current message attachments: 0" in user_content
+
+
+def test_system_prompt_requires_clarification_when_upload_missing(tmp_path) -> None:
+    prompt = ContextBuilder(_make_workspace(tmp_path)).build_system_prompt()
+    assert "If the user says they uploaded or attached something in the current message" in prompt
+    assert "ask the user to upload it or provide an explicit path" in prompt
+    assert "use attachment content already present in this chat history" in prompt
+    assert "follow explicit path requests normally" in prompt
+
+
+async def test_document_extraction_preserves_current_attachment_count(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from nanobot.agent.loop import AgentLoop, TurnContext, TurnState
+    from nanobot.bus.events import InboundMessage
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    loop = object.__new__(AgentLoop)
+    loop.sessions = SimpleNamespace(save=no_op)
+    monkeypatch.setattr("nanobot.agent.loop.assert_media_path_allowed", lambda _path: None)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.extract_documents",
+        lambda content, media: ("Extracted attachment text", []),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.mark_webui_session", lambda *_args: None)
+    monkeypatch.setattr(AgentLoop, "_restore_runtime_checkpoint", lambda *_args: False)
+    monkeypatch.setattr(AgentLoop, "_restore_pending_user_turn", lambda *_args: False)
+
+    msg = InboundMessage(
+        channel="websocket", sender_id="A", chat_id="chat-A",
+        content="Read the uploaded file", media=["opaque-upload-ref"],
+        metadata={"_current_message_attachment_count": 0},
+    )
+    ctx = TurnContext(
+        msg=msg, session_key=msg.session_key, state=TurnState.RESTORE,
+        turn_id="test", session=SimpleNamespace(metadata={}),
+    )
+    await loop._state_restore(ctx)
+
+    assert ctx.msg.media == []
+    assert ctx.msg.content == "Extracted attachment text"
+    assert ctx.msg.metadata["_current_message_attachment_count"] == 1
+    messages = ContextBuilder(tmp_path).build_messages(
+        history=[], current_message=ctx.msg.content,
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+        current_attachment_count=ctx.msg.metadata["_current_message_attachment_count"],
+    )
+    assert "Current message attachments: 1" in messages[-1]["content"]
+
+
+async def test_restore_overwrites_client_attachment_count_for_empty_message(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from nanobot.agent.loop import AgentLoop, TurnContext, TurnState
+    from nanobot.bus.events import InboundMessage
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    loop = object.__new__(AgentLoop)
+    loop.sessions = SimpleNamespace(save=no_op)
+    monkeypatch.setattr("nanobot.agent.loop.mark_webui_session", lambda *_args: None)
+    monkeypatch.setattr(AgentLoop, "_restore_runtime_checkpoint", lambda *_args: False)
+    monkeypatch.setattr(AgentLoop, "_restore_pending_user_turn", lambda *_args: False)
+
+    msg = InboundMessage(
+        channel="websocket", sender_id="B", chat_id="chat-B",
+        content="Please read the file I just uploaded.", media=[],
+        metadata={"_current_message_attachment_count": 7},
+    )
+    ctx = TurnContext(
+        msg=msg, session_key=msg.session_key, state=TurnState.RESTORE,
+        turn_id="test", session=SimpleNamespace(metadata={}),
+    )
+    await loop._state_restore(ctx)
+
+    assert ctx.msg.metadata["_current_message_attachment_count"] == 0
+    messages = ContextBuilder(Path.cwd()).build_messages(
+        history=[], current_message=ctx.msg.content,
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+        current_attachment_count=ctx.msg.metadata["_current_message_attachment_count"],
+    )
+    assert "Current message attachments: 0" in messages[-1]["content"]
+
+
 def test_unprocessed_history_injected_into_system_prompt(tmp_path) -> None:
     """Entries in history.jsonl not yet consumed by Dream appear with timestamps."""
     workspace = _make_workspace(tmp_path)

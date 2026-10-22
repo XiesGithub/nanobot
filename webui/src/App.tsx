@@ -31,6 +31,7 @@ type BootState =
       client: NanobotClient;
       token: string;
       modelName: string | null;
+      mailOwner: boolean;
     };
 
 const SIDEBAR_STORAGE_KEY = "nanobot-webui.sidebar";
@@ -122,6 +123,9 @@ export default function App() {
             onReauth: async () => {
               try {
                 const refreshed = await fetchBootstrap("", secret);
+                setState((current) => current.status === "ready" ? {
+                  ...current, token: refreshed.token, mailOwner: refreshed.mail_owner === true,
+                } : current);
                 return deriveWsUrl(refreshed.ws_path, refreshed.token);
               } catch {
                 return null;
@@ -134,6 +138,7 @@ export default function App() {
             client,
             token: boot.token,
             modelName: boot.model_name ?? null,
+            mailOwner: boot.mail_owner === true,
           });
         } catch (e) {
           if (cancelled) return;
@@ -230,6 +235,7 @@ export default function App() {
       client={state.client}
       token={state.token}
       modelName={state.modelName}
+      mailOwner={state.mailOwner}
     >
       <Shell onModelNameChange={handleModelNameChange} onLogout={handleLogout} />
     </ClientProvider>
@@ -246,6 +252,8 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
   const [desktopSidebarOpen, setDesktopSidebarOpen] =
     useState<boolean>(readSidebarOpen);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const mobileSidebarOpenerRef = useRef<HTMLElement | null>(null);
+  const mainRef = useRef<HTMLElement | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{
     key: string;
     label: string;
@@ -267,11 +275,12 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
   }, [desktopSidebarOpen]);
 
   useEffect(() => {
+    const previousLength = lastSessionsLen.current;
+    lastSessionsLen.current = sessions.length;
     if (activeKey) return;
-    if (sessions.length > 0 && lastSessionsLen.current === 0) {
+    if (sessions.length > 0 && previousLength === 0) {
       setActiveKey(sessions[0].key);
     }
-    lastSessionsLen.current = sessions.length;
   }, [sessions, activeKey]);
 
   const activeSession = useMemo<ChatSummary | null>(() => {
@@ -294,6 +303,9 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
     if (isDesktop) {
       setDesktopSidebarOpen((v) => !v);
     } else {
+      if (document.activeElement instanceof HTMLElement) {
+        mobileSidebarOpenerRef.current = document.activeElement;
+      }
       setMobileSidebarOpen((v) => !v);
     }
   }, []);
@@ -465,6 +477,16 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
           <SheetContent
             side="left"
             showCloseButton={false}
+            onCloseAutoFocus={(event) => {
+              // The drawer is controlled by an external button, so Radix has
+              // no SheetTrigger to restore. New chat can replace that button.
+              event.preventDefault();
+              const opener = mobileSidebarOpenerRef.current;
+              const target = opener?.isConnected && opener !== document.body
+                ? opener
+                : mainRef.current?.querySelector<HTMLElement>("button:not([disabled]), textarea:not([disabled])");
+              target?.focus();
+            }}
             className="p-0 lg:hidden"
             style={{ width: SIDEBAR_WIDTH, maxWidth: SIDEBAR_WIDTH }}
           >
@@ -473,7 +495,7 @@ function Shell({ onModelNameChange, onLogout }: { onModelNameChange: (modelName:
         </Sheet>
       ) : null}
 
-      <main className="flex h-full min-w-0 flex-1 flex-col">
+      <main ref={mainRef} className="flex h-full min-w-0 flex-1 flex-col">
         {view === "settings" ? (
           <SettingsView
             theme={theme}

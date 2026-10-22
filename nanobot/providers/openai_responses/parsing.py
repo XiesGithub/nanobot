@@ -8,9 +8,9 @@ from typing import Any, AsyncGenerator
 
 import httpx
 import json_repair
-from loguru import logger
 
 from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.security.private_logging import private_logger as logger
 
 FINISH_REASON_MAP = {
     "completed": "stop",

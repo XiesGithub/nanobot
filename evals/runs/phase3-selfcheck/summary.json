@@ -1,0 +1,888 @@
+{
+  "version": "phase3-selfcheck/1.0",
+  "created_at": "2026-10-09T07:48:16.988923+00:00",
+  "run_id": "selfcheck-eb6496494286476f8457547ff1007ada",
+  "profile": "runner_contract",
+  "data_kind": "deterministic_control",
+  "model": "deepseek-v4-flash",
+  "real_model_calls": 0,
+  "full_task_validation": false,
+  "ok": false,
+  "controls": [
+    {
+      "control": "retry_503",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 2,
+        "linked_retry": true,
+        "retry_waits": 1
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 2,
+        "linked_retry": true,
+        "retry_waits": 1
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-9c172744:11"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 4,
+          "retry_wait": 2,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "c61f1aca1b3f4b71b34c083056c73f1c",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "end",
+          "span_id": "c61f1aca1b3f4b71b34c083056c73f1c",
+          "error_kind": "TypeError"
+        }
+      ],
+      "evidence": {
+        "path": "retry_503.jsonl",
+        "sha256": "94e66c9adb63f72b51d7502a33b3a9dca44e1704089bdf3160fb5ba9fd6a7521",
+        "events": 12
+      }
+    },
+    {
+      "control": "image_fallback",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 2,
+        "linked_retry": true,
+        "input_changed": true
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 2,
+        "linked_retry": true,
+        "input_changed": true
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-e8edcfcb:9"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 4,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "104284e31e9142ab9badf92a877d9c1f",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "end",
+          "span_id": "104284e31e9142ab9badf92a877d9c1f",
+          "error_kind": "TypeError"
+        }
+      ],
+      "evidence": {
+        "path": "image_fallback.jsonl",
+        "sha256": "5e24304515d7fe59d3ed31f62df854b2684903f92e0dd81f162e5b73cd277f04",
+        "events": 10
+      }
+    },
+    {
+      "control": "parameter_rejection",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_requested": 1,
+        "tool_executed": 0,
+        "rejected": true
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_requested": 1,
+        "tool_executed": 0,
+        "rejected": true
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-f5e2fe55:15"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 4,
+          "model_request": 4,
+          "scripted_response": 4,
+          "tool": 2,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 1,
+        "tool_executed": 0
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "2c47e63887884a6b8a4f507bbff8d658",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "end",
+          "span_id": "2c47e63887884a6b8a4f507bbff8d658",
+          "error_kind": "TypeError"
+        }
+      ],
+      "evidence": {
+        "path": "parameter_rejection.jsonl",
+        "sha256": "0075d84a85cca2c05691016591808a3748cb589daa3fab622ae8bd662d01edbe",
+        "events": 16
+      }
+    },
+    {
+      "control": "empty_finalization",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 3,
+        "finalization_requests": 1
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "provider_calls": 3,
+        "finalization_requests": 1
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-42882715:17"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 4,
+          "model_request": 6,
+          "scripted_response": 6,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "17041b39e29a4fd8812c995e0b241f92",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "end",
+          "span_id": "17041b39e29a4fd8812c995e0b241f92",
+          "error_kind": "TypeError"
+        }
+      ],
+      "evidence": {
+        "path": "empty_finalization.jsonl",
+        "sha256": "e3acd80e87f8672bcb8877a2071cf727bbd4840e078ab3ad76dfab9ec4380e42",
+        "events": 18
+      }
+    },
+    {
+      "control": "parallel_tools",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_requested": 2,
+        "tool_executed": 2,
+        "completed": [
+          0,
+          1
+        ],
+        "overlap": true
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_requested": 2,
+        "tool_executed": 2,
+        "completed": [
+          0,
+          1
+        ],
+        "overlap": true
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-543fc8f3:21"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 4,
+          "model_request": 4,
+          "scripted_response": 4,
+          "tool": 4,
+          "tool_admitted": 2,
+          "tool_execution": 2,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 2,
+        "tool_executed": 2
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "1ccc02c70df441558d8fee3e571cb070",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "end",
+          "span_id": "1ccc02c70df441558d8fee3e571cb070",
+          "error_kind": "TypeError"
+        }
+      ],
+      "evidence": {
+        "path": "parallel_tools.jsonl",
+        "sha256": "0c32f179d0b33d04fc84bd8798ee9e79e6838f3c057f26393d37c5892da6ae17",
+        "events": 22
+      }
+    },
+    {
+      "control": "tool_exception",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_error_kind": "ValueError"
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "tool_error_kind": "ValueError"
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-2f26b347:17"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 4,
+          "model_request": 4,
+          "scripted_response": 4,
+          "tool": 2,
+          "tool_admitted": 1,
+          "tool_execution": 1,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 1,
+        "tool_executed": 1
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "79e4e4013a5848b8988fb6e8ed52da74",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "end",
+          "span_id": "79e4e4013a5848b8988fb6e8ed52da74",
+          "error_kind": "TypeError"
+        }
+      ],
+      "evidence": {
+        "path": "tool_exception.jsonl",
+        "sha256": "0e3c9d932cb5fb6e8b6acf684a26de455b7b613a98af18a2fcb7eed85cde05b5",
+        "events": 18
+      }
+    },
+    {
+      "control": "request_cancel",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-d3ab3ce1:7"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 2,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "1a41288640ee4a648ba67e51ee82c48f",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "cancelled",
+          "span_id": "1a41288640ee4a648ba67e51ee82c48f",
+          "error_kind": "KeyError"
+        }
+      ],
+      "evidence": {
+        "path": "request_cancel.jsonl",
+        "sha256": "09fb8737f3239276f1eeb4ffe18fab1d7dc7e8a138d4130c96916881df23bbae",
+        "events": 8
+      }
+    },
+    {
+      "control": "tool_cancel",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-fca80e5f:11"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 2,
+          "tool": 2,
+          "tool_admitted": 1,
+          "tool_execution": 1,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 1,
+        "tool_executed": 1
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "202711b7e1a74ceca5e32d9c8c9cbbfb",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "cancelled",
+          "span_id": "202711b7e1a74ceca5e32d9c8c9cbbfb",
+          "error_kind": "KeyError"
+        }
+      ],
+      "evidence": {
+        "path": "tool_cancel.jsonl",
+        "sha256": "6da4ebd91a593defde41149e593c2df1030e4aeec8268f1417031ddcbc69303b",
+        "events": 12
+      }
+    },
+    {
+      "control": "retry_wait_cancel",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "cancelled_boundary": true
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-315a40c4:9"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 2,
+          "retry_wait": 2,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "565e2e7474854d3aa11c1500a2dd5b9d",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "cancelled",
+          "span_id": "565e2e7474854d3aa11c1500a2dd5b9d",
+          "error_kind": "KeyError"
+        }
+      ],
+      "evidence": {
+        "path": "retry_wait_cancel.jsonl",
+        "sha256": "b0025a799fe57d1003454e51ae37222863162bed203ac0c1d7ad2cc5e15fef47",
+        "events": 10
+      }
+    },
+    {
+      "control": "collector_failure",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "collector_error_detected": true
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "completed",
+        "final_content": "done",
+        "collector_error_detected": true
+      },
+      "ok": true,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-79e7495f:6",
+          "worker-304392-79e7495f:7"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 1,
+          "collector_error": 3
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 0,
+        "tool_executed": 0
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "158c50a0e99b4ceb9e5552df8716e15f",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "scripted_response",
+          "phase": "start",
+          "span_id": "cf51044efa8f4fbebe0726aed98d4b75",
+          "error_kind": "OSError"
+        },
+        {
+          "type": "task",
+          "phase": "end",
+          "span_id": "158c50a0e99b4ceb9e5552df8716e15f",
+          "error_kind": "TypeError"
+        }
+      ],
+      "evidence": {
+        "path": "collector_failure.jsonl",
+        "sha256": "97d0f1e1a59c10f7c7a67a60cba9b36c116d623485b81cef612826eddfefb234",
+        "events": 8
+      }
+    },
+    {
+      "control": "self_cancel_sibling",
+      "data_kind": "deterministic_control",
+      "profile": "runner_contract",
+      "expected": {
+        "trace_valid": true,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "tool_terminals": [
+          [
+            "0",
+            "cancelled"
+          ],
+          [
+            "1",
+            "end"
+          ]
+        ],
+        "completed": [
+          1
+        ]
+      },
+      "actual": {
+        "trace_valid": false,
+        "model_attempts": 0,
+        "outcome": "cancelled",
+        "final_content": null,
+        "tool_terminals": [
+          [
+            "0",
+            "cancelled"
+          ],
+          [
+            "1",
+            "end"
+          ]
+        ],
+        "completed": [
+          1
+        ]
+      },
+      "ok": false,
+      "trace": {
+        "version": "phase3/1.0",
+        "valid": false,
+        "closed": false,
+        "errors": [
+          "collector_error",
+          "duplicate_span_boundary",
+          "parent_span_missing",
+          "span_start_missing",
+          "span_terminal_missing",
+          "task_missing"
+        ],
+        "suspended_span_ids": [
+          "worker-304392-8f48249e:15"
+        ],
+        "watchdog_accounted_span_ids": [],
+        "event_counts": {
+          "iteration": 2,
+          "model_request": 2,
+          "scripted_response": 2,
+          "tool": 4,
+          "tool_admitted": 2,
+          "tool_execution": 2,
+          "collector_error": 2
+        },
+        "ledger": [],
+        "model_attempts": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "known_tokens": 0,
+        "unknown_usage_attempts": 0,
+        "unknown_sdk_coverage_calls": 0,
+        "actual_tokens": null,
+        "amount": null,
+        "tool_requested": 2,
+        "tool_executed": 2
+      },
+      "collector_errors": [
+        {
+          "type": "task",
+          "phase": "start",
+          "span_id": "d855bc44320d4528b581a0ca04a46dad",
+          "error_kind": "TypeError"
+        },
+        {
+          "type": "task",
+          "phase": "cancelled",
+          "span_id": "d855bc44320d4528b581a0ca04a46dad",
+          "error_kind": "KeyError"
+        }
+      ],
+      "evidence": {
+        "path": "self_cancel_sibling.jsonl",
+        "sha256": "2d86e0ae50da642340c78d5e25192da792bddc6621356188bafe5e380fba3c40",
+        "events": 16
+      }
+    }
+  ]
+}

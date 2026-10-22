@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from loguru import logger
+
+from nanobot.utils.observability import (
+    current_observation,
+    current_span_id,
+    observation_context,
+    point,
+    span,
+)
 
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
@@ -182,6 +192,10 @@ class HeartbeatService:
         return True
 
     async def _tick(self) -> None:
+        with self._observed_background_task("heartbeat_tick") as outcome:
+            await self._tick_observed(outcome)
+
+    async def _tick_observed(self, outcome: dict[str, str | None] | None = None) -> None:
         """Execute a single heartbeat tick."""
         from nanobot.utils.evaluator import evaluate_response
 
@@ -222,11 +236,17 @@ class HeartbeatService:
                     await self.on_notify(response)
                 else:
                     logger.info("Heartbeat: silenced by post-run evaluation")
-        except Exception:
+        except Exception as exc:
+            if outcome is not None:
+                outcome["error_kind"] = type(exc).__name__
             logger.exception("Heartbeat execution failed")
 
     async def trigger_now(self) -> str | None:
         """Manually trigger a heartbeat."""
+        with self._observed_background_task("heartbeat_manual"):
+            return await self._trigger_now_observed()
+
+    async def _trigger_now_observed(self) -> str | None:
         content = self._read_heartbeat_file()
         if not content:
             return None
@@ -234,3 +254,49 @@ class HeartbeatService:
         if action != "run" or not self.on_execute:
             return None
         return await self.on_execute(tasks)
+
+    @contextmanager
+    def _observed_background_task(self, background_kind: str):
+        outcome: dict[str, str | None] = {"error_kind": None}
+        parent = current_observation()
+        if parent is None:
+            yield outcome
+            return
+
+        task_id = f"{background_kind}:{uuid.uuid4().hex[:12]}"
+        with observation_context(
+            parent.sink,
+            task_id=task_id,
+            parent_task_id=parent.task_id,
+            parent_span_id=current_span_id(),
+        ):
+            with span("task", role="background", background_kind=background_kind) as task_span:
+                point("background_job", action="started", background_kind=background_kind)
+                try:
+                    yield outcome
+                except asyncio.CancelledError:
+                    task_span.update(outcome="cancelled")
+                    point("background_job", action="cancelled", background_kind=background_kind)
+                    raise
+                except Exception as exc:
+                    outcome["error_kind"] = type(exc).__name__
+                    task_span.update(outcome="error", error_kind=outcome["error_kind"])
+                    point(
+                        "background_job",
+                        action="error",
+                        background_kind=background_kind,
+                        error_kind=type(exc).__name__,
+                    )
+                    raise
+                else:
+                    if outcome["error_kind"]:
+                        task_span.update(outcome="error", error_kind=outcome["error_kind"])
+                        point(
+                            "background_job",
+                            action="error",
+                            background_kind=background_kind,
+                            error_kind=outcome["error_kind"],
+                        )
+                    else:
+                        task_span.update(outcome="finished")
+                        point("background_job", action="finished", background_kind=background_kind)

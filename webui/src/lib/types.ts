@@ -31,21 +31,55 @@ export interface UIMediaAttachment {
 }
 
 export interface UIMessage {
+  citations?: MailCitation[];
+  mailChatId?: string;
   id: string;
   role: Role;
   content: string;
+  /** Server turn owner for live stream and trace rows. */
+  turnId?: string;
+  /** Stable per-message lifecycle key used to merge progress for interleaved turns. */
+  traceKey?: string;
   kind?: MessageKind;
   isStreaming?: boolean;
   createdAt: number;
   /** For trace rows: each individual hint line, so consecutive hints can
    * render as a single collapsible group. */
   traces?: string[];
+  /** Structured tool lifecycle rows. Counts are derived from unique started
+   * call IDs, never from the number of rendered trace lines. */
+  traceCalls?: UITraceCall[];
   /** User turn: optimistic blob URLs for preview. Replay: placeholder chips. */
   images?: UIImage[];
   /** Signed or local UI-renderable media attachments. */
   media?: UIMediaAttachment[];
   /** Optional answer choices for a pending ask_user question. */
   buttons?: string[][];
+}
+
+export type ToolExecutionPhase =
+  | "start"
+  | "end"
+  | "error"
+  | "cancelled"
+  | "rejected"
+  | "waiting_confirmation";
+
+export interface UITraceCall {
+  callId: string;
+  name: string;
+  phase: ToolExecutionPhase;
+  executionStarted: boolean;
+  errorKind?: string;
+}
+
+export interface ToolExecutionEvent {
+  version: 1;
+  phase: ToolExecutionPhase;
+  call_id: string;
+  name: string;
+  execution_started: boolean;
+  error_kind?: string;
 }
 
 export interface ChatSummary {
@@ -61,6 +95,7 @@ export interface ChatSummary {
 }
 
 export interface BootstrapResponse {
+  mail_owner?: boolean;
   token: string;
   ws_path: string;
   expires_in: number;
@@ -132,12 +167,16 @@ export type ConnectionStatus =
   | "error";
 
 export type InboundEvent =
+  | { event: "mail_knowledge_result"; request_id: string; status: string; data: unknown; error: string | null }
   | { event: "ready"; chat_id: string; client_id: string }
   | { event: "attached"; chat_id: string }
   | {
       event: "message";
+      citations?: MailCitation[];
       chat_id: string;
       text: string;
+      message_id?: string;
+      stream_id?: string;
       reply_to?: string;
       media?: string[];
       media_urls?: Array<{ url: string; name?: string }>;
@@ -147,19 +186,25 @@ export type InboundEvent =
       /** Present when the frame is an agent breadcrumb (e.g. tool hint,
        * generic progress line) rather than a conversational reply. */
       kind?: "tool_hint" | "progress";
+      turn_id?: string;
+      tool_events?: ToolExecutionEvent[];
     }
   | {
       event: "delta";
       chat_id: string;
       text: string;
       stream_id?: string;
+      turn_id?: string;
     }
   | {
       event: "stream_end";
       chat_id: string;
       stream_id?: string;
+      turn_id?: string;
+      /** True when the model is yielding this text segment before a tool. */
+      resuming?: boolean;
     }
-  | { event: "turn_end"; chat_id: string }
+  | { event: "turn_end"; chat_id: string; turn_id?: string }
   | { event: "session_updated"; chat_id: string }
   | { event: "error"; chat_id?: string; detail?: string };
 
@@ -182,6 +227,7 @@ export interface OutboundImageGeneration {
 }
 
 export type Outbound =
+  | { type: "mail_knowledge"; request_id: string; action: string; payload: Record<string, unknown> }
   | { type: "new_chat" }
   | { type: "attach"; chat_id: string }
   | {
@@ -194,3 +240,9 @@ export type Outbound =
        * generic websocket protocol for other clients. */
       webui?: true;
     };
+
+export interface MailCitation {
+  evidence_id: string;
+  subject?: string;
+  filename?: string;
+}

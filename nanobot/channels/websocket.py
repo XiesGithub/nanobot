@@ -35,6 +35,7 @@ from nanobot.channels.base import BaseChannel
 from nanobot.command.builtin import builtin_command_palette
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
+from nanobot.security.media import websocket_media_dir
 from nanobot.utils.helpers import safe_filename
 from nanobot.utils.media_decode import (
     FileSizeExceeded,
@@ -67,7 +68,7 @@ class WebSocketConfig(Base):
     """WebSocket server channel configuration.
 
     Clients connect with URLs like ``ws://{host}:{port}{path}?client_id=...&token=...``.
-    - ``client_id``: Used for ``allow_from`` authorization; if omitted, a value is generated and logged.
+    - ``client_id``: A client label only; it does not authorize access to existing chats.
     - ``token``: If non-empty, the ``token`` query param may match this static secret; short-lived tokens
       from ``token_issue_path`` are also accepted.
     - ``token_issue_path``: If non-empty, **GET** (HTTP/1.1) to this path returns JSON
@@ -78,6 +79,8 @@ class WebSocketConfig(Base):
     - ``token_issue_secret``: If non-empty, token requests must send ``Authorization: Bearer <secret>`` or
       ``X-Nanobot-Auth: <secret>``.
     - ``websocket_requires_token``: If True, the handshake must include a valid token (static or issued and not expired).
+    - ``ready`` and ``new_chat`` return a server-issued ``chat_token`` capability for that chat.
+      Valid transport tokens retain the instance-operator access of the REST session surface.
     - Each connection has its own session: a unique ``chat_id`` maps to the agent session internally.
     - ``media`` field in outbound messages contains local filesystem paths; remote clients need a
       shared filesystem or an HTTP file server to access these files.
@@ -92,6 +95,8 @@ class WebSocketConfig(Base):
     token_issue_secret: str = ""
     token_ttl_s: int = Field(default=300, ge=30, le=86_400)
     websocket_requires_token: bool = True
+    mail_owner_bootstrap: bool = False
+    mail_owner_principal: str = Field(default="webui-owner", min_length=1, max_length=256)
     allow_from: list[str] = Field(default_factory=lambda: ["*"])
     streaming: bool = True
     # Default 36 MB, upper 40 MB: supports up to 4 images at ~6 MB each after
@@ -131,6 +136,8 @@ class WebSocketConfig(Base):
 
     @model_validator(mode="after")
     def wildcard_host_requires_auth(self) -> Self:
+        if self.mail_owner_bootstrap and not (self.token_issue_secret.strip() or self.token.strip()):
+            raise ValueError("Mail owner bootstrap requires a configured login secret")
         if self.host not in ("0.0.0.0", "::"):
             return self
         if self.token.strip() or self.token_issue_secret.strip():
@@ -270,6 +277,8 @@ _MAX_IMAGES_PER_MESSAGE = 4
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
 _MAX_VIDEOS_PER_MESSAGE = 1
 _MAX_VIDEO_BYTES = 20 * 1024 * 1024
+_MAX_FILES_PER_MESSAGE = 4
+_MAX_FILE_BYTES = 8 * 1024 * 1024
 
 # Image MIME whitelist — matches the Composer's ``accept`` list. SVG is
 # explicitly excluded to avoid the XSS surface inside embedded scripts.
@@ -286,7 +295,9 @@ _VIDEO_MIME_ALLOWED: frozenset[str] = frozenset({
     "video/quicktime",
 })
 
-_UPLOAD_MIME_ALLOWED: frozenset[str] = _IMAGE_MIME_ALLOWED | _VIDEO_MIME_ALLOWED
+_FILE_MIME_ALLOWED: frozenset[str] = frozenset({"text/plain"})
+
+_UPLOAD_MIME_ALLOWED: frozenset[str] = _IMAGE_MIME_ALLOWED | _VIDEO_MIME_ALLOWED | _FILE_MIME_ALLOWED
 
 _DATA_URL_MIME_RE = re.compile(r"^data:([^;]+);base64,", re.DOTALL)
 
@@ -426,17 +437,32 @@ class WebSocketChannel(BaseChannel):
         *,
         session_manager: "SessionManager | None" = None,
         static_dist_path: Path | None = None,
+        mail_service=None,
     ):
         if isinstance(config, dict):
             config = WebSocketConfig.model_validate(config)
         super().__init__(config, bus)
         self.config: WebSocketConfig = config
+        self.mail_service = mail_service
+        self._mail_access = None
+        if mail_service is not None:
+            from nanobot.knowledge.mail.web_access import MailWebAccess
+            self._mail_access = MailWebAccess(mail_service)
         # chat_id -> connections subscribed to it (fan-out target).
         self._subs: dict[str, set[Any]] = {}
         # connection -> chat_ids it is subscribed to (O(1) cleanup on disconnect).
         self._conn_chats: dict[Any, set[str]] = {}
         # connection -> default chat_id for legacy frames that omit routing.
         self._conn_default: dict[Any, str] = {}
+        # Connections that presented a valid configured or issued transport token
+        # are instance operators, matching the existing REST session surface.
+        self._conn_operator: set[Any] = set()
+        self._conn_owned_chats: dict[Any, set[str]] = {}
+        self._chat_tokens: dict[str, str] = {}
+        # The connection's ready chat is provisional. Persist it only if the
+        # client actually sends its first message, so idle connections do not
+        # leave empty sidebar rows behind.
+        self._unpersisted_default_chats: set[str] = set()
         # Single-use tokens consumed at WebSocket handshake.
         self._issued_tokens: dict[str, float] = {}
         # Multi-use tokens for the embedded webui's REST surface; checked but not consumed.
@@ -457,8 +483,39 @@ class WebSocketChannel(BaseChannel):
 
     def _attach(self, connection: Any, chat_id: str) -> None:
         """Idempotently subscribe *connection* to *chat_id*."""
+        if self._mail_access is not None:
+            self._mail_access.attach(connection, chat_id)
         self._subs.setdefault(chat_id, set()).add(connection)
         self._conn_chats.setdefault(connection, set()).add(chat_id)
+
+    def _issue_chat_token(self, chat_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        self._chat_tokens[chat_id] = token
+        return token
+
+    def _persist_server_chat_session(self, chat_id: str) -> None:
+        """Persist an empty session for a server-issued chat ID."""
+        if self._session_manager is None:
+            return
+        key = f"websocket:{chat_id}"
+        session = self._session_manager.get_or_create(key)
+        self._session_manager.save(session)
+
+    def _persist_default_chat_on_first_message(self, chat_id: str) -> None:
+        if chat_id not in self._unpersisted_default_chats:
+            return
+        # Keep the marker if save raises; the caller must not publish the
+        # inbound message after a failed persistence attempt.
+        self._persist_server_chat_session(chat_id)
+        self._unpersisted_default_chats.discard(chat_id)
+
+    def _can_access_chat(self, connection: Any, chat_id: str, token: Any = None) -> bool:
+        if connection in self._conn_operator:
+            return True
+        if chat_id in self._conn_owned_chats.get(connection, set()):
+            return True
+        expected = self._chat_tokens.get(chat_id)
+        return isinstance(token, str) and expected is not None and hmac.compare_digest(token, expected)
 
     def _cleanup_connection(self, connection: Any) -> None:
         """Remove *connection* from every subscription set; safe to call multiple times."""
@@ -471,6 +528,10 @@ class WebSocketChannel(BaseChannel):
             if not subs:
                 self._subs.pop(cid, None)
         self._conn_default.pop(connection, None)
+        self._conn_owned_chats.pop(connection, None)
+        self._conn_operator.discard(connection)
+        if self._mail_access is not None:
+            self._mail_access.connections.pop(connection, None)
 
     async def _send_event(self, connection: Any, event: str, **fields: Any) -> None:
         """Send a control event (attached, error, ...) to a single connection."""
@@ -558,6 +619,14 @@ class WebSocketChannel(BaseChannel):
     async def _dispatch_http(self, connection: Any, request: WsRequest) -> Any:
         """Route an inbound HTTP request to a handler or to the WS upgrade path."""
         got, query = _parse_request_path(request.path)
+        if self._mail_access is not None:
+            if not self._mail_access.origin_allowed(request):
+                return _http_error(403, "origin_denied")
+            if got.startswith("/api/"):
+                from nanobot.knowledge.mail.web_api import private_http
+                handled, response = await private_http(self, connection, request, got, query)
+                if handled:
+                    return response
 
         # 1. Token issue endpoint (legacy, optional, gated by configured secret).
         if self.config.token_issue_path:
@@ -678,12 +747,23 @@ class WebSocketChannel(BaseChannel):
         # while the REST surface keeps validating the other until TTL expiry.
         self._issued_tokens[token] = expiry
         self._api_tokens[token] = expiry
+        mail_owner = False
+        if self._mail_access is not None:
+            try:
+                security = self._mail_access.issue(token, self.config.token_ttl_s,
+                    owner_principal=self.config.mail_owner_principal if self.config.mail_owner_bootstrap and secret else None)
+                mail_owner = security.authenticated
+            except Exception:
+                self._issued_tokens.pop(token, None)
+                self._api_tokens.pop(token, None)
+                return _http_error(403, "owner_binding_required")
         return _http_json_response(
             {
                 "token": token,
                 "ws_path": self._expected_path(),
                 "expires_in": self.config.token_ttl_s,
                 "model_name": _read_webui_model_name(),
+                "mail_owner": mail_owner,
             }
         )
 
@@ -1075,6 +1155,8 @@ class WebSocketChannel(BaseChannel):
         if not self._is_webui_session_key(decoded_key):
             return _http_error(404, "session not found")
         deleted = self._session_manager.delete_session(decoded_key)
+        chat_id = decoded_key.removeprefix("websocket:")
+        self._unpersisted_default_chats.discard(chat_id)
         return _http_json_response({"deleted": bool(deleted)})
 
     def _serve_static(self, request_path: str) -> Response | None:
@@ -1125,21 +1207,30 @@ class WebSocketChannel(BaseChannel):
         supplied = _query_first(query, "token")
         static_token = self.config.token.strip()
 
+        def accepted(*, operator: bool):
+            if self._mail_access is not None:
+                try:
+                    self._mail_access.bind(connection, supplied)
+                except Exception:
+                    return connection.respond(403, "mail_authorization_revoked")
+            if operator:
+                self._conn_operator.add(connection)
+            return None
+
         if static_token:
             if supplied and hmac.compare_digest(supplied, static_token):
-                return None
+                return accepted(operator=True)
             if supplied and self._take_issued_token_if_valid(supplied):
-                return None
+                return accepted(operator=True)
             return connection.respond(401, "Unauthorized")
 
         if self.config.websocket_requires_token:
             if supplied and self._take_issued_token_if_valid(supplied):
-                return None
+                return accepted(operator=True)
             return connection.respond(401, "Unauthorized")
 
-        if supplied:
-            self._take_issued_token_if_valid(supplied)
-        return None
+        operator = bool(supplied and self._take_issued_token_if_valid(supplied))
+        return accepted(operator=operator)
 
     async def start(self) -> None:
         from nanobot.utils.logging_bridge import redirect_lib_logging
@@ -1178,6 +1269,17 @@ class WebSocketChannel(BaseChannel):
             )
 
         async def runner() -> None:
+            private_options = {}
+            if self.mail_service is not None:
+                from nanobot.knowledge.mail.web_transport import (
+                    PrivateMailConnection,
+                    finish_private_http,
+                )
+
+                async def finish(connection, request, response):
+                    return await finish_private_http(self.mail_service, connection, request, response)
+
+                private_options = {"create_connection": PrivateMailConnection, "process_response": finish}
             async with serve(
                 handler,
                 self.config.host,
@@ -1187,6 +1289,7 @@ class WebSocketChannel(BaseChannel):
                 ping_interval=self.config.ping_interval_s,
                 ping_timeout=self.config.ping_timeout_s,
                 ssl=ssl_context,
+                **private_options,
             ):
                 assert self._stop_event is not None
                 await self._stop_event.wait()
@@ -1209,11 +1312,14 @@ class WebSocketChannel(BaseChannel):
         default_chat_id = str(uuid.uuid4())
 
         try:
+            if self._session_manager is not None:
+                self._unpersisted_default_chats.add(default_chat_id)
             await connection.send(
                 json.dumps(
                     {
                         "event": "ready",
                         "chat_id": default_chat_id,
+                        "chat_token": self._issue_chat_token(default_chat_id),
                         "client_id": client_id,
                     },
                     ensure_ascii=False,
@@ -1221,6 +1327,7 @@ class WebSocketChannel(BaseChannel):
             )
             # Register only after ready is successfully sent to avoid out-of-order sends
             self._conn_default[connection] = default_chat_id
+            self._conn_owned_chats.setdefault(connection, set()).add(default_chat_id)
             self._attach(connection, default_chat_id)
 
             async for raw in connection:
@@ -1239,20 +1346,24 @@ class WebSocketChannel(BaseChannel):
                 content = _parse_inbound_payload(raw)
                 if content is None:
                     continue
+                self._persist_default_chat_on_first_message(default_chat_id)
                 await self._handle_message(
                     sender_id=client_id,
                     chat_id=default_chat_id,
                     content=content,
                     metadata={"remote": getattr(connection, "remote_address", None)},
+                    security=self._mail_access.security(connection) if self._mail_access else None,
                 )
         except Exception as e:
             self.logger.debug("connection ended: {}", e)
         finally:
+            self._unpersisted_default_chats.discard(default_chat_id)
             self._cleanup_connection(connection)
 
     def _save_envelope_media(
         self,
         media: list[Any],
+        chat_id: str | None = None,
     ) -> tuple[list[str], str | None]:
         """Decode and persist ``media`` items from a ``message`` envelope.
 
@@ -1267,18 +1378,24 @@ class WebSocketChannel(BaseChannel):
         """
         image_count = 0
         video_count = 0
+        file_count = 0
         for item in media:
             mime = _extract_data_url_mime(item.get("data_url", "")) if isinstance(item, dict) else None
             if mime in _VIDEO_MIME_ALLOWED:
                 video_count += 1
             elif mime in _IMAGE_MIME_ALLOWED:
                 image_count += 1
+            elif mime in _FILE_MIME_ALLOWED:
+                file_count += 1
         if image_count > _MAX_IMAGES_PER_MESSAGE:
             return [], "too_many_images"
         if video_count > _MAX_VIDEOS_PER_MESSAGE:
             return [], "too_many_videos"
+        if file_count > _MAX_FILES_PER_MESSAGE:
+            return [], "too_many_files"
 
-        media_dir = get_media_dir("websocket")
+        media_dir = websocket_media_dir(chat_id) if chat_id else get_media_dir("websocket")
+        media_dir.mkdir(parents=True, exist_ok=True)
         paths: list[str] = []
 
         def _abort(reason: str) -> tuple[list[str], str]:
@@ -1303,7 +1420,8 @@ class WebSocketChannel(BaseChannel):
             if mime not in _UPLOAD_MIME_ALLOWED:
                 return _abort("mime")
             is_video = mime in _VIDEO_MIME_ALLOWED
-            max_bytes = _MAX_VIDEO_BYTES if is_video else _MAX_IMAGE_BYTES
+            is_file = mime in _FILE_MIME_ALLOWED
+            max_bytes = _MAX_VIDEO_BYTES if is_video else (_MAX_FILE_BYTES if is_file else _MAX_IMAGE_BYTES)
             try:
                 saved = save_base64_data_url(
                     data_url, media_dir, max_bytes=max_bytes,
@@ -1315,6 +1433,23 @@ class WebSocketChannel(BaseChannel):
                 return _abort("decode")
             if saved is None:
                 return _abort("decode")
+            if is_file:
+                name = item.get("name")
+                if name is None:
+                    name = "attachment.txt"
+                if (not isinstance(name, str) or not name or name in {".", ".."}
+                        or "/" in name or "\\" in name):
+                    Path(saved).unlink(missing_ok=True)
+                    return _abort("filename")
+                basename = safe_filename(name)
+                if not basename:
+                    Path(saved).unlink(missing_ok=True)
+                    return _abort("filename")
+                target_dir = media_dir / uuid.uuid4().hex
+                target_dir.mkdir()
+                target = target_dir / basename
+                Path(saved).replace(target)
+                saved = str(target)
             paths.append(saved)
         return paths, None
 
@@ -1326,17 +1461,32 @@ class WebSocketChannel(BaseChannel):
     ) -> None:
         """Route one typed inbound envelope (``new_chat`` / ``attach`` / ``message``)."""
         t = envelope.get("type")
+        if self._mail_access is not None and t == "mail_knowledge":
+            from nanobot.knowledge.mail.web_api import private_envelope
+            await private_envelope(self, connection, envelope)
+            return
         if t == "new_chat":
             new_id = str(uuid.uuid4())
+            self._persist_server_chat_session(new_id)
+            chat_token = self._issue_chat_token(new_id)
+            self._conn_owned_chats.setdefault(connection, set()).add(new_id)
             self._attach(connection, new_id)
-            await self._send_event(connection, "attached", chat_id=new_id)
+            await self._send_event(connection, "attached", chat_id=new_id, chat_token=chat_token)
             return
         if t == "attach":
             cid = envelope.get("chat_id")
             if not _is_valid_chat_id(cid):
                 await self._send_event(connection, "error", detail="invalid chat_id")
                 return
-            self._attach(connection, cid)
+            if self._mail_access is None and not self._can_access_chat(connection, cid, envelope.get("chat_token")):
+                await self._send_event(connection, "error", detail="chat_unauthorized")
+                return
+            try:
+                self._attach(connection, cid)
+            except Exception:
+                await self._send_event(connection, "error", detail="chat_unauthorized")
+                return
+            self._conn_owned_chats.setdefault(connection, set()).add(cid)
             await self._send_event(connection, "attached", chat_id=cid)
             return
         if t == "message":
@@ -1349,6 +1499,19 @@ class WebSocketChannel(BaseChannel):
                 await self._send_event(connection, "error", detail="missing content")
                 return
 
+            # Authorize the target before decoding or writing client-provided media.
+            if self._mail_access is None and not self._can_access_chat(
+                connection, cid, envelope.get("chat_token")
+            ):
+                await self._send_event(connection, "error", detail="chat_unauthorized")
+                return
+            if self._mail_access is not None:
+                try:
+                    self._attach(connection, cid)
+                except Exception:
+                    await self._send_event(connection, "error", detail="chat_unauthorized")
+                    return
+
             raw_media = envelope.get("media")
             media_paths: list[str] = []
             if raw_media is not None:
@@ -1358,7 +1521,7 @@ class WebSocketChannel(BaseChannel):
                         detail="image_rejected", reason="malformed",
                     )
                     return
-                media_paths, reason = self._save_envelope_media(raw_media)
+                media_paths, reason = self._save_envelope_media(raw_media, cid)
                 if reason is not None:
                     await self._send_event(
                         connection, "error",
@@ -1371,8 +1534,21 @@ class WebSocketChannel(BaseChannel):
                 await self._send_event(connection, "error", detail="missing content")
                 return
 
+            try:
+                self._persist_default_chat_on_first_message(cid)
+            except BaseException as save_error:
+                for path in media_paths:
+                    try:
+                        Path(path).unlink(missing_ok=True)
+                    except OSError as cleanup_error:
+                        save_error.add_note(
+                            f"Could not remove uploaded media after session initialization failed: {cleanup_error}"
+                        )
+                raise
             # Auto-attach on first use so clients can one-shot without a separate attach.
-            self._attach(connection, cid)
+            if self._mail_access is None:
+                self._attach(connection, cid)
+                self._conn_owned_chats.setdefault(connection, set()).add(cid)
             metadata: dict[str, Any] = {"remote": getattr(connection, "remote_address", None)}
             if envelope.get("webui") is True:
                 metadata["webui"] = True
@@ -1389,6 +1565,7 @@ class WebSocketChannel(BaseChannel):
                 content=content,
                 media=media_paths or None,
                 metadata=metadata,
+                security=self._mail_access.security(connection) if self._mail_access else None,
             )
             return
         await self._send_event(connection, "error", detail=f"unknown type: {t!r}")
@@ -1423,6 +1600,9 @@ class WebSocketChannel(BaseChannel):
             raise
 
     async def send(self, msg: OutboundMessage) -> None:
+        if self._mail_access is not None:
+            await self._mail_access.send(self, msg)
+            return
         # Snapshot the subscriber set so ConnectionClosed cleanups mid-iteration are safe.
         conns = list(self._subs.get(msg.chat_id, ()))
         if not conns:
@@ -1437,7 +1617,10 @@ class WebSocketChannel(BaseChannel):
             return
         # Signal that the agent has fully finished processing the current turn.
         if msg.metadata.get("_turn_end"):
-            await self.send_turn_end(msg.chat_id)
+            await self.send_turn_end(
+                msg.chat_id, failed=msg.metadata.get("_turn_error") is True,
+                turn_id=msg.metadata.get("_turn_id"),
+            )
             return
         if msg.metadata.get("_session_updated"):
             await self.send_session_updated(msg.chat_id)
@@ -1471,6 +1654,14 @@ class WebSocketChannel(BaseChannel):
             payload["kind"] = "tool_hint"
         elif msg.metadata.get("_progress"):
             payload["kind"] = "progress"
+        if msg.metadata.get("_turn_id") is not None:
+            payload["turn_id"] = msg.metadata["_turn_id"]
+        if msg.metadata.get("_message_id") is not None:
+            payload["message_id"] = msg.metadata["_message_id"]
+        if msg.metadata.get("_stream_id") is not None:
+            payload["stream_id"] = msg.metadata["_stream_id"]
+        if msg.metadata.get("_tool_events"):
+            payload["tool_events"] = msg.metadata["_tool_events"]
         raw = json.dumps(payload, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" ")
@@ -1481,6 +1672,8 @@ class WebSocketChannel(BaseChannel):
         delta: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        if self._mail_access is not None:
+            return  # Protected turns publish only fully validated answers.
         conns = list(self._subs.get(chat_id, ()))
         if not conns:
             return
@@ -1495,16 +1688,26 @@ class WebSocketChannel(BaseChannel):
             }
         if meta.get("_stream_id") is not None:
             body["stream_id"] = meta["_stream_id"]
+        if meta.get("_turn_id") is not None:
+            body["turn_id"] = meta["_turn_id"]
+        if meta.get("_stream_end") and "_resuming" in meta:
+            body["resuming"] = meta.get("_resuming") is True
         raw = json.dumps(body, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" stream ")
 
-    async def send_turn_end(self, chat_id: str) -> None:
+    async def send_turn_end(
+        self, chat_id: str, *, failed: bool = False, turn_id: str | None = None,
+    ) -> None:
         """Signal that the agent has fully finished processing the current turn."""
         conns = list(self._subs.get(chat_id, ()))
         if not conns:
             return
         body: dict[str, Any] = {"event": "turn_end", "chat_id": chat_id}
+        if failed:
+            body["outcome"] = "error"
+        if turn_id is not None:
+            body["turn_id"] = turn_id
         raw = json.dumps(body, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" turn_end ")

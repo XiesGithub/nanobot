@@ -185,6 +185,7 @@ if DISCORD_AVAILABLE:
                 sender_id=sender_id,
                 chat_id=str(channel_id),
                 content=command_text,
+                verified_private_principal=sender_id if isinstance(channel, discord.DMChannel) else None,
                 metadata=metadata,
                 session_key=session_key,
             )
@@ -574,6 +575,7 @@ class DiscordChannel(BaseChannel):
                 sender_id=sender_id,
                 chat_id=channel_id,
                 content=full_content,
+                verified_private_principal=sender_id if isinstance(message.channel, discord.DMChannel) else None,
                 media=media_paths,
                 metadata=metadata,
                 session_key=session_key,

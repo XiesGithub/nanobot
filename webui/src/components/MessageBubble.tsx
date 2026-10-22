@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { MarkdownText } from "@/components/MarkdownText";
+import { MailSources } from "@/components/mail/MailSources";
+import { useOptionalClient } from "@/providers/ClientProvider";
 import { cn } from "@/lib/utils";
 import type { UIImage, UIMediaAttachment, UIMessage } from "@/lib/types";
 
@@ -22,6 +24,7 @@ interface MessageBubbleProps {
  */
 export function MessageBubble({ message }: MessageBubbleProps) {
   const { t } = useTranslation();
+  const clientContext = useOptionalClient();
   const [copied, setCopied] = useState(false);
   const copyResetRef = useRef<number | null>(null);
   const baseAnim = "animate-in fade-in-0 slide-in-from-bottom-1 duration-300";
@@ -33,6 +36,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       }
     };
   }, []);
+
+  const privateDenied = Boolean(clientContext?.mailOwner && clientContext.privateAccessDenied);
 
   const onCopyAssistantReply = useCallback(() => {
     if (!navigator.clipboard) return;
@@ -49,10 +54,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   }, [message.content]);
 
   if (message.kind === "trace") {
+    if (privateDenied) return <p role="alert" className="text-sm text-muted-foreground">{t("mail.accessRevoked")}</p>;
     return <TraceGroup message={message} animClass={baseAnim} />;
   }
 
   if (message.role === "user") {
+    if (privateDenied) return <p role="alert" className="text-sm text-muted-foreground">{t("mail.accessRevoked")}</p>;
     const images = message.images ?? [];
     const media = message.media ?? [];
     const hasImages = images.length > 0;
@@ -92,10 +99,11 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         <TypingDots />
       ) : (
         <>
-          <MarkdownText>{message.content}</MarkdownText>
-          {message.isStreaming && <StreamCursor />}
-          {media.length > 0 ? <MessageMedia media={media} align="left" /> : null}
-          {showAssistantActions ? (
+          {privateDenied ? <p role="alert" className="text-sm text-muted-foreground">{t("mail.accessRevoked")}</p> : <MarkdownText>{message.content}</MarkdownText>}
+          {message.citations?.length && message.mailChatId ? <MailSources citations={message.citations} chatId={message.mailChatId} /> : null}
+          {!privateDenied && message.isStreaming && <StreamCursor />}
+          {!privateDenied && media.length > 0 ? <MessageMedia media={media} align="left" /> : null}
+          {!privateDenied && showAssistantActions ? (
             <div className="mt-2 flex items-center gap-1 text-muted-foreground">
               <button
                 type="button"
@@ -386,10 +394,13 @@ interface TraceGroupProps {
 function TraceGroup({ message, animClass }: TraceGroupProps) {
   const { t } = useTranslation();
   const lines = message.traces ?? [message.content];
-  const count = lines.length;
+  const calls = message.traceCalls ?? [];
+  const count = new Set(calls
+    .filter((call) => call.executionStarted)
+    .map((call) => call.callId)).size;
   const [open, setOpen] = useState(true);
   return (
-    <div className={cn("w-full", animClass)}>
+    <div className={cn("w-full", animClass)} data-turn-id={message.turnId}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -401,9 +412,11 @@ function TraceGroup({ message, animClass }: TraceGroupProps) {
       >
         <Wrench className="h-3.5 w-3.5" aria-hidden />
         <span className="font-medium">
-          {count === 1
-            ? t("message.toolSingle")
-            : t("message.toolMany", { count })}
+          {count === 0
+            ? t("message.progress")
+            : count === 1
+              ? t("message.toolSingle")
+              : t("message.toolMany", { count })}
         </span>
         <ChevronRight
           aria-hidden
@@ -422,10 +435,22 @@ function TraceGroup({ message, animClass }: TraceGroupProps) {
         >
           {lines.map((line, i) => (
             <li
-              key={i}
+              key={`progress-${i}`}
               className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-muted-foreground/90"
             >
               {line}
+            </li>
+          ))}
+          {calls.map((call) => (
+            <li
+              key={`tool-${call.callId}`}
+              data-tool-call-id={call.callId}
+              data-tool-phase={call.phase}
+              data-execution-started={String(call.executionStarted)}
+              data-turn-id={message.turnId}
+              className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-muted-foreground/90"
+            >
+              {`${call.name} · ${call.phase}`}
             </li>
           ))}
         </ul>

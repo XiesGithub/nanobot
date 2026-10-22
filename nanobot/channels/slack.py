@@ -334,7 +334,7 @@ class SlackChannel(BaseChannel):
             sender_id,
             chat_id,
             event.get("channel_type"),
-            text[:80],
+            "[private content omitted]" if getattr(self, "_mail_service", None) else text[:80],
         )
         if not sender_id or not chat_id:
             return
@@ -409,6 +409,7 @@ class SlackChannel(BaseChannel):
                 chat_id=chat_id,
                 content=content,
                 media=media_paths,
+                verified_private_principal=sender_id if channel_type == "im" else None,
                 metadata={
                     "slack": {
                         "event": event,
@@ -495,6 +496,7 @@ class SlackChannel(BaseChannel):
                 sender_id=sender_id,
                 chat_id=chat_id,
                 content=value,
+                verified_private_principal=sender_id if channel_type == "im" else None,
                 metadata={"slack": {"thread_ts": thread_ts, "channel_type": channel_type}},
                 session_key=session_key,
             )

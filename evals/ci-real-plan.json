@@ -1,0 +1,16 @@
+{
+  "version": "ci-real-plan/1.0",
+  "tier": "development",
+  "mode": "R",
+  "model": "deepseek-v4-flash",
+  "cases": ["V001"],
+  "repeats_per_platform": 1,
+  "platforms": ["windows", "linux"],
+  "per_platform_budget": {"max_attempts": 4, "max_tokens": 16000, "max_wall_seconds": 120},
+  "total_budget": {"max_attempts": 8, "max_tokens": 32000, "max_wall_seconds": 240},
+  "supervisor_timeout_seconds": 180,
+  "quality_passed": false,
+  "scope": "bounded_ci_execution_diagnostic; no system quality approval",
+  "prices": null,
+  "dangerous_scenarios_authorized": false
+}

@@ -532,6 +532,7 @@ class QQChannel(BaseChannel):
             await self._handle_message(
                 sender_id=user_id,
                 chat_id=chat_id,
+                verified_private_principal=user_id if not is_group and user_id != "unknown" else None,
                 content=content,
                 media=media_paths if media_paths else None,
                 metadata={

@@ -46,6 +46,30 @@ def build_tool_event_start_payload(tool_call: Any) -> dict[str, Any]:
     }
 
 
+def build_tool_execution_event(
+    tool_call: Any,
+    phase: str,
+    *,
+    execution_started: bool,
+    error_kind: str | None = None,
+) -> dict[str, Any]:
+    """Build a minimal tool lifecycle event from the real execution boundary.
+
+    These events describe execution state only. Tool arguments and results stay in
+    the normal tool message flow and are never copied into progress text.
+    """
+    event = {
+        "version": 1,
+        "phase": phase,
+        "call_id": str(getattr(tool_call, "id", "") or ""),
+        "name": str(getattr(tool_call, "name", "") or ""),
+        "execution_started": bool(execution_started),
+    }
+    if error_kind:
+        event["error_kind"] = error_kind
+    return event
+
+
 def tool_event_result_extras(result: Any) -> tuple[list[Any], list[Any]]:
     if not isinstance(result, dict):
         return [], []

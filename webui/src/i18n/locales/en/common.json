@@ -65,7 +65,8 @@
     },
     "nav": {
       "general": "General",
-      "byok": "BYOK"
+      "byok": "BYOK",
+      "mail": "Mail knowledge"
     },
     "sections": {
       "interface": "Interface",
@@ -356,6 +357,94 @@
     "messageTooBig": {
       "title": "Message too large",
       "body": "The server rejected your last message because it exceeded the size limit. Remove some images or try smaller files, then send again."
+    }
+  },
+  "mail": {
+    "sources": "Mail sources",
+    "sourceNotice": "Evidence from the local archive. Quoted history is not a new commitment. Removing a source invalidates its citations.",
+    "accessRevoked": "Private source access is no longer available.",
+    "loading": "Loading…",
+    "unknownTime": "Received time unknown",
+    "body": "Message body",
+    "partial": "Incomplete extraction:",
+    "download": "Download attachment",
+    "next": "Next page",
+    "cancel": "Cancel",
+    "confirmAction": "Confirm this action",
+    "confirmExpiry": "This confirmation expires after 5 minutes and can be used once.",
+    "privacy": "Mail and attachments are stored privately on this device. Answer generation sends selected evidence to the configured deepseek-v4-flash provider. Only newly received permitted mail is archived; historical mail is not backfilled. External conversations have restricted tools.",
+    "refresh": "Refresh status",
+    "mode": "Receiving mode",
+    "archive": "Archive permitted mail",
+    "archiveHint": "Indexes message bodies and supported attachments locally.",
+    "trigger": "Let incoming mail trigger the agent",
+    "triggerHint": "May call the model, execute tools and send a configured reply. Turning this off stops new dispatches; effects already executed cannot be undone.",
+    "modes": {
+      "00": "Archiving and agent interaction are off.",
+      "01": "Interaction only; no new archive.",
+      "10": "Archive only; no model, tools or automatic replies.",
+      "11": "Archive and agent interaction are enabled."
+    },
+    "save": "Apply receiving mode",
+    "health": "Archive health",
+    "worker": "Archive worker",
+    "online": "Running",
+    "offline": "Not running in this service",
+    "semantic": "Semantic index",
+    "pending": "Pending input",
+    "admissionWaiting": "Waiting before admission",
+    "admissionWaitingHint": "These sources are not durably archived. A wait record is not an accepted job; reporting is best effort if storage is unwritable. Sources marked read or removed by another client are not automatically backfilled.",
+    "indexPending": "Documents awaiting indexing",
+    "durableJobs": "Durably accepted jobs by stage",
+    "types": "Attachment types / count / size limit",
+    "inventory": "Maintenance records",
+    "inventoryKinds": {
+      "documents": "Incomplete documents",
+      "interactions": "Uncertain interactions",
+      "deliveries": "Reply deliveries",
+      "removed": "Removed sources",
+      "actions": "Action receipts"
+    },
+    "inventoryHint": "Retry uses local input only. Refetch and restore connect to the mailbox after confirmation. An accepted receipt is queued work, not completion. Refresh to check completion. Reparse and reindex are available from the CLI.",
+    "empty": "No records on this page.",
+    "deliveryHint": "Interaction completion and delivery are separate. submitted means SMTP submission returned successfully, not guaranteed receipt. uncertain is never retried automatically; suppressed means the reply was discarded after a mode change.",
+    "cleanupPending": "Physical cleanup pending",
+    "removed": "Removed locally",
+    "roles": {
+      "current": "Current text",
+      "quoted": "Quoted history",
+      "signature": "Signature",
+      "unknown": "Unclassified text"
+    },
+    "actions": {
+      "retry": "Retry local input",
+      "prepare_remove": "Remove source",
+      "request_restore": "Restore source",
+      "prepare_refetch": "Refetch attachment",
+      "dismiss_interaction": "Dismiss uncertainty",
+      "prepare_interaction_retry": "Retry interaction"
+    },
+    "confirm": {
+      "prepare_remove": "Remove this mail and its attachments from local knowledge. Old citations will stop working. This does not delete server mail.",
+      "request_restore": "Connect to the original mailbox and fetch this exact mail again. It will be indexed as new content; old citations remain invalid. No automatic agent turn or reply is triggered.",
+      "prepare_refetch": "Connect to the original mailbox to download the selected attachment again. This may transfer private data. It does not run the agent or send mail.",
+      "prepare_interaction_retry": "This interaction may already have executed tools or sent a reply. Retrying can repeat those effects. Confirm only after checking the previous outcome."
+    },
+    "receipts": {
+      "accepted": "Accepted; processing pending",
+      "accepted_waiting_service": "Accepted; waiting for Gateway",
+      "completed": "Completed",
+      "failed": "Failed"
+    },
+    "locations": {
+      "page": "Page",
+      "paragraph": "Paragraph",
+      "line": "Line",
+      "table": "Table",
+      "row": "Row",
+      "column": "Column",
+      "sheet": "Sheet",
+      "slide": "Slide"
     }
   }
 }

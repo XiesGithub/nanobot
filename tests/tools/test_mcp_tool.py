@@ -215,7 +215,7 @@ def test_normalize_windows_stdio_command_wraps_npx_on_windows(
     )
 
     assert command == r"C:\Windows\System32\cmd.exe"
-    assert args == ["/d", "/c", "npx", "-y", "chrome-devtools-mcp@latest"]
+    assert args == ["/d", "/v:off", "/c", "@", "npx", "-y", "chrome-devtools-mcp@latest"]
     assert env is None
 
 
@@ -239,7 +239,83 @@ def test_normalize_windows_stdio_command_wraps_resolved_cmd_launcher(
     )
 
     assert command == r"C:\Windows\System32\cmd.exe"
-    assert args == ["/d", "/c", "custom-launcher", "serve"]
+    assert args == ["/d", "/v:off", "/c", "@", "custom-launcher", "serve"]
+
+
+@pytest.mark.parametrize(
+    "server_args",
+    [
+        [],
+        ["argument with spaces"],
+        ["", "argument with spaces", "safe;value"],
+        [r"C:\Program Files (x86)\data", "look & feel"],
+    ],
+)
+def test_normalize_windows_stdio_command_preserves_batch_argument_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    server_args: list[str],
+) -> None:
+    monkeypatch.setattr(mcp_mod.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mcp_mod.shutil, "which", lambda command, path=None: command)
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
+
+    command, args, env = _normalize_windows_stdio_command(
+        r"C:\Program Files (x86)\mcp service\launch service.bat",
+        server_args,
+        None,
+    )
+
+    assert command == r"C:\Windows\System32\cmd.exe"
+    assert args == [
+        "/d",
+        "/v:off",
+        "/c",
+        "@",
+        r"C:\Program Files (x86)\mcp service\launch service.bat",
+        *server_args,
+    ]
+    assert env is None
+
+
+@pytest.mark.parametrize(
+    "unsafe_arg",
+    [
+        "a&b",
+        "a|b",
+        "a<b",
+        "a>b",
+        "a^b",
+        "%PATH%",
+        "a(b)",
+        'a"b',
+        "a\nb",
+        "a\u00a0&b",
+    ],
+)
+def test_normalize_windows_stdio_command_rejects_cmd_syntax_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_arg: str,
+) -> None:
+    monkeypatch.setattr(mcp_mod.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mcp_mod.shutil, "which", lambda command, path=None: command)
+
+    with pytest.raises(ValueError, match="cannot safely pass cmd syntax"):
+        _normalize_windows_stdio_command("custom.cmd", [unsafe_arg], None)
+
+
+@pytest.mark.parametrize(
+    "unsafe_command",
+    [r"C:\mcp&service\launch.cmd", r"%TEMP%\launch.cmd", 'a"b.cmd'],
+)
+def test_normalize_windows_stdio_command_rejects_cmd_syntax_in_launcher_path(
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_command: str,
+) -> None:
+    monkeypatch.setattr(mcp_mod.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mcp_mod.shutil, "which", lambda command, path=None: command)
+
+    with pytest.raises(ValueError, match="cannot safely pass cmd syntax"):
+        _normalize_windows_stdio_command(unsafe_command, [], None)
 
 
 def test_normalize_windows_stdio_command_keeps_real_executables_unchanged(
@@ -557,7 +633,15 @@ async def test_connect_mcp_servers_wraps_windows_stdio_launchers(
         await stack.aclose()
 
     assert captured["command"] == r"C:\Windows\System32\cmd.exe"
-    assert captured["args"] == ["/d", "/c", "npx", "-y", "chrome-devtools-mcp@latest"]
+    assert captured["args"] == [
+        "/d",
+        "/v:off",
+        "/c",
+        "@",
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@latest",
+    ]
     assert captured["env"] is None
 
 

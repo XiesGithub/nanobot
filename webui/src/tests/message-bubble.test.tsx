@@ -70,13 +70,39 @@ describe("MessageBubble", () => {
     };
 
     render(<MessageBubble message={message} />);
-    const toggle = screen.getByRole("button", { name: /used 2 tools/i });
+    const toggle = screen.getByRole("button", { name: /progress/i });
 
     expect(screen.getByText('weather("get")')).toBeInTheDocument();
     expect(screen.getByText('search "hk weather"')).toBeInTheDocument();
 
     fireEvent.click(toggle);
     expect(screen.queryByText('weather("get")')).not.toBeInTheDocument();
+  });
+
+  it("counts unique started tool call IDs and exposes each actual tool state", () => {
+    const message: UIMessage = {
+      id: "t-tools",
+      role: "tool",
+      kind: "trace",
+      turnId: "turn-v074",
+      content: "edit_file · end",
+      traces: ["I'll update the config.", "edit config.json"],
+      traceCalls: [
+        { callId: "read-1", name: "read_file", phase: "end", executionStarted: true },
+        { callId: "edit-1", name: "edit_file", phase: "end", executionStarted: true },
+        { callId: "rejected-1", name: "shell", phase: "rejected", executionStarted: false },
+      ],
+      createdAt: Date.now(),
+    };
+
+    render(<MessageBubble message={message} />);
+
+    const toggle = screen.getByRole("button", { name: /used 2 tools/i });
+    expect(toggle.parentElement).toHaveAttribute("data-turn-id", "turn-v074");
+    expect(screen.getByText("I'll update the config.")).toBeInTheDocument();
+    expect(screen.getByText("read_file · end")).toHaveAttribute("data-tool-call-id", "read-1");
+    expect(screen.getByText("edit_file · end")).toHaveAttribute("data-tool-call-id", "edit-1");
+    expect(screen.getByText("shell · rejected")).toHaveAttribute("data-execution-started", "false");
   });
 
   it("renders video media as an inline player", () => {

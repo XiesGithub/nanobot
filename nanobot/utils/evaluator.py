@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from nanobot.utils.observability import observed
 from nanobot.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ _EVALUATE_TOOL = [
     }
 ]
 
+@observed("background", purpose="notification_classifier", accounting_domain="execution")
 async def evaluate_response(
     response: str,
     task_context: str,

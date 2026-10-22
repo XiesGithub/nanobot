@@ -10,6 +10,7 @@ from loguru import logger
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 from nanobot.utils.helpers import truncate_text
+from nanobot.utils.observability import observed
 
 WEBUI_SESSION_METADATA_KEY = "webui"
 WEBUI_TITLE_METADATA_KEY = "title"
@@ -55,6 +56,7 @@ def _title_inputs(session: Session) -> tuple[str, str]:
     return user_text, assistant_text
 
 
+@observed("background", purpose="session_title", accounting_domain="execution")
 async def maybe_generate_webui_title(
     *,
     sessions: SessionManager,
@@ -119,6 +121,7 @@ async def maybe_generate_webui_title(
     return True
 
 
+@observed("background", purpose="session_title_after_turn", accounting_domain="execution")
 async def maybe_generate_webui_title_after_turn(
     *,
     channel: str,

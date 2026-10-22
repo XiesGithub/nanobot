@@ -33,6 +33,11 @@ def get_media_dir(channel: str | None = None) -> Path:
     return ensure_dir(base / channel) if channel else base
 
 
+def get_mail_knowledge_dir() -> Path:
+    """Private instance path, without creating directories during config loading."""
+    return get_config_path().parent / "knowledge" / "mail"
+
+
 def get_cron_dir() -> Path:
     """Return the cron storage directory."""
     return get_runtime_subdir("cron")

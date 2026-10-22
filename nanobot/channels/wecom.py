@@ -342,6 +342,7 @@ class WecomChannel(BaseChannel):
                 sender_id=sender_id,
                 chat_id=chat_id,
                 content=content,
+                verified_private_principal=sender_id if body.get("chattype") == "single" else None,
                 media=media_paths or None,
                 metadata={
                     "message_id": msg_id,

@@ -4,11 +4,14 @@ import json
 import os
 import re
 import shutil
+import sys
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from loguru import logger
 
@@ -20,6 +23,7 @@ from nanobot.utils.helpers import (
     image_placeholder_text,
     safe_filename,
 )
+from nanobot.utils.observability import point
 
 FILE_MAX_MESSAGES = 2000
 _MESSAGE_TIME_PREFIX_RE = re.compile(r"^\[Message Time: [^\]]+\]\n?")
@@ -263,11 +267,12 @@ class SessionManager:
     Sessions are stored as JSONL files in the sessions directory.
     """
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, *, allow_legacy: bool = True):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = get_legacy_sessions_dir()
         self._cache: dict[str, Session] = {}
+        self.allow_legacy = allow_legacy
 
     @staticmethod
     def safe_key(key: str) -> str:
@@ -305,7 +310,7 @@ class SessionManager:
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
         path = self._get_session_path(key)
-        if not path.exists():
+        if not path.exists() and self.allow_legacy:
             legacy_path = self._get_legacy_session_path(key)
             if legacy_path.exists():
                 try:
@@ -431,10 +436,108 @@ class SessionManager:
         the most recent writes.
         """
         path = self._get_session_path(session.key)
-        tmp_path = path.with_suffix(".jsonl.tmp")
+        save_id = uuid4().hex
+        tmp_path: Path | None = None
+        temp_created = False
+        temp_owned = False
+        committed = False
+        save_phase = "start"
+
+        def report_failure(
+            operation: str,
+            target: Path,
+            exc: BaseException,
+            *,
+            failure_phase: str | None = None,
+        ) -> None:
+            if target == self.sessions_dir:
+                relative_path = "."
+            elif operation in {"os_replace", "replace"}:
+                relative_path = "<session>.jsonl"
+            else:
+                relative_path = "<session>.jsonl.tmp"
+            point(
+                "session_save_failure",
+                save_id=save_id,
+                operation=operation,
+                path=relative_path,
+                save_phase=failure_phase or save_phase,
+                committed=committed,
+                temp_created=temp_created,
+                error_kind=type(exc).__name__,
+                errno=getattr(exc, "errno", None),
+                winerror=getattr(exc, "winerror", None),
+                location=f"nanobot.session.manager.SessionManager.save.{operation}",
+            )
+
+        def step(operation: str, target: Path, action):
+            nonlocal save_phase
+            save_phase = operation
+            try:
+                return action()
+            except BaseException as exc:
+                report_failure(operation, target, exc)
+                raise
+
+        def create_temp_file():
+            nonlocal tmp_path, temp_created, temp_owned
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".session-save-",
+                suffix=".tmp",
+                dir=path.parent,
+            )
+            tmp_path = Path(temp_name)
+            temp_created = True
+            temp_owned = True
+            try:
+                return os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException as open_error:
+                try:
+                    os.close(fd)
+                except BaseException as close_error:
+                    report_failure(
+                        "temp_fd_close", tmp_path, close_error, failure_phase="temp_fd_close"
+                    )
+                    open_error.add_note(
+                        "Temporary session file descriptor close also failed; "
+                        "see session save diagnostics."
+                    )
+                raise
+
+        class ObservedTempFile:
+            def __init__(self, file):
+                self.file = file
+
+            def __enter__(self):
+                return self.file.__enter__()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                nonlocal save_phase
+                try:
+                    return self.file.__exit__(exc_type, exc_value, traceback)
+                except BaseException as exc:
+                    assert tmp_path is not None
+                    save_phase = "temp_close"
+                    report_failure("temp_close", tmp_path, exc)
+                    if exc_value is not None:
+                        exc_value.add_note(
+                            "Temporary session file close also failed; see session save diagnostics."
+                        )
+                        return False
+                    raise
+
+        def replace_temp_file() -> None:
+            nonlocal committed, temp_owned, save_phase
+            assert tmp_path is not None
+            os.replace(tmp_path, path)
+            committed = True
+            temp_owned = False
+            save_phase = "committed"
 
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            temp_file = step("temp_open", path, create_temp_file)
+            assert tmp_path is not None
+            with ObservedTempFile(temp_file) as f:
                 metadata_line = {
                     "_type": "metadata",
                     "key": session.key,
@@ -443,28 +546,64 @@ class SessionManager:
                     "metadata": session.metadata,
                     "last_consolidated": session.last_consolidated
                 }
-                f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
+                step(
+                    "temp_write", tmp_path,
+                    lambda: f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n"),
+                )
                 for msg in session.messages:
-                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                    step(
+                        "temp_write", tmp_path,
+                        lambda: f.write(json.dumps(msg, ensure_ascii=False) + "\n"),
+                    )
                 if fsync:
-                    f.flush()
-                    os.fsync(f.fileno())
+                    step("temp_flush", tmp_path, f.flush)
+                    fd = step("temp_fileno", tmp_path, f.fileno)
+                    step("file_fsync", tmp_path, lambda: os.fsync(fd))
 
-            os.replace(tmp_path, path)
+            step("os_replace", path, replace_temp_file)
 
             if fsync:
                 # fsync the directory so the rename is durable.
                 # On Windows, opening a directory with O_RDONLY raises
                 # PermissionError — skip the dir sync there (NTFS
                 # journals metadata synchronously).
-                with suppress(PermissionError):
-                    fd = os.open(str(path.parent), os.O_RDONLY)
+                try:
+                    fd = step(
+                        "directory_open", self.sessions_dir,
+                        lambda: os.open(str(path.parent), os.O_RDONLY),
+                    )
+                except PermissionError:
+                    if sys.platform != "win32":
+                        raise
+                else:
+                    sync_error = None
                     try:
-                        os.fsync(fd)
+                        step("directory_fsync", self.sessions_dir, lambda: os.fsync(fd))
+                    except BaseException as exc:
+                        sync_error = exc
                     finally:
-                        os.close(fd)
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
+                        try:
+                            step("directory_close", self.sessions_dir, lambda: os.close(fd))
+                        except BaseException:
+                            if sync_error is None:
+                                raise
+                            sync_error.add_note(
+                                "Session directory close also failed; see session save diagnostics."
+                            )
+                    if sync_error is not None:
+                        raise sync_error
+        except BaseException as save_error:
+            if temp_owned and tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                    temp_owned = False
+                except BaseException as cleanup_error:
+                    report_failure(
+                        "temp_cleanup", tmp_path, cleanup_error, failure_phase="temp_cleanup"
+                    )
+                    save_error.add_note(
+                        "Temporary session file cleanup also failed; see session save diagnostics."
+                    )
             raise
 
         self._cache[session.key] = session

@@ -1,6 +1,7 @@
 """Subagent manager for background task execution."""
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -20,7 +21,21 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.providers.base import LLMProvider
+from nanobot.utils.observability import (
+    current_observation,
+    current_span_id,
+    observation_context,
+    point,
+    span,
+)
 from nanobot.utils.prompt_templates import render_template
+
+
+def _observation_hash(value: str | None) -> str | None:
+    """Hash private routing identifiers before they enter telemetry."""
+    if value is None:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 @dataclass(slots=True)
@@ -146,9 +161,20 @@ class SubagentManager:
         )
         self._task_statuses[task_id] = status
 
-        bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin, status, origin_message_id)
-        )
+        # The spawn span is copied into the background task's context. The
+        # child runner can then record its own task identity and link back to
+        # this accepted request without changing scheduling or return values.
+        with span(
+            "subtask_spawn",
+            subagent_task_id=task_id,
+            origin_session_hash=_observation_hash(session_key),
+            origin_channel=origin_channel,
+            origin_chat_id_hash=_observation_hash(origin_chat_id),
+            status="accepted",
+        ):
+            bg_task = asyncio.create_task(
+                self._run_subagent(task_id, task, display_label, origin, status, origin_message_id)
+            )
         self._running_tasks[task_id] = bg_task
         if session_key:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
@@ -167,6 +193,60 @@ class SubagentManager:
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
     async def _run_subagent(
+        self,
+        task_id: str,
+        task: str,
+        label: str,
+        origin: dict[str, str],
+        status: SubagentStatus,
+        origin_message_id: str | None = None,
+    ) -> None:
+        parent = current_observation()
+        if parent is None:
+            await self._run_subagent_body(
+                task_id, task, label, origin, status, origin_message_id,
+            )
+            return
+
+        parent_span = current_span_id()
+        with observation_context(
+            parent.sink,
+            task_id=task_id,
+            parent_task_id=parent.task_id,
+            parent_span_id=parent_span,
+        ):
+            with span("task", role="subagent", subagent_task_id=task_id):
+                point(
+                    "subtask_lifecycle",
+                    subagent_task_id=task_id,
+                    origin_task_id=parent.task_id,
+                    origin_session_hash=_observation_hash(origin.get("session_key")),
+                    status="started",
+                )
+                try:
+                    await self._run_subagent_body(
+                        task_id, task, label, origin, status, origin_message_id,
+                    )
+                    point(
+                        "subtask_lifecycle",
+                        subagent_task_id=task_id,
+                        origin_task_id=parent.task_id,
+                        origin_session_hash=_observation_hash(origin.get("session_key")),
+                        status=status.phase,
+                        stop_reason=status.stop_reason,
+                        error_kind=type(status.error).__name__ if status.error else None,
+                    )
+                except asyncio.CancelledError:
+                    point(
+                        "subtask_lifecycle",
+                        subagent_task_id=task_id,
+                        origin_task_id=parent.task_id,
+                        origin_session_hash=_observation_hash(origin.get("session_key")),
+                        status="cancelled",
+                    )
+                    raise
+
+    async def _run_subagent_body(
         self,
         task_id: str,
         task: str,
@@ -272,6 +352,15 @@ class SubagentManager:
         )
 
         await self.bus.publish_inbound(msg)
+        point(
+            "subtask_delivery",
+            subagent_task_id=task_id,
+            origin_session_hash=_observation_hash(override),
+            target_channel=origin["channel"],
+            target_chat_id_hash=_observation_hash(origin["chat_id"]),
+            status=status,
+            delivery="message_bus_inbound_published",
+        )
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
 
     @staticmethod

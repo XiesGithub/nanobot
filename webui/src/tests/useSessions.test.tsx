@@ -194,6 +194,30 @@ describe("useSessions", () => {
     expect(result.current.hasPendingToolCalls).toBe(true);
   });
 
+  it("reloads pre-tool narration as progress and preserves only the final assistant body", async () => {
+    vi.mocked(api.fetchSessionMessages).mockResolvedValue({
+      key: "websocket:chat-done", created_at: null, updated_at: null,
+      messages: [
+        { role: "user", content: "读取fact.txt告诉我值。" },
+        { role: "assistant", content: "I'll read the file.", tool_calls: [
+          { id: "read-1", function: { name: "read_file", arguments: '{"path":"fact.txt"}' } },
+        ] },
+        { role: "tool", content: "值：73", tool_call_id: "read-1" },
+        { role: "assistant", content: "结果为73" },
+      ],
+    });
+    const { result } = renderHook(() => useSessionHistory("websocket:chat-done"), {
+      wrapper: wrap(fakeClient()),
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.messages.filter((m) => m.role === "assistant").map((m) => m.content))
+      .toEqual(["结果为73"]);
+    expect(result.current.messages.find((m) => m.kind === "trace")?.traces)
+      .toEqual(["I'll read the file.", "read_file"]);
+    expect(result.current.messages.find((m) => m.kind === "trace")?.traceCalls).toBeUndefined();
+    expect(result.current.hasPendingToolCalls).toBe(false);
+  });
+
   it("keeps pending when tool result rows trail assistant tool calls", async () => {
     vi.mocked(api.fetchSessionMessages).mockResolvedValue({
       key: "websocket:chat-pending-tool-result",

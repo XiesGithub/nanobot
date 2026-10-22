@@ -754,20 +754,25 @@ class OpenAICompatProvider(LLMProvider):
             usage_obj = response.usage
 
         usage_map = cls._maybe_mapping(usage_obj)
-        if usage_map is not None:
-            result = {
-                "prompt_tokens": int(usage_map.get("prompt_tokens") or 0),
-                "completion_tokens": int(usage_map.get("completion_tokens") or 0),
-                "total_tokens": int(usage_map.get("total_tokens") or 0),
-            }
-        elif usage_obj:
-            result = {
-                "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
-                "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
-            }
-        else:
+        if usage_map is None and not usage_obj:
             return {}
+
+        # Missing SDK fields mean unknown, not zero. Preserve explicit zeroes,
+        # but do not manufacture zero-valued input/output usage from null or
+        # absent fields; downstream observation uses field presence to decide
+        # whether usage is known.
+        result: dict[str, int] = {}
+        for source, target in (
+            ("prompt_tokens", "prompt_tokens"),
+            ("completion_tokens", "completion_tokens"),
+            ("total_tokens", "total_tokens"),
+        ):
+            value = (
+                usage_map.get(source) if usage_map is not None
+                else getattr(usage_obj, source, None)
+            )
+            if type(value) is int and value >= 0:
+                result[target] = value
 
         # --- cached_tokens (normalised across providers) ---
         # Try nested paths first (dict), fall back to attribute (SDK object).

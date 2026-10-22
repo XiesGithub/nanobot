@@ -1011,6 +1011,7 @@ class TelegramChannel(BaseChannel):
             content=content,
             metadata=self._build_message_metadata(message, user),
             session_key=self._derive_topic_session_key(message),
+            verified_private_principal=str(user.id) if getattr(getattr(message, "chat", None), "type", None) == "private" else None,
         )
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1070,7 +1071,8 @@ class TelegramChannel(BaseChannel):
                 content_parts.insert(0, tag)
         content = "\n".join(content_parts) if content_parts else "[empty message]"
 
-        self.logger.debug("message from {}: {}...", sender_id, content[:50])
+        self.logger.debug("message from {}: {}...", sender_id,
+                          "[private content omitted]" if getattr(self, "_mail_service", None) else content[:50])
 
         str_chat_id = str(chat_id)
         metadata = self._build_message_metadata(message, user)
@@ -1085,6 +1087,7 @@ class TelegramChannel(BaseChannel):
                     "contents": [], "media": [],
                     "metadata": metadata,
                     "session_key": session_key,
+                    "verified_private_principal": str(user.id) if getattr(getattr(message, "chat", None), "type", None) == "private" else None,
                 }
                 self._start_typing(str_chat_id)
                 await self._add_reaction(str_chat_id, message.message_id, self.config.react_emoji)
@@ -1108,6 +1111,7 @@ class TelegramChannel(BaseChannel):
             media=media_paths,
             metadata=metadata,
             session_key=session_key,
+            verified_private_principal=str(user.id) if getattr(getattr(message, "chat", None), "type", None) == "private" else None,
         )
 
     async def _flush_media_group(self, key: str) -> None:
@@ -1122,6 +1126,7 @@ class TelegramChannel(BaseChannel):
                 content=content, media=list(dict.fromkeys(buf["media"])),
                 metadata=buf["metadata"],
                 session_key=buf.get("session_key"),
+                verified_private_principal=buf.get("verified_private_principal"),
             )
         finally:
             self._media_group_tasks.pop(key, None)
@@ -1279,6 +1284,7 @@ class TelegramChannel(BaseChannel):
             sender_id=sender_id,
             chat_id=str(chat_id),
             content=button_label,
+            verified_private_principal=str(user.id) if getattr(getattr(query.message, "chat", None), "type", None) == "private" else None,
             metadata={
                 "callback_query_id": query.id,
                 "button_label": button_label,

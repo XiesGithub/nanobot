@@ -1,0 +1,754 @@
+name: Agent Evaluation Evidence
+
+on:
+  push:
+    branches: [main, nightly, codex/ci-evidence-20261019]
+  pull_request:
+    branches: [main, nightly]
+  schedule:
+    # 02:17 Asia/Shanghai. GitHub may delay scheduled jobs during high load.
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Evaluation tier (release is 60 public + 20 holdout cases × 5 repeats)
+        type: choice
+        options: [development, smoke, nightly, release]
+        default: development
+        required: true
+      mode:
+        description: D is deterministic; R makes real DeepSeek requests
+        type: choice
+        options: [D, R]
+        default: D
+        required: true
+      opt_in_real_model:
+        description: Authorize only the frozen V001 one-repeat Windows/Linux CI diagnostic
+        type: boolean
+        default: false
+        required: true
+      max_attempts:
+        description: Frozen per-platform attempt limit exactly 4
+        type: number
+        default: 4
+        required: true
+      max_tokens:
+        description: Frozen per-platform token limit exactly 16000
+        type: number
+        default: 16000
+        required: true
+      max_wall_seconds:
+        description: Frozen per-platform wall-clock limit exactly 120
+        type: number
+        default: 120
+        required: true
+
+permissions:
+  contents: read
+
+# Keep checkout bytes equal to Git blobs on both hosted operating systems.
+env:
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: core.autocrlf
+  GIT_CONFIG_VALUE_0: "false"
+
+concurrency:
+  group: evaluation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  engineering:
+    name: Engineering tests (${{ matrix.platform }}, Conda nanobot)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+          - platform: windows
+            runner: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Initialize engineering evidence directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/engineering | Out-Null
+          @{ commit = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; workflow = $env:GITHUB_WORKFLOW; requested_platform = "${{ matrix.platform }}"; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/engineering/runner-start.json
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: nanobot
+          auto-activate: true
+          python-version: "3.11"
+      - name: Verify checkout bytes against Git blobs
+        shell: pwsh
+        run: |
+          conda run --no-capture-output --name nanobot python -m evals.ci_archive --verify-checkout-only --sha $env:GITHUB_SHA --report reports/engineering/source-checkout.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install Linux test system dependency
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libolm-dev build-essential
+      - name: Install project and development dependencies
+        shell: pwsh
+        run: |
+          conda install --yes --name nanobot pip
+          conda run --no-capture-output --name nanobot python -m pip install --editable ".[dev,mail-rag,api,wecom,weixin,matrix,discord,langsmith,pdf,olostep,msteams]"
+          @{ commit = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; conda_environment = "nanobot"; python = "3.11" } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/engineering/metadata.json
+      - name: Install the pinned browser for engineering clock controls
+        shell: pwsh
+        run: |
+          conda run --no-capture-output --name nanobot python -m pip install "playwright==1.55.0"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          conda run --no-capture-output --name nanobot python -m playwright install --with-deps chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $browser = conda run --no-capture-output --name nanobot python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $browser = ($browser | Select-Object -Last 1).Trim()
+          if (-not (Test-Path -LiteralPath $browser -PathType Leaf)) { throw 'Installed Chromium executable missing' }
+          "NANOBOT_EVAL_CHROME=$browser" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          @{ playwright = "1.55.0"; executable = $browser; executable_sha256 = (Get-FileHash -LiteralPath $browser -Algorithm SHA256).Hash.ToLowerInvariant(); scope = "engineering event-clock controls; not a V073 remote browser trial" } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/engineering/browser-runtime.json
+      - name: Lint and run the engineering suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          conda run --no-capture-output --name nanobot python -m pip list --format=json | Set-Content -Encoding utf8 reports/engineering/packages.json
+          $packageHash = (Get-FileHash -LiteralPath reports/engineering/packages.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          $metadata = Get-Content -Raw reports/engineering/metadata.json | ConvertFrom-Json
+          $metadata | Add-Member -NotePropertyName packages_sha256 -NotePropertyValue $packageHash -Force
+          $metadata | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 reports/engineering/metadata.json
+          $lintExit = 1
+          $testExit = 1
+          conda run --no-capture-output --name nanobot python -m ruff check nanobot/ --select F 2>&1 |
+            Tee-Object -FilePath reports/engineering/lint.log
+          $lintExit = $LASTEXITCODE
+          conda run --no-capture-output --name nanobot python -m pytest tests/ --ignore=tests/evals/test_holdout.py --junitxml=reports/engineering/junit.xml 2>&1 |
+            Tee-Object -FilePath reports/engineering/pytest.log
+          $testExit = $LASTEXITCODE
+          $junitHash = (Get-FileHash -LiteralPath reports/engineering/junit.xml -Algorithm SHA256).Hash.ToLowerInvariant()
+          [xml]$junit = Get-Content -Raw reports/engineering/junit.xml
+          $junitTests = @($junit.SelectNodes('//testcase')).Count
+          $junitFailures = @($junit.SelectNodes('//testcase/failure | //testcase/error')).Count
+          @{ lint_exit_code = $lintExit; pytest_exit_code = $testExit; packages_sha256 = $packageHash; junit_sha256 = $junitHash; junit_tests = $junitTests; junit_failures = $junitFailures; passed = ($lintExit -eq 0 -and $testExit -eq 0 -and $junitFailures -eq 0) } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/engineering/engineering-result.json
+          if ($lintExit -ne 0 -or $testExit -ne 0 -or $junitFailures -ne 0) { exit 1 }
+      - name: Verify source bytes again after engineering tests
+        if: always()
+        shell: pwsh
+        run: |
+          conda run --no-capture-output --name nanobot python -m evals.ci_archive --verify-checkout-only --sha $env:GITHUB_SHA --report reports/engineering/source-checkout-after.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record job completion (best effort; abrupt runner loss remains unclosed)
+        if: always()
+        shell: pwsh
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          New-Item -ItemType Directory -Force reports/engineering | Out-Null
+          @{ job_status = $env:JOB_STATUS; source_sha = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH; image_os = $env:ImageOS; image_version = $env:ImageVersion; remote_run_url = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"; quality_passed = $false; abrupt_runner_loss_closed = $false } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/engineering/job-completion.json
+      - name: Upload engineering evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: engineering-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/engineering/
+          if-no-files-found: error
+          retention-days: 30
+
+  release-gold-contract:
+    name: Release-only holdout gold contract
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.tier == 'release' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Initialize release contract evidence directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/release-gold-contract | Out-Null
+          @{ commit = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; tier = "release"; test = "tests/evals/test_holdout.py" } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/release-gold-contract/runner-start.json
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: nanobot
+          auto-activate: true
+          python-version: "3.11"
+      - name: Install project development dependencies
+        shell: pwsh
+        run: |
+          conda install --yes --name nanobot pip
+          conda run --no-capture-output --name nanobot python -m pip install --editable ".[dev]"
+      - name: Verify the fixed release holdout gold contract
+        shell: pwsh
+        run: |
+          conda run --no-capture-output --name nanobot python -m pytest tests/evals/test_holdout.py --junitxml=reports/release-gold-contract/junit.xml 2>&1 |
+            Tee-Object -FilePath reports/release-gold-contract/pytest.log
+          $testExit = $LASTEXITCODE
+          @{ pytest_exit_code = $testExit; passed = ($testExit -eq 0); report_scope = "release-only fixed gold contract" } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/release-gold-contract/test-result.json
+          if ($testExit -ne 0) { exit $testExit }
+      - name: Upload release contract evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-gold-contract-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/release-gold-contract/
+          if-no-files-found: error
+          retention-days: 30
+
+  deterministic-evaluation:
+    name: Deterministic ${{ matrix.tier }} evaluation (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux, windows]
+        tier: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.mode == 'R' && '["development"]' || github.event_name == 'schedule' && '["nightly"]' || github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.tier) || '["development","smoke"]') }}
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+          - platform: windows
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Initialize deterministic evidence directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/evaluations | Out-Null
+          @{ commit = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; tier = "${{ matrix.tier }}"; mode = "D"; requested_platform = "${{ matrix.platform }}"; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/evaluations/runner-start.json
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: nanobot
+          auto-activate: true
+          python-version: "3.11"
+      - name: Install project and evaluation dependencies
+        shell: pwsh
+        run: |
+          conda install --yes --name nanobot pip
+          conda run --no-capture-output --name nanobot python -m pip install --editable ".[dev]" psutil
+      - name: Verify checkout bytes against Git blobs
+        shell: pwsh
+        run: |
+          conda run --no-capture-output --name nanobot python -m evals.ci_archive --verify-checkout-only --sha $env:GITHUB_SHA --report reports/evaluations/source-checkout.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run deterministic evaluation and record gate state
+        shell: pwsh
+        env:
+          EVAL_TIER: ${{ matrix.tier }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = "reports/evaluations/${{ matrix.platform }}-$($env:EVAL_TIER)-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          New-Item -ItemType Directory -Force reports/evaluations/runner | Out-Null
+          New-Item -ItemType Directory -Force reports/evaluations/gates | Out-Null
+          $logPath = "reports/evaluations/runner/$($env:EVAL_TIER)-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT).log"
+          $arguments = @("-m", "evals.ci", "--kind", "daily", "--platform", "${{ matrix.platform }}", "--timeout", "3900", "--tier", $env:EVAL_TIER, "--mode", "D", "--output", $output)
+          conda run --no-capture-output --name nanobot python @arguments 2>&1 |
+            Tee-Object -FilePath $logPath
+          $runExit = $LASTEXITCODE
+          if ($runExit -ne 0) { exit $runExit }
+      - name: Record job completion (best effort; abrupt runner loss remains unclosed)
+        if: always()
+        shell: pwsh
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          New-Item -ItemType Directory -Force reports/evaluations | Out-Null
+          @{ job_status = $env:JOB_STATUS; source_sha = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH; image_os = $env:ImageOS; image_version = $env:ImageVersion; remote_run_url = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"; quality_passed = $false; abrupt_runner_loss_closed = $false } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/evaluations/job-completion.json
+      - name: Upload deterministic evaluation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deterministic-${{ matrix.platform }}-${{ matrix.tier }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/evaluations/
+          if-no-files-found: error
+          retention-days: 30
+
+  real-model-preflight:
+    name: Validate trusted ref, real-model opt-in and integer budgets
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'R' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      valid: ${{ steps.validate.outputs.valid }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Validate request and remote environment protection without model credentials
+        id: validate
+        uses: actions/github-script@v8
+        env:
+          OPT_IN: ${{ inputs.opt_in_real_model }}
+          TIER: ${{ inputs.tier }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+          MAX_TOKENS: ${{ inputs.max_tokens }}
+          MAX_WALL_SECONDS: ${{ inputs.max_wall_seconds }}
+        with:
+          script: |
+            const fs = require('fs');
+            fs.mkdirSync('reports/real-model-preflight', {recursive: true});
+            const plan = JSON.parse(fs.readFileSync('evals/ci-real-plan.json', 'utf8'));
+            const errors = [];
+            const trusted = ['refs/heads/main', 'refs/heads/nightly'].includes(context.ref);
+            if (!trusted) errors.push('untrusted_ref');
+            if (process.env.OPT_IN !== 'true') errors.push('explicit_opt_in_required');
+            if (process.env.TIER !== plan.tier) errors.push('frozen_development_tier_required');
+            for (const [input, name] of [['MAX_ATTEMPTS','max_attempts'], ['MAX_TOKENS','max_tokens'], ['MAX_WALL_SECONDS','max_wall_seconds']]) {
+              if (process.env[input] !== String(plan.per_platform_budget[name])) errors.push('frozen_budget:' + name);
+            }
+            let protection = {verified: false};
+            try {
+              const env = (await github.rest.repos.getEnvironment({...context.repo, environment_name: 'real-model-evaluation'})).data;
+              const policies = (await github.paginate(github.rest.repos.listDeploymentBranchPolicies, {...context.repo, environment_name: 'real-model-evaluation'}));
+              const rule = env.protection_rules.find(r => r.type === 'required_reviewers');
+              const reviewers = Boolean(rule && rule.reviewers && rule.reviewers.length > 0 && rule.prevent_self_review === true);
+              const branchPolicy = env.deployment_branch_policy;
+              const branches = policies.filter(p => p.type === 'branch').map(p => p.name).sort();
+              const branchRestricted = Boolean(branchPolicy && branchPolicy.custom_branch_policies === true && branchPolicy.protected_branches === false && policies.length === 2 && JSON.stringify(branches) === JSON.stringify(['main', 'nightly']));
+              protection = {verified: reviewers && branchRestricted, reviewers_configured: reviewers, trusted_branches_only: branchRestricted, prevent_self_review: rule?.prevent_self_review === true};
+              if (!protection.verified) errors.push('protected_environment_policy_not_verified');
+            } catch (error) {
+              errors.push('protected_environment_lookup_failed');
+              protection = {verified: false, http_status: error.status || null};
+            }
+            const valid = errors.length === 0;
+            fs.writeFileSync('reports/real-model-preflight/request.json', JSON.stringify({state: valid ? 'request_validated' : 'invalid', valid, errors, protection, plan, github_ref: context.ref, source_sha: context.sha, remote_run_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`, credentials_accessed: false, quality_passed: false}, null, 2));
+            core.setOutput('valid', String(valid));
+            if (!valid) core.setFailed('Real-model request rejected; inspect preflight evidence. No model credential was accessed.');
+      - name: Upload real-model preflight evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-model-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/real-model-preflight/
+          if-no-files-found: error
+          retention-days: 30
+
+  real-model-evaluation:
+    name: Budgeted real-model diagnostic (${{ matrix.platform }}, protected dispatch only)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'R' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/nightly') && needs.real-model-preflight.outputs.valid == 'true' }}
+    needs: [real-model-preflight, engineering, deterministic-evaluation, fixed-load-profile, diagnostic-archive-replay]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+          - platform: windows
+            runner: windows-latest
+    timeout-minutes: 120
+    environment:
+      # This file only names the environment; repository settings must configure required reviewers and scope the secret.
+      name: real-model-evaluation
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Initialize real-model evidence directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/real-model | Out-Null
+          @{ commit = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; tier = "${{ inputs.tier }}"; mode = "R"; requested_platform = "${{ matrix.platform }}"; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/real-model/runner-start.json
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: nanobot
+          auto-activate: true
+          python-version: "3.11"
+      - name: Install project and evaluation dependencies
+        shell: pwsh
+        run: |
+          conda install --yes --name nanobot pip
+          conda run --no-capture-output --name nanobot python -m pip install --editable ".[dev]" psutil
+      - name: Verify checkout bytes against Git blobs
+        shell: pwsh
+        run: |
+          conda run --no-capture-output --name nanobot python -m evals.ci_archive --verify-checkout-only --sha $env:GITHUB_SHA --report reports/real-model/source-checkout.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run budgeted real-model evaluation
+        shell: pwsh
+        env:
+          EVAL_TIER: ${{ inputs.tier }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+          MAX_TOKENS: ${{ inputs.max_tokens }}
+          MAX_WALL_SECONDS: ${{ inputs.max_wall_seconds }}
+          REAL_REQUEST_VALID: ${{ needs.real-model-preflight.outputs.valid }}
+          NANOBOT_EVAL_API_KEY: ${{ secrets.NANOBOT_EVAL_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = "reports/real-model/${{ matrix.platform }}-$($env:EVAL_TIER)-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          New-Item -ItemType Directory -Force reports/real-model/runner | Out-Null
+          New-Item -ItemType Directory -Force reports/real-model/gates | Out-Null
+          @{ commit = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; tier = $env:EVAL_TIER; mode = "R"; requested_platform = "${{ matrix.platform }}"; conda_environment = "nanobot"; budgets = @{ max_attempts = [int]$env:MAX_ATTEMPTS; max_tokens = [int]$env:MAX_TOKENS; max_wall_seconds = [int]$env:MAX_WALL_SECONDS }; credential_source = "protected environment secret; consumed by trusted evaluator process" } |
+            ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 "reports/real-model/runner/runner-metadata-$($env:GITHUB_RUN_ID).json"
+          $apiPath = Join-Path $env:GITHUB_WORKSPACE "api.txt"
+          if (Test-Path $apiPath) {
+            @{ runner_state = "invalid"; reason = "api_txt_already_exists_refusing_overwrite"; credentials_logged = $false } |
+              ConvertTo-Json | Set-Content -Encoding utf8 "reports/real-model/runner-error-$($env:GITHUB_RUN_ID).json"
+            "### Real-model evaluation" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- State: **invalid** (root api.txt already exists; refused to overwrite it)." | Add-Content $env:GITHUB_STEP_SUMMARY
+            exit 1
+          }
+          $arguments = @("--kind", "daily", "--platform", "${{ matrix.platform }}", "--timeout", "180", "--cases", "V001", "--tier", $env:EVAL_TIER, "--mode", "R", "--output", $output, "--max-attempts", $env:MAX_ATTEMPTS, "--max-tokens", $env:MAX_TOKENS, "--max-wall-seconds", $env:MAX_WALL_SECONDS, "--opt-in-real-model")
+          $credentialRunner = Join-Path $env:RUNNER_TEMP "nanobot-eval-credential-runner.py"
+          @'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          root = Path(os.environ["GITHUB_WORKSPACE"])
+          credential_path = root / "api.txt"
+          credential = os.environ.pop("NANOBOT_EVAL_API_KEY", "")
+          if not credential:
+              raise SystemExit("protected_environment_secret_missing")
+          created = False
+          try:
+              descriptor = os.open(credential_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              created = True
+              with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                  stream.write(credential.strip() + "\n")
+              os.chmod(credential_path, 0o600)
+              del credential
+              child_environment = os.environ.copy()
+              child_environment.pop("NANOBOT_EVAL_API_KEY", None)
+              result = subprocess.run(
+                  [sys.executable, "-m", "evals.ci", *sys.argv[1:]],
+                  cwd=root,
+                  env=child_environment,
+                  check=False,
+              )
+              raise SystemExit(result.returncode)
+          finally:
+              if created:
+                  credential_path.unlink(missing_ok=True)
+          '@ | Set-Content -Encoding utf8 $credentialRunner
+          # Do not archive real-model stdout/stderr: CI logs are masked, but saved files are not.
+          try {
+            conda run --no-capture-output --name nanobot python $credentialRunner @arguments
+            $runExit = $LASTEXITCODE
+          } finally {
+            if (Test-Path $apiPath) { Remove-Item -LiteralPath $apiPath -Force }
+            Remove-Item Env:\NANOBOT_EVAL_API_KEY -ErrorAction SilentlyContinue
+          }
+          if ($runExit -ne 0) { exit $runExit }
+      - name: Record job completion (best effort; abrupt runner loss remains unclosed)
+        if: always()
+        shell: pwsh
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          New-Item -ItemType Directory -Force reports/real-model | Out-Null
+          @{ job_status = $env:JOB_STATUS; source_sha = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH; image_os = $env:ImageOS; image_version = $env:ImageVersion; remote_run_url = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"; quality_passed = $false; abrupt_runner_loss_closed = $false } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/real-model/job-completion.json
+      - name: Upload real-model evidence (reports only; excludes root api.txt)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-model-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/real-model/
+          if-no-files-found: error
+          retention-days: 30
+
+  fixed-load-profile:
+    name: Fixed-load diagnostic (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+          - platform: windows
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Initialize fixed-load evidence directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/fixed-load | Out-Null
+          @{ commit = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; matrix = "${{ matrix.platform }}"; requested_platform = "${{ matrix.platform }}"; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH; quality_eligible = $false } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/fixed-load/runner-start.json
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: nanobot
+          auto-activate: true
+          python-version: "3.11"
+      - name: Install project and fixed-load dependencies
+        shell: pwsh
+        run: |
+          conda install --yes --name nanobot pip
+          conda run --no-capture-output --name nanobot python -m pip install --editable ".[dev]" psutil
+      - name: Verify checkout bytes against Git blobs
+        shell: pwsh
+        run: |
+          conda run --no-capture-output --name nanobot python -m evals.ci_archive --verify-checkout-only --sha $env:GITHUB_SHA --report reports/fixed-load/source-checkout.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run fixed deterministic workload
+        shell: pwsh
+        env:
+          PROFILE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = "reports/fixed-load/$($env:PROFILE_PLATFORM)-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          New-Item -ItemType Directory -Force reports/fixed-load/runner | Out-Null
+          New-Item -ItemType Directory -Force reports/fixed-load/gates | Out-Null
+          @{ commit = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; requested_platform = $env:PROFILE_PLATFORM; conda_environment = "nanobot"; quality_eligible = $false } |
+            ConvertTo-Json | Set-Content -Encoding utf8 "reports/fixed-load/runner/runner-metadata-$($env:PROFILE_PLATFORM)-$($env:GITHUB_RUN_ID).json"
+          $logPath = "reports/fixed-load/runner/$($env:PROFILE_PLATFORM)-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT).log"
+          $arguments = @("-m", "evals.ci", "--kind", "performance", "--platform", $env:PROFILE_PLATFORM, "--timeout", "1800", "--output", $output)
+          conda run --no-capture-output --name nanobot python @arguments 2>&1 |
+            Tee-Object -FilePath $logPath
+          $runExit = $LASTEXITCODE
+          if ($runExit -ne 0) { exit $runExit }
+      - name: Record job completion (best effort; abrupt runner loss remains unclosed)
+        if: always()
+        shell: pwsh
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          New-Item -ItemType Directory -Force reports/fixed-load | Out-Null
+          @{ job_status = $env:JOB_STATUS; source_sha = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH; image_os = $env:ImageOS; image_version = $env:ImageVersion; remote_run_url = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"; quality_passed = $false; abrupt_runner_loss_closed = $false } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/fixed-load/job-completion.json
+      - name: Upload fixed-load evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fixed-load-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/fixed-load/
+          if-no-files-found: error
+          retention-days: 30
+
+  diagnostic-archive-replay:
+    name: Diagnostic archive replay (integrity only)
+    if: always()
+    needs: [engineering, deterministic-evaluation, fixed-load-profile]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Initialize immutable archive replay
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/replay/diagnostic-archive-replay | Out-Null
+          @{ source_sha = $env:GITHUB_SHA; remote_run_url = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"; quality_passed = $false; scope = "downloaded_artifact_integrity_only" } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/replay/diagnostic-archive-replay/runner-start.json
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: nanobot
+          auto-activate: true
+          python-version: "3.11"
+      - name: Install offline replay dependencies
+        shell: pwsh
+        run: conda run --no-capture-output --name nanobot python -m pip install --editable ".[dev]" psutil
+      - name: Download deterministic archives without merging
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deterministic-*
+          path: downloaded/deterministic/
+          merge-multiple: false
+      - name: Download engineering archives without merging
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: engineering-*
+          path: downloaded/engineering/
+          merge-multiple: false
+      - name: Download fixed-load archives without merging
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fixed-load-*
+          path: downloaded/fixed-load/
+          merge-multiple: false
+      - name: Replay downloaded receipts and reject missing evidence
+        if: always()
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TIER: ${{ inputs.tier }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $tiers = @('development', 'smoke')
+          if ($env:EVENT_NAME -eq 'schedule') { $tiers = @('nightly') }
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $tiers = @($env:TIER)
+            if ($env:MODE -eq 'R') { $tiers = @('development') }
+          }
+          $errors = @()
+          $audits = @()
+          $checks = @(@{ kind = 'engineering'; root = 'downloaded/engineering'; tier = $null })
+          foreach ($tier in $tiers) { $checks += @{ kind = 'deterministic'; root = 'downloaded/deterministic'; tier = $tier } }
+          $checks += @{ kind = 'fixed-load'; root = 'downloaded/fixed-load'; tier = $null }
+          foreach ($check in $checks) {
+            $report = "reports/replay/diagnostic-archive-replay/$($check.kind)-$($check.tier).json"
+            $arguments = @('-m', 'evals.ci_archive', '--kind', $check.kind, '--download-root', $check.root, '--run-id', $env:GITHUB_RUN_ID, '--run-attempt', $env:GITHUB_RUN_ATTEMPT, '--sha', $env:GITHUB_SHA, '--report', $report)
+            if ($check.tier) { $arguments += @('--tier', $check.tier) }
+            conda run --no-capture-output --name nanobot python @arguments
+            $auditExit = $LASTEXITCODE
+            $audit = $null
+            if (Test-Path -LiteralPath $report) { $audit = Get-Content -Raw $report | ConvertFrom-Json }
+            $audits += @{ kind = $check.kind; tier = $check.tier; exit_code = $auditExit; report = $report; ok = ($audit -and $audit.ok) }
+            if ($auditExit -ne 0 -or -not $audit -or -not $audit.ok) { $errors += "archive_replay_failed:$($check.kind):$($check.tier)" }
+          }
+          @{ expected_profiles = $checks.Count; audited_profiles = $audits.Count; audits = $audits; errors = $errors; integrity_passed = ($errors.Count -eq 0); quality_passed = $false; model_requests = 0; agent_reruns = 0 } |
+            ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 reports/replay/diagnostic-archive-replay/replay-summary.json
+          "### Downloaded archive replay: integrity only; no quality approval" | Add-Content $env:GITHUB_STEP_SUMMARY
+          if ($errors.Count -ne 0) { Write-Error ($errors -join '; '); exit 1 }
+      - name: Upload downloaded archive replay results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagnostic-archive-replay-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/replay/diagnostic-archive-replay/
+          if-no-files-found: error
+          retention-days: 30
+
+  real-archive-replay:
+    name: Real-model archive replay (integrity only)
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'R' }}
+    needs: [real-model-evaluation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Initialize immutable archive replay
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/replay/real-archive-replay | Out-Null
+          @{ source_sha = $env:GITHUB_SHA; remote_run_url = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"; quality_passed = $false; scope = "downloaded_artifact_integrity_only" } |
+            ConvertTo-Json | Set-Content -Encoding utf8 reports/replay/real-archive-replay/runner-start.json
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: nanobot
+          auto-activate: true
+          python-version: "3.11"
+      - name: Install offline replay dependencies
+        shell: pwsh
+        run: conda run --no-capture-output --name nanobot python -m pip install --editable ".[dev]" psutil
+      - name: Download real archives without merging
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: real-model-*
+          path: downloaded/real/
+          merge-multiple: false
+      - name: Replay downloaded receipts and reject missing evidence
+        if: always()
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TIER: ${{ inputs.tier }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $report = 'reports/replay/real-archive-replay/real-model.json'
+          $arguments = @('-m', 'evals.ci_archive', '--kind', 'real-model', '--download-root', 'downloaded/real', '--run-id', $env:GITHUB_RUN_ID, '--run-attempt', $env:GITHUB_RUN_ATTEMPT, '--sha', $env:GITHUB_SHA, '--github-ref', $env:GITHUB_REF, '--server-url', $env:GITHUB_SERVER_URL, '--repository', $env:GITHUB_REPOSITORY, '--report', $report)
+          conda run --no-capture-output --name nanobot python @arguments
+          $auditExit = $LASTEXITCODE
+          $audit = $null
+          if (Test-Path -LiteralPath $report) { $audit = Get-Content -Raw $report | ConvertFrom-Json }
+          $audits = @(@{ kind = 'real-model'; exit_code = $auditExit; report = $report; ok = ($audit -and $audit.ok) })
+          $errors = @()
+          if ($auditExit -ne 0 -or -not $audit -or -not $audit.ok) { $errors += 'archive_replay_failed:real-model' }
+          @{ expected_artifacts = 3; audited_artifacts = $audit.audited; audits = $audits; errors = $errors; integrity_passed = ($errors.Count -eq 0); quality_passed = $false; model_requests = 0; agent_reruns = 0 } |
+            ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 reports/replay/real-archive-replay/replay-summary.json
+          "### Downloaded archive replay: integrity only; no quality approval" | Add-Content $env:GITHUB_STEP_SUMMARY
+          if ($errors.Count -ne 0) { Write-Error ($errors -join '; '); exit 1 }
+      - name: Upload downloaded archive replay results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-archive-replay-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/replay/real-archive-replay/
+          if-no-files-found: error
+          retention-days: 30
+
+  evidence-pipeline-status:
+    name: Evidence pipeline status (diagnostic runs do not grant quality approval)
+    if: always()
+    needs: [engineering, release-gold-contract, deterministic-evaluation, real-model-preflight, real-model-evaluation, fixed-load-profile, diagnostic-archive-replay, real-archive-replay]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize required job outcomes
+        shell: pwsh
+        env:
+          DIAGNOSTIC_REPLAY_RESULT: ${{ needs.diagnostic-archive-replay.result }}
+          REAL_REPLAY_RESULT: ${{ needs.real-archive-replay.result }}
+          ENGINEERING_RESULT: ${{ needs.engineering.result }}
+          DETERMINISTIC_RESULT: ${{ needs.deterministic-evaluation.result }}
+          REAL_PREFLIGHT_RESULT: ${{ needs.real-model-preflight.result }}
+          REAL_MODEL_RESULT: ${{ needs.real-model-evaluation.result }}
+          FIXED_LOAD_RESULT: ${{ needs.fixed-load-profile.result }}
+          RELEASE_GOLD_RESULT: ${{ needs.release-gold-contract.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          TIER: ${{ inputs.tier }}
+          MODE: ${{ inputs.mode }}
+          OPT_IN: ${{ inputs.opt_in_real_model }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+          MAX_TOKENS: ${{ inputs.max_tokens }}
+          MAX_WALL_SECONDS: ${{ inputs.max_wall_seconds }}
+          REAL_REQUEST_VALID: ${{ needs.real-model-preflight.outputs.valid }}
+        run: |
+          $errors = @()
+          if ($env:DIAGNOSTIC_REPLAY_RESULT -ne 'success') { $errors += "diagnostic_archive_replay=$($env:DIAGNOSTIC_REPLAY_RESULT)" }
+          if ($env:ENGINEERING_RESULT -ne 'success') { $errors += "engineering=$($env:ENGINEERING_RESULT)" }
+          if ($env:FIXED_LOAD_RESULT -ne 'success') { $errors += "fixed_load=$($env:FIXED_LOAD_RESULT)" }
+          $releaseRequested = ($env:EVENT_NAME -eq 'workflow_dispatch' -and $env:TIER -eq 'release')
+          if ($releaseRequested -and $env:RELEASE_GOLD_RESULT -ne 'success') { $errors += "release_gold_contract=$($env:RELEASE_GOLD_RESULT)" }
+          if (-not $releaseRequested -and $env:RELEASE_GOLD_RESULT -ne 'skipped') { $errors += "unexpected_release_gold_contract=$($env:RELEASE_GOLD_RESULT)" }
+          $realRequested = ($env:EVENT_NAME -eq 'workflow_dispatch' -and $env:MODE -eq 'R')
+          $realValid = ($env:OPT_IN -eq 'true' -and $env:REAL_REQUEST_VALID -eq 'true')
+          if ($realRequested) {
+            if ($env:REAL_REPLAY_RESULT -ne 'success') { $errors += "real_archive_replay=$($env:REAL_REPLAY_RESULT)" }
+            if (-not $realValid) {
+              if ($env:REAL_PREFLIGHT_RESULT -ne 'failure') { $errors += "invalid_real_request_not_rejected=$($env:REAL_PREFLIGHT_RESULT)" }
+              if ($env:REAL_MODEL_RESULT -ne 'skipped') { $errors += "invalid_real_request_started_model_job=$($env:REAL_MODEL_RESULT)" }
+              $errors += 'real_model_request_invalid_no_quality_pass'
+            } else {
+              if ($env:REAL_PREFLIGHT_RESULT -ne 'success') { $errors += "real_preflight=$($env:REAL_PREFLIGHT_RESULT)" }
+              if ($env:REAL_MODEL_RESULT -ne 'success') { $errors += "real_model=$($env:REAL_MODEL_RESULT)" }
+            }
+            if ($env:DETERMINISTIC_RESULT -ne 'success') { $errors += "deterministic_precondition=$($env:DETERMINISTIC_RESULT)" }
+          } else {
+            if ($env:REAL_REPLAY_RESULT -ne 'skipped') { $errors += "unexpected_real_archive_replay=$($env:REAL_REPLAY_RESULT)" }
+            if ($env:DETERMINISTIC_RESULT -ne 'success') { $errors += "deterministic=$($env:DETERMINISTIC_RESULT)" }
+            if ($env:REAL_MODEL_RESULT -ne 'skipped' -or $env:REAL_PREFLIGHT_RESULT -ne 'skipped') { $errors += 'unexpected_real_model_job' }
+          }
+          if ($errors.Count -eq 0) {
+            @("## Evidence pipeline", "", "- Engineering, evaluation execution and fixed-load evidence jobs completed.", "- Deterministic development/smoke and fixed-load profiles are diagnostics; their successful collection does not assert `quality_passed=true`.", "- Regression, invalid evidence, insufficient evidence, missing reports and invalid real-model requests fail this pipeline.") |
+              Add-Content $env:GITHUB_STEP_SUMMARY
+            Write-Output "Evidence collection completed; no quality approval is implied."
+          } else {
+            @("## Evidence pipeline failed", "", ($errors | ForEach-Object { "- $_" })) |
+              Add-Content $env:GITHUB_STEP_SUMMARY
+            Write-Error ($errors -join '; ')
+            exit 1
+          }

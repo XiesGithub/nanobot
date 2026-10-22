@@ -2,6 +2,11 @@
 
 Provides /v1/chat/completions and /v1/models endpoints.
 All requests route to a single persistent API session.
+
+This public compatibility endpoint does not authenticate a mail owner. JSON,
+multipart fields, API session IDs and client headers never become SecurityContext.
+When mail privacy is active the Agent turn extension treats this entry as external;
+trusted integrations must use the separate SDK principal-binding interface.
 """
 
 from __future__ import annotations

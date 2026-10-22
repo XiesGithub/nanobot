@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from loguru import logger
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.security.context import SecurityContext
 
 
 class BaseChannel(ABC):
@@ -38,9 +40,19 @@ class BaseChannel(ABC):
             bus: The message bus for communication.
         """
         self.config = config
-        self.logger = logger.bind(channel=self.name)
+        self.logger = logger.bind(channel=self.name).patch(self._redact_private_log)
         self.bus = bus
         self._running = False
+
+    def _redact_private_log(self, record):
+        # SDK errors can embed request bodies, filenames and auth headers in
+        # their exception strings/tracebacks. Suppress content for the entire
+        # protected adapter, including callbacks that run outside a mail turn.
+        if (getattr(self, "_mail_service", None) is not None
+            or getattr(self, "mail_service", None) is not None):
+            record["message"] = "Private channel event; details omitted"
+            record["exception"] = None
+            record["extra"] = {"channel": self.name}
 
     async def transcribe_audio(self, file_path: str | Path) -> str:
         """Transcribe an audio file via Whisper (OpenAI or Groq). Returns empty string on failure."""
@@ -151,6 +163,8 @@ class BaseChannel(ABC):
         media: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         session_key: str | None = None,
+        security: SecurityContext | None = None,
+        verified_private_principal: str | None = None,
     ) -> None:
         """
         Handle an incoming message from the chat platform.
@@ -174,6 +188,13 @@ class BaseChannel(ABC):
             return
 
         meta = metadata or {}
+        # Only a reviewed platform adapter may assert this from its authenticated
+        # event and explicit one-to-one chat type. Never read it from metadata.
+        mail_service = getattr(self, "_mail_service", None)
+        if mail_service is not None and security is None and verified_private_principal:
+            security = mail_service.access.authenticate(
+                self.name, verified_private_principal, private_chat=True)
+            security = replace(security, reply_channel=self.name, reply_chat_id=str(chat_id))
         if self.supports_streaming:
             meta = {**meta, "_wants_stream": True}
 
@@ -185,6 +206,7 @@ class BaseChannel(ABC):
             media=media or [],
             metadata=meta,
             session_key_override=session_key,
+            security=security,
         )
 
         await self.bus.publish_inbound(msg)

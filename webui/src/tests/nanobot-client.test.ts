@@ -69,6 +69,36 @@ afterEach(() => {
 });
 
 describe("NanobotClient", () => {
+  it("correlates mail receipts and never replays a mutation after disconnect", async () => {
+    const client = new NanobotClient({ url: "ws://test", reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket });
+    await expect(client.mailRequest("set_mode")).rejects.toThrow("socket_closed");
+    client.connect(); lastSocket().fakeOpen();
+    const result = client.mailRequest("set_mode", { expected_revision: 1 }, "mail-test-1");
+    expect(JSON.parse(lastSocket().sent.at(-1)!)).toMatchObject({ type: "mail_knowledge", request_id: "mail-test-1" });
+    lastSocket().fakeMessage({ event: "mail_knowledge_result", request_id: "mail-test-1", error: null, data: { status: "applied" } });
+    await expect(result).resolves.toEqual({ status: "applied" });
+    const interrupted = client.mailRequest("confirm_remove", { token: "synthetic-confirmation" }, "mail-test-2");
+    const rejection = expect(interrupted).rejects.toThrow("socket_closed_check_status");
+    lastSocket().close(); await rejection;
+    client.connect(); lastSocket().fakeOpen();
+    expect(lastSocket().sent).toEqual([]);
+    client.close();
+  });
+
+  it("rejects revoked mail requests and times out without retrying", async () => {
+    const client = new NanobotClient({ url: "ws://test", reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket });
+    client.connect(); lastSocket().fakeOpen();
+    const result = client.mailRequest("get_settings", {}, "mail-denied");
+    lastSocket().fakeMessage({ event: "mail_knowledge_result", request_id: "mail-denied", data: null, error: "authorization_revoked" });
+    await expect(result).rejects.toThrow("authorization_revoked");
+    const stalled = client.mailRequest("get_settings", {}, "mail-timeout");
+    const rejection = expect(stalled).rejects.toThrow("request_timeout_check_status");
+    await vi.advanceTimersByTimeAsync(30_000); await rejection;
+    expect(lastSocket().sent).toHaveLength(2);
+    client.close();
+  });
   it("routes events to the matching chat handler", () => {
     const client = new NanobotClient({
       url: "ws://test",

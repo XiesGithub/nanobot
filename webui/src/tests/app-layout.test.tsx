@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatSummary } from "@/lib/types";
@@ -9,6 +9,7 @@ const createChatSpy = vi.fn().mockResolvedValue("chat-1");
 const deleteChatSpy = vi.fn();
 const toggleThemeSpy = vi.fn();
 let mockSessions: ChatSummary[] = [];
+let updateSessions: (sessions: ChatSummary[]) => void;
 
 vi.mock("@/hooks/useSessions", async (importOriginal) => {
   const React = await import("react");
@@ -17,6 +18,7 @@ vi.mock("@/hooks/useSessions", async (importOriginal) => {
     ...actual,
     useSessions: () => {
       const [sessions, setSessions] = React.useState(mockSessions);
+      updateSessions = setSessions;
       return {
         sessions,
         loading: false,
@@ -86,6 +88,45 @@ describe("App layout", () => {
         status: 404,
       }),
     );
+  });
+
+  it.each(["new chat", "escape", "select chat"])("returns mobile drawer focus after %s", async (action) => {
+    vi.spyOn(window, "matchMedia").mockImplementation((media: string) => ({
+      matches: false, media, onchange: null, addListener: vi.fn(), removeListener: vi.fn(),
+      addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
+    }));
+    mockSessions = [{ key: "websocket:chat-a", channel: "websocket", chatId: "chat-a",
+      createdAt: null, updatedAt: null, preview: "Existing mobile chat" }];
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Existing mobile chat")).toHaveLength(2));
+    const opener = screen.getByRole("button", { name: "Toggle sidebar" });
+    opener.focus();
+    fireEvent.click(opener);
+    const drawer = await screen.findByRole("dialog");
+    await waitFor(() => expect(drawer.contains(document.activeElement)).toBe(true));
+    if (action === "escape") {
+      fireEvent.keyDown(document.activeElement ?? document, { key: "Escape" });
+    } else {
+      const target = within(drawer).getByRole("button", { name: action === "new chat" ? "New chat" : "Existing mobile chat" });
+      target.focus();
+      fireEvent.click(target);
+    }
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Toggle sidebar" })).toHaveFocus());
+  });
+
+  it("keeps New chat blank after the first created session enters the list", async () => {
+    render(<App />);
+    const input = await screen.findByRole("textbox", { name: "Message input" });
+    fireEvent.change(input, { target: { value: "first mobile task" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(createChatSpy).toHaveBeenCalledTimes(1));
+    await act(async () => updateSessions([{ key: "websocket:chat-1", channel: "websocket", chatId: "chat-1",
+      createdAt: null, updatedAt: null, preview: "first mobile task" }]));
+    const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
+    fireEvent.click(within(sidebar).getByRole("button", { name: "New chat" }));
+    expect(screen.getByText("What can I do for you?")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Ask anything...")).toBeInTheDocument();
   });
 
   it("keeps sidebar layout out of the main thread width contract", async () => {

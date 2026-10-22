@@ -1,5 +1,6 @@
 import type {
   ChatSummary,
+  MailCitation,
   ProviderSettingsUpdate,
   SettingsPayload,
   SettingsUpdate,
@@ -87,6 +88,7 @@ export async function fetchSessionMessages(
   messages: Array<{
     role: string;
     content: string;
+    citations?: MailCitation[];
     timestamp?: string;
     tool_calls?: unknown;
     tool_call_id?: string;

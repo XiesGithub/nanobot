@@ -64,6 +64,11 @@ export class NanobotClient {
   // chat_ids we've attached to since connect; re-attached after reconnects
   private knownChats = new Set<string>();
   private pendingNewChat: PendingNewChat | null = null;
+  private mailRequests = new Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
   // Frames queued while the socket is not yet OPEN
   private sendQueue: Outbound[] = [];
   private reconnectAttempts = 0;
@@ -145,6 +150,7 @@ export class NanobotClient {
   }
 
   close(): void {
+    this.rejectMailRequests();
     this.intentionallyClosed = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -180,6 +186,35 @@ export class NanobotClient {
     if (this.socket?.readyState === WS_OPEN) {
       this.queueSend({ type: "attach", chat_id: chatId });
     }
+  }
+
+  /** Management is never queued or automatically replayed across credentials. */
+  mailRequest<T>(action: string, payload: Record<string, unknown> = {},
+    requestId = crypto.randomUUID()): Promise<T> {
+    if (this.socket?.readyState !== WS_OPEN) return Promise.reject(new Error("socket_closed"));
+    if (this.mailRequests.has(requestId)) return Promise.reject(new Error("request_pending"));
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.mailRequests.delete(requestId);
+        reject(new Error("request_timeout_check_status"));
+      }, 30_000);
+      this.mailRequests.set(requestId, { resolve: (value) => resolve(value as T), reject, timer });
+      try {
+        this.socket!.send(JSON.stringify({ type: "mail_knowledge", request_id: requestId, action, payload }));
+      } catch {
+        clearTimeout(timer);
+        this.mailRequests.delete(requestId);
+        reject(new Error("socket_closed"));
+      }
+    });
+  }
+
+  private rejectMailRequests(): void {
+    for (const pending of this.mailRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("socket_closed_check_status"));
+    }
+    this.mailRequests.clear();
   }
 
   sendMessage(
@@ -228,6 +263,17 @@ export class NanobotClient {
       return;
     }
 
+    if (parsed.event === "mail_knowledge_result") {
+      const pending = this.mailRequests.get(parsed.request_id);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.mailRequests.delete(parsed.request_id);
+        if (parsed.error) pending.reject(new Error(parsed.error));
+        else pending.resolve(parsed.data);
+      }
+      return;
+    }
+
     if (parsed.event === "ready") {
       this.readyChatId = parsed.chat_id;
       this.knownChats.add(parsed.chat_id);
@@ -256,6 +302,7 @@ export class NanobotClient {
   }
 
   private handleClose(event?: { code?: number }): void {
+    this.rejectMailRequests();
     this.socket = null;
     if (this.pendingNewChat) {
       clearTimeout(this.pendingNewChat.timer);

@@ -31,6 +31,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { MailSettings } from "@/components/mail/MailSettings";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -49,7 +50,7 @@ import { cn } from "@/lib/utils";
 import { useClient } from "@/providers/ClientProvider";
 import type { SettingsPayload, WebSearchSettingsUpdate } from "@/lib/types";
 
-type SettingsSectionKey = "general" | "byok";
+type SettingsSectionKey = "general" | "byok" | "mail";
 type ByokPaneKey = "llm" | "web-search";
 
 interface SettingsViewProps {
@@ -311,7 +312,7 @@ export function SettingsView({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 overflow-hidden bg-[radial-gradient(circle_at_50%_0%,hsl(var(--muted))_0%,hsl(var(--background))_42%)]">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[radial-gradient(circle_at_50%_0%,hsl(var(--muted))_0%,hsl(var(--background))_42%)] md:flex-row">
       <SettingsSidebar
         activeSection={activeSection}
         onSelectSection={setActiveSection}
@@ -319,8 +320,8 @@ export function SettingsView({
         onLogout={onLogout}
       />
 
-      <main className="min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
-        <div className="mx-auto w-full max-w-[840px] px-6 py-10 sm:px-10 lg:py-14">
+      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+        <div className="mx-auto w-full max-w-[840px] px-4 py-6 sm:px-10 md:py-10 lg:py-14">
           <div className="mb-8">
             <p className="mb-2 text-[13px] font-medium text-muted-foreground">
               {t("settings.sidebar.title")}
@@ -330,7 +331,7 @@ export function SettingsView({
             </h1>
           </div>
 
-          {loading ? (
+          {activeSection === "mail" ? <MailSettings /> : loading ? (
             <div className="flex h-48 items-center justify-center rounded-[24px] border border-border/50 bg-card/75 text-sm text-muted-foreground shadow-[0_20px_70px_rgba(15,23,42,0.07)]">
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               {t("settings.status.loading")}
@@ -412,6 +413,7 @@ export function SettingsView({
 const SETTINGS_NAV_ITEMS = [
   { key: "general", icon: Settings },
   { key: "byok", icon: KeyRound },
+  { key: "mail", icon: Database },
 ] as const;
 
 function SettingsSidebar({
@@ -426,24 +428,25 @@ function SettingsSidebar({
   onLogout?: () => void;
 }) {
   const { t } = useTranslation();
+  const { mailOwner } = useClient();
   return (
-    <aside className="flex w-[17rem] shrink-0 flex-col border-r border-border/55 bg-card/62 px-3 py-4 shadow-[inset_-1px_0_0_rgba(255,255,255,0.55)] backdrop-blur-xl dark:bg-card/45 dark:shadow-none">
+    <aside className="flex w-full shrink-0 flex-wrap items-center gap-y-2 border-b border-border/55 bg-card/62 px-3 py-2 backdrop-blur-xl md:w-[17rem] md:flex-col md:flex-nowrap md:items-stretch md:gap-y-0 md:border-b-0 md:border-r md:py-4 md:shadow-[inset_-1px_0_0_rgba(255,255,255,0.55)] dark:bg-card/45 dark:shadow-none">
       <button
         type="button"
         onClick={onBackToChat}
-        className="mb-3 inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+        className="inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground md:mb-3"
       >
         <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
         {t("settings.backToChat")}
       </button>
-      <div className="mb-5 px-2">
+      <div className="mb-5 hidden px-2 md:block">
         <h2 className="text-[21px] font-semibold tracking-[-0.035em] text-foreground">
           {t("settings.sidebar.title")}
         </h2>
       </div>
 
-      <nav aria-label={t("settings.sidebar.ariaLabel")} className="space-y-1">
-        {SETTINGS_NAV_ITEMS.map(({ key, icon: Icon }) => {
+      <nav aria-label={t("settings.sidebar.ariaLabel")} className="order-last flex w-full gap-1 md:order-none md:block md:space-y-1">
+        {SETTINGS_NAV_ITEMS.filter((item) => item.key !== "mail" || mailOwner).map(({ key, icon: Icon }) => {
           const active = key === activeSection;
           return (
             <button
@@ -465,7 +468,7 @@ function SettingsSidebar({
         })}
       </nav>
 
-      <div className="mt-auto pt-4">
+      <div className="ml-auto md:ml-0 md:mt-auto md:pt-4">
         {onLogout ? (
           <Button
             type="button"

@@ -10,9 +10,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nanobot.config.schema import AgentDefaults
+from nanobot.agent.runner import _DEFAULT_ERROR_MESSAGE
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
@@ -279,7 +280,9 @@ async def test_runner_times_out_hung_llm_request():
 
     assert (time.monotonic() - started) < 1.0
     assert result.stop_reason == "error"
-    assert "timed out" in (result.final_content or "").lower()
+    assert result.final_content == _DEFAULT_ERROR_MESSAGE
+    assert result.error_details["kind"] == "timeout"
+    assert "timed out" in result.error_details["content"]
 
 @pytest.mark.asyncio
 async def test_runner_returns_structured_tool_error():
@@ -1256,7 +1259,8 @@ async def test_llm_error_not_appended_to_session_messages():
     ))
 
     assert result.stop_reason == "error"
-    assert result.final_content == "429 rate limit exceeded"
+    assert result.final_content == _DEFAULT_ERROR_MESSAGE
+    assert result.error_details["content"] == "429 rate limit exceeded"
     assistant_msgs = [m for m in result.messages if m.get("role") == "assistant"]
     assert all("429" not in (m.get("content") or "") for m in assistant_msgs), \
         "Error content should not appear in session messages"
@@ -1292,7 +1296,7 @@ async def test_streamed_flag_not_set_on_llm_error(tmp_path):
     )
 
     assert result is not None
-    assert "503" in result.content
+    assert result.content == _DEFAULT_ERROR_MESSAGE
     assert not result.metadata.get("_streamed"), \
         "_streamed must not be set when stop_reason is error"
 
@@ -1364,7 +1368,7 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
         InboundMessage(channel="cli", sender_id="user", chat_id="test", content="first question")
     )
     assert first is not None
-    assert first.content == "429 rate limit exceeded"
+    assert first.content == _DEFAULT_ERROR_MESSAGE
 
     session = loop.sessions.get_or_create("cli:test")
     assert [
@@ -1576,45 +1580,49 @@ async def test_length_recovery_continues_from_truncated_output():
     ))
 
     assert result.stop_reason == "completed"
-    assert result.final_content == "final"
+    assert result.final_content == "part1 part2 final"
+    assert "".join(m["content"] for m in result.messages if m["role"] == "assistant") == result.final_content
     assert call_count["n"] == 3
     roles = [m["role"] for m in result.messages if m["role"] == "user"]
-    assert len(roles) >= 3  # original + 2 recovery prompts
+    assert len(roles) == 3  # original + 2 recovery prompts
 
 
 @pytest.mark.asyncio
 async def test_length_recovery_streaming_calls_on_stream_end_with_resuming():
-    """During length recovery with streaming, on_stream_end should be called
-    with resuming=True so the hook knows the conversation is continuing."""
+    """Continuation deltas rebuild the same text as delivery and history,
+    while resuming keeps the stream open between fragments."""
     from nanobot.agent.hook import AgentHook, AgentHookContext
     from nanobot.agent.runner import AgentRunSpec, AgentRunner
 
     provider = MagicMock()
     call_count = {"n": 0}
     stream_end_calls: list[bool] = []
+    deltas: list[str] = []
 
     class StreamHook(AgentHook):
         def wants_streaming(self) -> bool:
             return True
 
         async def on_stream(self, context: AgentHookContext, delta: str) -> None:
-            pass
+            deltas.append(delta)
 
         async def on_stream_end(self, context: AgentHookContext, resuming: bool = False) -> None:
             stream_end_calls.append(resuming)
 
     async def chat_stream_with_retry(*, messages, on_content_delta=None, **kwargs):
         call_count["n"] += 1
-        if call_count["n"] == 1:
-            return LLMResponse(content="partial ", finish_reason="length", usage={})
-        return LLMResponse(content="done", finish_reason="stop", usage={})
+        chunks = ["part", "ial "] if call_count["n"] == 1 else ["do", "ne"]
+        for chunk in chunks:
+            await on_content_delta(chunk)
+        return LLMResponse(content="".join(chunks),
+                           finish_reason="length" if call_count["n"] == 1 else "stop", usage={})
 
     provider.chat_stream_with_retry = chat_stream_with_retry
     tools = MagicMock()
     tools.get_definitions.return_value = []
 
     runner = AgentRunner(provider)
-    await runner.run(AgentRunSpec(
+    result = await runner.run(AgentRunSpec(
         initial_messages=[{"role": "user", "content": "go"}],
         tools=tools,
         model="test-model",
@@ -1626,6 +1634,9 @@ async def test_length_recovery_streaming_calls_on_stream_end_with_resuming():
     assert len(stream_end_calls) == 2
     assert stream_end_calls[0] is True   # length recovery: resuming
     assert stream_end_calls[1] is False  # final response: done
+    assert deltas == ["part", "ial ", "do", "ne"]
+    assert "".join(deltas) == result.final_content == "partial done"
+    assert "".join(m["content"] for m in result.messages if m["role"] == "assistant") == result.final_content
 
 
 @pytest.mark.asyncio
@@ -1658,7 +1669,9 @@ async def test_length_recovery_gives_up_after_max_retries():
     ))
 
     assert call_count["n"] == _MAX_LENGTH_RECOVERIES + 1
-    assert result.final_content is not None
+    expected = "".join(f"chunk{i}" for i in range(1, _MAX_LENGTH_RECOVERIES + 2))
+    assert result.final_content == expected
+    assert "".join(m["content"] for m in result.messages if m["role"] == "assistant") == expected
 
 
 # ---------------------------------------------------------------------------

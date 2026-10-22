@@ -114,6 +114,30 @@ def test_extract_usage_openai_cached_zero_dict():
     assert "cached_tokens" not in result.usage
 
 
+def test_extract_usage_keeps_missing_fields_unknown_and_explicit_zero_known():
+    p = _provider()
+    response = {
+        "choices": [_DICT_CHOICE],
+        "usage": {"prompt_tokens": 0, "completion_tokens": None},
+    }
+
+    result = p._parse(response)
+
+    assert result.usage == {"prompt_tokens": 0}
+
+
+def test_extract_usage_empty_object_does_not_invent_zeroes():
+    p = _provider()
+    response = FakeUsage(
+        choices=[_FakeChoice()],
+        usage=FakeUsage(prompt_tokens=None, completion_tokens=None, total_tokens=None),
+    )
+
+    result = p._parse(response)
+
+    assert result.usage == {}
+
+
 # --- object-based response (OpenAI SDK Pydantic model) ---
 
 def test_extract_usage_openai_cached_tokens_obj():

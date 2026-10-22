@@ -1655,7 +1655,8 @@ class FeishuChannel(BaseChannel):
             message = event.message
             sender = event.sender
 
-            self.logger.debug("raw message: {}", message.content)
+            self.logger.debug("raw message: {}", "[private content omitted]"
+                              if getattr(self, "_mail_service", None) else message.content)
             self.logger.debug("mentions: {}", getattr(message, "mentions", None))
 
             message_id = message.message_id
@@ -1788,6 +1789,7 @@ class FeishuChannel(BaseChannel):
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=reply_to,
+                verified_private_principal=sender_id if chat_type == "p2p" else None,
                 content=content,
                 media=media_paths,
                 metadata={
