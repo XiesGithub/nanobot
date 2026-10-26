@@ -26,6 +26,7 @@ RUNTIME_POLICY = {
 MANIFEST_NAME = "manifest.json"
 ARCHIVE_NAME = "source.zip"
 SNAPSHOT_SCHEMA = "phase7-identity/1"
+V065_CONTRACT = "docs/agent-evaluation-v065-contract-20261026-r1/contract.json"
 _OMIT_DIRS = {
     ".git", ".pytest_cache", ".ruff_cache", "__pycache__", ".mypy_cache",
     ".cache", ".vite", ".turbo", "coverage", "node_modules", "dist", "build",
@@ -89,9 +90,16 @@ def _selected_paths(root: Path) -> list[Path]:
     selected.update(_iter_files(root, "evals/cases"))
     selected.update(_iter_files(root, "evals/fixtures"))
     add_tree("tests/evals", {".py"})
+    add_tree("tests/channels", {".py"})
+    add_tree("tests/security", {".py"})
     add_tree(".github/workflows", {".yml", ".yaml"})
     add_tree("tests/knowledge/mail", {".py", ".sql"})
     add_tree("docs/validation-cases", {".md", ".txt", ".json", ".yaml", ".yml"})
+    contract = root / V065_CONTRACT
+    if (contract.is_file() and not contract.is_symlink()
+            and not any(parent.is_symlink() for parent in contract.parents
+                        if parent.is_relative_to(root))):
+        selected.add(contract)
 
     # Include bridge and WebUI source/assets, plus their root build manifests.
     for relative_dir in ("bridge/src", "webui/src", "webui/public"):
@@ -239,7 +247,7 @@ def _group_names(relative: str) -> set[str]:
     if (relative.startswith(("evals/cases/", "evals/fixtures/", "docs/validation-cases/"))
             or relative in {"evals/semantic_samples.py", "evals/holdout.py",
                             "evals/holdout-registry.json", "holdout-registry.json"}
-            or relative.endswith("eval_contract_cases.py")):
+            or relative.endswith("eval_contract_cases.py") or relative == V065_CONTRACT):
         groups.add("cases")
     if relative.startswith("evals/") and path.suffix == ".py":
         if path.name in {"scorer.py", "batches.py", "batch_audit.py", "metrics.py",

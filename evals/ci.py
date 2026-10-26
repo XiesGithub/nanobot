@@ -26,7 +26,8 @@ def runner_identity(requested_platform):
 
     github = {key: os.environ.get(key) for key in (
         "GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_RUN_ID",
-        "GITHUB_RUN_ATTEMPT", "GITHUB_WORKFLOW", "GITHUB_REF", "GITHUB_EVENT_NAME",
+        "GITHUB_RUN_ATTEMPT", "GITHUB_WORKFLOW", "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF",
+        "GITHUB_REF", "GITHUB_EVENT_NAME",
         "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")}
     remote_url = None
     if all(github[k] for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID")):

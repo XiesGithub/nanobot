@@ -165,6 +165,22 @@ def audit_engineering_artifact(root: str | Path, expected: dict[str, str],
     if (failed != 0 or result.get("passed") is not True or
             result.get("lint_exit_code") != 0 or result.get("pytest_exit_code") != 0):
         errors.append("engineering_tests_failed")
+    contract_path = "docs/agent-evaluation-v065-contract-20261026-r1/contract.json"
+    if contract_path in current_files:
+        if type(result.get("v065_exit_code")) is not int or result["v065_exit_code"] != 0:
+            errors.append("v065_independent_D_execution_failed_or_missing")
+        evidence_path = root / "v065/evidence.json"
+        verdict_path = root / "v065/verdict.json"
+        if not evidence_path.is_file() or not verdict_path.is_file():
+            errors.append("v065_independent_D_artifacts_missing")
+        else:
+            from evals.v065_attachment_d import score
+
+            replayed = score(_json(evidence_path))
+            if replayed != _json(verdict_path):
+                errors.append("v065_independent_D_verdict_replay_mismatch")
+            if replayed.get("status") != "pass":
+                errors.append("v065_independent_D_not_passed")
     return {"ok": not errors, "errors": errors, "quality_passed": False,
             "junit_tests": len(cases), "junit_failures": failed,
             "package_manifest_sha256": package_hash}

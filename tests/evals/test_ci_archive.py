@@ -1,5 +1,8 @@
+import asyncio
 import hashlib
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -7,6 +10,41 @@ import pytest
 
 from evals import ci_archive
 from evals.common import ROOT, canonical, digest
+
+
+@pytest.fixture(scope="module")
+def v065_ci_evidence(tmp_path_factory):
+    from evals.v065_attachment_d import run
+
+    return asyncio.run(run(tmp_path_factory.mktemp("v065-ci-replay") / "actual-D", mode="D"))
+
+
+@pytest.mark.parametrize("mutation", [None, "missing-exit", "missing-evidence", "tampered-verdict", "tampered-wire"])
+def test_new_engineering_contract_replays_actual_v065_d(tmp_path, v065_ci_evidence, mutation):
+    import copy
+
+    from evals.v065_attachment_d import score
+
+    expected = {"sha": "a" * 40, "run_id": "123", "run_attempt": "1", "platform": "windows"}
+    contract = "docs/agent-evaluation-v065-contract-20261026-r1/contract.json"
+    current = {contract: hashlib.sha256((ROOT / contract).read_bytes()).hexdigest()}
+    root = tmp_path / "engineering"
+    _engineering(root, expected, current)
+    result = json.loads((root / "engineering-result.json").read_text())
+    if mutation != "missing-exit":
+        result["v065_exit_code"] = 0
+    _write(root / "engineering-result.json", result)
+    evidence = copy.deepcopy(v065_ci_evidence)
+    verdict = score(evidence)
+    if mutation == "tampered-verdict":
+        verdict["checks"]["cleanup_converged"] = False
+    if mutation == "tampered-wire":
+        evidence["wire"] = []
+    if mutation != "missing-evidence":
+        _write(root / "v065/evidence.json", evidence)
+    _write(root / "v065/verdict.json", verdict)
+    replay = ci_archive.audit_engineering_artifact(root, expected, current)
+    assert replay["ok"] is (mutation is None), replay["errors"]
 
 
 def _write(path: Path, value):
@@ -209,9 +247,25 @@ def test_fixed_load_archive_requires_v001_five_copy_performance_profile(
         assert observed["ok"] is True
 
 
-def test_checkout_source_hashes_are_raw_git_blob_bytes(tmp_path):
+@pytest.fixture
+def checkout_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
+    try:
+        yield repo
+    finally:
+        # Git deliberately marks its own Windows objects read-only. Release only
+        # objects made by this fixture; production instance cleanup stays strict.
+        if os.name == "nt":
+            for path in (repo / ".git/objects").glob("*/*"):
+                if path.is_symlink() or not path.resolve().is_relative_to(repo.resolve()):
+                    raise RuntimeError("unexpected Git fixture object path")
+                if path.is_file():
+                    path.chmod(path.stat().st_mode | stat.S_IWRITE)
+
+
+def test_checkout_source_hashes_are_raw_git_blob_bytes(checkout_repo):
+    repo = checkout_repo
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "ci@example.test"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "CI test"], cwd=repo, check=True)
@@ -391,10 +445,12 @@ def test_workflow_review_branch_runs_only_uncredentialed_profiles():
 
     workflow = yaml.load((ROOT / ".github" / "workflows" / "evaluation.yml").read_text(
         encoding="utf-8"), Loader=yaml.BaseLoader)
-    assert "codex/ci-evidence-20261019" in workflow["on"]["push"]["branches"]
+    review_branches = [branch for branch in workflow["on"]["push"]["branches"]
+                       if branch.startswith("codex/ci-evidence-")]
+    assert review_branches == ["codex/ci-evidence-20261026-r1"]
     real = workflow["jobs"]["real-model-evaluation"]
     assert "refs/heads/main" in real["if"] and "refs/heads/nightly" in real["if"]
-    assert "codex/ci-evidence-20261019" not in real["if"]
+    assert all(branch not in real["if"] for branch in review_branches)
     assert workflow["env"]["GIT_CONFIG_KEY_0"] == "core.autocrlf"
     assert workflow["env"]["GIT_CONFIG_VALUE_0"] == "false"
 

@@ -1,0 +1,49 @@
+{
+  "schema": "V065-reviewed-D-contract/1",
+  "version": "V065-attachment-D/3.0",
+  "case_id": "V065",
+  "allowed_modes": [
+    "D"
+  ],
+  "original_requirement": "docs/validation-cases/08-transport.md#v065",
+  "fixture": {
+    "name": "notice.txt",
+    "mime": "text/plain",
+    "text": "会议日期2026-10-12"
+  },
+  "questions": {
+    "A": "我上传文件中的会议日期是什么？",
+    "B": "我刚上传文件的会议日期是什么？"
+  },
+  "entry": "actual anonymous WebSocket upload -> real MessageBus inbound -> AgentLoop._dispatch -> AgentRunner with grounded scripted provider -> actual WebSocket final and matching turn_end",
+  "required": [
+    "A and B are distinct server-generated chats on one local instance; URL client_id is not authority",
+    "A uploads exact UTF-8 notice bytes through the product text/plain media route; no fixture is prewritten to Agent workspace",
+    "Saved file is under A per-chat directory and is instance-bound; stored bytes and input fixture remain unchanged",
+    "A actual Agent input contains extracted notice; A actual read_file positive returns notice and enters next provider input",
+    "A actual final states 2026-10-12; B original question has no attachment and actual normal B input has no A notice, date or path",
+    "B actual final explains no attachment was received; requesting upload is optional; no borrowed date/content",
+    "Both original questions dispatch through real AgentLoop and AgentRunner, produce exactly one final each and matching actual turn_end",
+    "B direct absolute and relative A paths are denied by actual read_file; no A file open occurs under B and no observer re-reads denied files",
+    "Foreign chat message/upload, attach, wrong chat token and spoofed client_id are denied before inbound/media side effects",
+    "No A delivery reaches B after rejected attach; legitimate owner and explicit server-issued chat capability still work",
+    "Provider, channel and pending tasks settle; original files remain unchanged; generated media is confined to this run"
+  ],
+  "authority": {
+    "ordinary_actors": "anonymous WebSocket connections; no transport operator token",
+    "chat_capability": "explicit valid server-issued chat_token permits resumption; record only token digest/presence",
+    "transport_operator": "valid configured/bootstrap transport token has instance authority; not an ordinary-B negative",
+    "signed_media_url": "valid signed URL is a bearer capability; intentional possession may authorize byte fetch. Tamper/traversal negatives remain mandatory product tests; not a no-token path-guess success criterion"
+  },
+  "verdicts": {
+    "pass": "complete grounded two-turn D chain plus all applicable isolation, ownership, byte-integrity, termination and cleanup checks",
+    "product_fail": "Complete trustworthy observation of wrong answer, cross-chat disclosure/unauthorized file open, accepted forged identity, changed fixture, or observable product resources failing to settle. Missing required final/terminal is product_fail only after complete actual wire collection with an explicit bounded observation window.",
+    "invalid": "Collector/instrumentation error, missing or mismatched source/wire/actor/session/request evidence, ungrounded scripted answer, forged or incomplete trace. Driver/collector close, artifact persistence or temporary-directory ACL failure is invalid or separate engineering failure. Never convert absent evidence into product pass/fail."
+  },
+  "separation": {
+    "scripted_provider": "D control only; every response is guarded by actual current messages/tool outcome",
+    "R": "reject before allocating output, transport or provider; no R precondition, budget or eligibility inferred",
+    "legacy_v1": "unchanged; obsolete nine engineering assertions mapped explicitly, not inverted or treated as current acceptance requirements",
+    "historical_results": "unchanged; new D does not regrade old trials or repair the old remote CI result"
+  }
+}
