@@ -7,7 +7,7 @@ import pytest
 
 @pytest.mark.parametrize("boundary", ["SAVE", "checkpoint"])
 async def test_save_failure_terminal_and_recovery(tmp_path, boundary):
-    script = Path(__file__).resolve().parents[2] / "docs/agent-evaluation-save-fix-20261016/reproduce_ws_save.py"
+    script = Path(__file__).resolve().parents[2] / "evals/fixtures/reproduce_ws_save.py"
     spec = importlib.util.spec_from_file_location("save_ws_control", script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

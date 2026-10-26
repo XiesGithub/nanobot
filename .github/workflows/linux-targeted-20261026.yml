@@ -1,0 +1,40 @@
+name: Targeted Linux engineering 20261026
+on:
+  push:
+    branches: [codex/linux-targeted-20261026-r1]
+permissions:
+  contents: read
+jobs:
+  targeted:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.20.0
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: nanobot
+          auto-activate: true
+          python-version: '3.11'
+      - name: Install scoped Python dependencies
+        run: |
+          set -o pipefail
+          mkdir -p reports
+          conda run --no-capture-output -n nanobot python -m pip install -e '.[dev,pdf]' 'psutil>=5.9,<8.0' 'playwright==1.55.0' 2>&1 | tee reports/linux-install.log
+      - name: One targeted native Linux attempt
+        run: conda run --no-capture-output -n nanobot python -m evals.linux_targeted_probe
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: linux-targeted-20261026-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14

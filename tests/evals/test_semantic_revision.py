@@ -7,9 +7,20 @@ from evals.common import ROOT, read
 from evals.semantic import gold_packet, validate_packet, validate_review
 from evals.semantic_revision import archived_runs, load_archive
 
+_REPOSITORY_ROOT = ROOT
+
+
+@pytest.fixture(autouse=True)
+def archived_source_root(history_tree, monkeypatch):
+    monkeypatch.setattr("evals.semantic_revision.ROOT", history_tree)
+    monkeypatch.setitem(globals(), "ROOT", history_tree)
+    monkeypatch.setattr("evals.semantic_revision.SECURITY", history_tree / "docs/agent-evaluation-security-fulltask-20261011/R")
+    monkeypatch.setattr("evals.semantic_revision.PRIVACY", history_tree / "docs/agent-evaluation-privacy-family-20261011")
+
 
 @pytest.mark.parametrize("run", archived_runs(), ids=lambda path: path.name)
 def test_original_archives_reconstruct_without_product_execution(run):
+    run = ROOT / run.relative_to(_REPOSITORY_ROOT)
     row = load_archive(run.resolve())
     original = read(ROOT / row["old_packet"])
     revised = validate_packet(row["packet"])

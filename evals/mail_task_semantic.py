@@ -165,8 +165,8 @@ async def run(mode, output, case_id, control=None, repeat_index=1, semantic_prof
             write(output / "selfcheck.json", selfcheck)
             gold_review = await review_packet(client, gold, "gold") if selfcheck["ok"] else invalid_semantic(gold, "selfcheck_failed")
             write(output / "gold-review.json", gold_review)
-            isolation = ROOT / "tmp/mail-task-instances"
-            isolation.mkdir(parents=True, exist_ok=True)
+            isolation = output / "instances"
+            isolation.mkdir()
             run_trial(case, plan[0], output, isolation, mode, mp.get_context("spawn"))
             trial = output / "trials" / plan[0]["trial_id"]
             evidence = read(trial / "artifacts/evidence.json")

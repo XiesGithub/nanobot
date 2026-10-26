@@ -1361,6 +1361,7 @@ class AgentLoop:
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         meta = dict(msg.metadata or {})
+        meta.pop("_current_message_attachment_count", None)
         content, buttons = ask_user_outbound(
             final_content,
             ask_user_options_from_messages(all_msgs) if stop_reason == "ask_user" else [],
@@ -1421,6 +1422,7 @@ class AgentLoop:
         )
         result = await self.commands.dispatch(cmd_ctx)
         if result is not None:
+            result.metadata.pop("_current_message_attachment_count", None)
             ctx.outbound = result
             return "shortcut"
         return "dispatch"

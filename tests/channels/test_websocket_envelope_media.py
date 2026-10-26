@@ -49,6 +49,18 @@ def _make_channel() -> WebSocketChannel:
     return channel
 
 
+async def _dispatch_as_connected(channel: WebSocketChannel, connection: Any,
+                                 envelope: dict[str, Any]) -> None:
+    """Run the same new-chat handshake that grants a connection its chat."""
+    await channel._dispatch_envelope(connection, "client-1", {"type": "new_chat"})
+    ready = json.loads(connection.send.call_args.args[0])
+    assert ready["event"] == "attached"
+    envelope["chat_id"] = ready["chat_id"]
+    envelope["chat_token"] = ready["chat_token"]
+    connection.reset_mock()
+    await channel._dispatch_envelope(connection, "client-1", envelope)
+
+
 # -- Pure helpers --------------------------------------------------------------
 
 
@@ -95,11 +107,11 @@ async def test_message_without_media_backward_compatible() -> None:
     mock_conn = AsyncMock()
     envelope = {"type": "message", "chat_id": "abc123", "content": "hello"}
 
-    await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+    await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_awaited_once()
     call = channel._handle_message.call_args
-    assert call.kwargs["chat_id"] == "abc123"
+    assert call.kwargs["chat_id"] == envelope["chat_id"]
     assert call.kwargs["content"] == "hello"
     # When no media, we pass ``media=None`` so downstream treats it as absent.
     assert call.kwargs["media"] is None
@@ -117,9 +129,9 @@ async def test_message_with_single_image_forwards_saved_path(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_awaited_once()
     paths = channel._handle_message.call_args.kwargs["media"]
@@ -146,9 +158,9 @@ async def test_message_with_multiple_images(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     paths = channel._handle_message.call_args.kwargs["media"]
     assert len(paths) == 3
@@ -169,9 +181,9 @@ async def test_image_only_message_allows_empty_text(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_awaited_once()
     # Error event NOT sent.
@@ -190,9 +202,9 @@ async def test_message_rejected_when_more_than_four_images(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     mock_conn.send.assert_awaited_once()
@@ -215,9 +227,9 @@ async def test_message_rejected_on_oversize_payload(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])
@@ -237,9 +249,9 @@ async def test_message_rejected_on_non_image_mime(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])
@@ -260,9 +272,9 @@ async def test_message_rejected_on_svg_mime(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])
@@ -281,9 +293,9 @@ async def test_message_rejected_on_malformed_data_url(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])
@@ -302,9 +314,9 @@ async def test_message_rejected_on_broken_base64(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])
@@ -324,9 +336,9 @@ async def test_message_rejected_when_media_item_shape_wrong(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])
@@ -344,7 +356,7 @@ async def test_message_rejected_when_media_field_is_not_list() -> None:
         "media": "not-a-list",
     }
 
-    await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+    await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])
@@ -372,9 +384,9 @@ async def test_failed_media_does_not_partially_persist(tmp_path) -> None:
     }
 
     with patch(
-        "nanobot.channels.websocket.get_media_dir", return_value=tmp_path
+        "nanobot.channels.websocket.websocket_media_dir", return_value=tmp_path
     ):
-        await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+        await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])
@@ -396,7 +408,7 @@ async def test_rejects_empty_text_without_media() -> None:
         "content": "   ",
     }
 
-    await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+    await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])
@@ -413,7 +425,7 @@ async def test_non_string_content_still_rejected() -> None:
         "content": 42,
     }
 
-    await channel._dispatch_envelope(mock_conn, "client-1", envelope)
+    await _dispatch_as_connected(channel, mock_conn, envelope)
 
     channel._handle_message.assert_not_awaited()
     err = json.loads(mock_conn.send.call_args[0][0])

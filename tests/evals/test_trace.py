@@ -246,11 +246,11 @@ async def test_root_task_exists_before_early_branches(branch):
     assert analyze_trace(sink.events)["valid"]
 
 
-def test_all_phase2_evidence_keeps_its_original_verdict():
+def test_all_phase2_evidence_keeps_its_original_verdict(history_tree):
     cases = {case["case_id"]: case for case in load_cases()}
     count = 0
     for mode in ("D", "R"):
-        root = ROOT / "docs/agent-evaluation-phase2-runs" / (mode + "-20261009/trials")
+        root = history_tree / "docs/agent-evaluation-phase2-runs" / (mode + "-20261009/trials")
         for trial in root.iterdir():
             original = read(trial / "verdicts/1.json")
             case_id = read(trial / "trial.json")["case_id"]

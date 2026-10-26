@@ -420,6 +420,44 @@ def _fixture_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _build_v019_pdf(path: Path, *, font_factory=None) -> dict:
+    """Build the fixed two-page PDF with an embedded, portable CJK font."""
+    import pymupdf
+
+    texts = ("合同编号 HT-017；预付款 100 元", "尾款 230 元；到期日 2026-10-15")
+    path = Path(path)
+    if path.exists() or path.is_symlink():
+        raise FileExistsError(f"V019 fixture output already exists: {path}")
+    document = None
+    try:
+        font = (font_factory or pymupdf.Font)("cjk")
+        font_buffer = font.buffer
+        if not font_buffer:
+            raise RuntimeError("PyMuPDF CJK fixture font returned an empty font buffer")
+        missing = sorted({char for text in texts for char in text
+                          if not char.isspace() and not font.has_glyph(ord(char))})
+        if missing:
+            raise RuntimeError(f"PyMuPDF CJK fixture font lacks required glyphs: {''.join(missing)}")
+        document = pymupdf.open()
+        for text in texts:
+            page = document.new_page(width=595, height=842)
+            page.insert_font(fontname="fixture-cjk", fontbuffer=font_buffer)
+            page.insert_text((50, 72), text, fontname="fixture-cjk", fontsize=14)
+        document.set_metadata({"title": "fixed evaluation contract", "author": "eval fixture",
+                               "creationDate": "D:20261010000000Z",
+                               "modDate": "D:20261010000000Z"})
+        document.save(path, garbage=4, deflate=True, no_new_id=True)
+        return {"source": "pymupdf.Font('cjk').buffer", "name": font.name,
+                "sha256": hashlib.sha256(font_buffer).hexdigest(),
+                "pymupdf_version": pymupdf.VersionBind}
+    except Exception as exc:
+        path.unlink(missing_ok=True)
+        raise RuntimeError(f"Unable to build V019 PDF with the embedded PyMuPDF CJK font: {exc}") from exc
+    finally:
+        if document is not None:
+            document.close()
+
+
 def _lines(result: str) -> list[str]:
     return [line.split("| ", 1)[1] for line in result.splitlines()
             if re.match(r"^\d+\| ", line)]
@@ -595,24 +633,10 @@ async def execute(case_id: str, workspace: Path) -> dict:
                 "source_unchanged": before == _fixture_hash(workspace / "large.txt"),
                 "tool_calls": len(result.tools_used), "model_requests": provider.index}
     if case_id == "V019":
-        import os
-
-        import pymupdf
-
         from nanobot.utils.document import extract_documents
 
         path = workspace / "contract.pdf"
-        cjk_font = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "msyh.ttc"
-        document = pymupdf.open()
-        for text in ("合同编号 HT-017；预付款 100 元", "尾款 230 元；到期日 2026-10-15"):
-            page = document.new_page(width=595, height=842)
-            page.insert_text((50, 72), text, fontname="fixture-cjk", fontfile=str(cjk_font),
-                             fontsize=14)
-        document.set_metadata({"title": "fixed evaluation contract", "author": "eval fixture",
-                               "creationDate": "D:20261010000000Z",
-                               "modDate": "D:20261010000000Z"})
-        document.save(path, garbage=4, deflate=True)
-        document.close()
+        font_provenance = _build_v019_pdf(path)
         generated_hash = _fixture_hash(path)
         extracted, images = extract_documents("", [str(path)])
         balance_match = re.search(r"尾款\s*(\d+)\s*元", extracted)
@@ -623,7 +647,7 @@ async def execute(case_id: str, workspace: Path) -> dict:
                 "fixture_hash_before_extract": generated_hash,
                 "fixture_hash_after_extract": _fixture_hash(path),
                 "fixture_unchanged": generated_hash == _fixture_hash(path), "images": images,
-                "actual_fixture_path": str(path)}
+                "actual_fixture_path": str(path), "fixture_font": font_provenance}
     if case_id == "V020":
         from docx import Document
 

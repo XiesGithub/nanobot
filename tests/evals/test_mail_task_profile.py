@@ -1,6 +1,5 @@
 import asyncio
 import copy
-import uuid
 
 import pytest
 
@@ -14,14 +13,14 @@ from evals.semantic import gold_packet
 
 
 @pytest.fixture(scope="module")
-def snapshots():
-    parent = ROOT / "tmp" / ("mail-profile-tests-" + uuid.uuid4().hex)
-    parent.mkdir(parents=True)
+def snapshots(tmp_path_factory):
+    parent = tmp_path_factory.mktemp("mail-profile-tests")
     result = {}
     try:
         for cid in IDS:
             directory = parent / cid
             summary = asyncio.run(run("D", directory, cid))
+            assert not list((directory / "instances").iterdir())
             trial = directory / "trials" / (cid + "-1")
             result[cid] = {"directory": directory, "summary": summary,
                            "manifest": read(directory / "manifest.json"),
@@ -34,7 +33,8 @@ def snapshots():
                            "costs": read(directory / "grading-cost.json")}
         yield result
     finally:
-        cleanup_instance(parent, ROOT / "tmp")
+        removed = cleanup_instance(parent, parent.parent)
+        assert removed
 
 
 def test_fixture_mapping_keeps_original_time_and_attachment_ownership():

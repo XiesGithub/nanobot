@@ -10,6 +10,18 @@ from evals.privacy_task_audit import audit
 SAVED = ROOT / "docs/agent-evaluation-privacy-family-20261011/D-final-positive"
 
 
+@pytest.fixture(autouse=True)
+def archived_source_root(history_tree, monkeypatch):
+    from evals.history_fixtures import materialize_privacy_sources
+
+    marker = history_tree / "evals"
+    if not marker.exists():
+        materialize_privacy_sources(history_tree)
+    monkeypatch.setattr("evals.privacy_task_audit.ROOT", history_tree)
+    monkeypatch.setitem(globals(), "SAVED",
+                        history_tree / "docs/agent-evaluation-privacy-family-20261011/D-final-positive")
+
+
 def _replace(path, value):
     path.write_text(canonical(value).decode("utf-8") + "\n", encoding="utf-8")
 

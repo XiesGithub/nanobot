@@ -178,6 +178,17 @@ def _make_config(**kwargs) -> MatrixConfig:
     )
 
 
+def _isolate_matrix_media_dir(monkeypatch, tmp_path: Path) -> None:
+    def _get_media_dir(channel: str | None = None) -> Path:
+        path = tmp_path / "media"
+        if channel:
+            path /= channel
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(matrix_module, "get_media_dir", _get_media_dir)
+
+
 @pytest.mark.asyncio
 async def test_start_skips_load_store_when_device_id_missing(
     monkeypatch, tmp_path
@@ -686,7 +697,7 @@ async def test_on_message_sets_thread_metadata_when_threaded_event() -> None:
 async def test_on_media_message_downloads_attachment_and_sets_metadata(
     monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setattr("nanobot.channels.matrix.get_data_dir", lambda: tmp_path)
+    _isolate_matrix_media_dir(monkeypatch, tmp_path)
 
     channel = MatrixChannel(_make_config(), MessageBus())
     client = _FakeAsyncClient("", "", "", None)
@@ -724,6 +735,7 @@ async def test_on_media_message_downloads_attachment_and_sets_metadata(
     assert isinstance(media_paths, list) and len(media_paths) == 1
     media_path = Path(media_paths[0])
     assert media_path.is_file()
+    assert media_path.is_relative_to(tmp_path)
     assert media_path.read_bytes() == b"image"
 
     metadata = handled[0]["metadata"]
@@ -739,7 +751,7 @@ async def test_on_media_message_downloads_attachment_and_sets_metadata(
 async def test_on_media_message_sets_thread_metadata_when_threaded_event(
     monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setattr("nanobot.channels.matrix.get_data_dir", lambda: tmp_path)
+    _isolate_matrix_media_dir(monkeypatch, tmp_path)
 
     channel = MatrixChannel(_make_config(), MessageBus())
     client = _FakeAsyncClient("", "", "", None)
@@ -774,6 +786,7 @@ async def test_on_media_message_sets_thread_metadata_when_threaded_event(
     await channel._on_media_message(room, event)
 
     assert len(handled) == 1
+    assert Path(handled[0]["media"][0]).is_relative_to(tmp_path)
     metadata = handled[0]["metadata"]
     assert metadata["thread_root_event_id"] == "$root1"
     assert metadata["thread_reply_to_event_id"] == "$event1"
@@ -887,7 +900,7 @@ async def test_on_media_message_handles_download_error(monkeypatch, tmp_path) ->
 
 @pytest.mark.asyncio
 async def test_on_media_message_decrypts_encrypted_media(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr("nanobot.channels.matrix.get_data_dir", lambda: tmp_path)
+    _isolate_matrix_media_dir(monkeypatch, tmp_path)
     monkeypatch.setattr(
         matrix_module,
         "decrypt_attachment",
@@ -922,6 +935,7 @@ async def test_on_media_message_decrypts_encrypted_media(monkeypatch, tmp_path) 
 
     assert len(handled) == 1
     media_path = Path(handled[0]["media"][0])
+    assert media_path.is_relative_to(tmp_path)
     assert media_path.read_bytes() == b"plain"
     attachment = handled[0]["metadata"]["attachments"][0]
     assert attachment["encrypted"] is True

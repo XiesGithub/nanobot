@@ -28,6 +28,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Node.js for WebUI replay
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.20.0
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
       - name: Initialize engineering evidence
         shell: pwsh
         run: |
@@ -49,6 +56,14 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: conda run --no-capture-output --name nanobot python -m pip install --editable ".[dev,mail-rag,api,wecom,weixin,matrix,discord,langsmith,pdf,olostep,msteams]"
+
+      - name: Install lockfile-pinned WebUI replay dependencies
+        shell: pwsh
+        run: conda run --no-capture-output --name nanobot npm ci --prefix webui --no-audit --no-fund
+
+      - name: Prepare the pinned mail encoder test fixture
+        shell: pwsh
+        run: conda run --no-capture-output --name nanobot python -m evals.mail_encoder_fixture --download-missing
 
       - name: Lint with ruff
         shell: pwsh

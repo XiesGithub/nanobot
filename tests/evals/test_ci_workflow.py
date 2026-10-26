@@ -143,7 +143,15 @@ def test_artifacts_are_uploaded_even_after_failure_and_pipeline_status_is_explic
         uploads = [step for step in jobs[job_id]["steps"]
                    if step.get("uses", "").startswith("actions/upload-artifact")]
         assert uploads
-        assert all(step.get("if") == "always()" for step in uploads)
+        if job_id == "deterministic-evaluation":
+            prepare = _step(jobs[job_id], "Prepare scoped deterministic evaluation evidence")
+            assert prepare["if"] == "always()"
+            assert prepare["id"] == "deterministic_upload"
+            assert all(step.get("if") == (
+                "${{ always() && steps.deterministic_upload.outcome == 'success' }}")
+                       for step in uploads)
+        else:
+            assert all(step.get("if") == "always()" for step in uploads)
     pipeline = jobs["evidence-pipeline-status"]
     assert pipeline["if"] == "always()"
     assert "do not grant quality approval" in pipeline["name"]
@@ -176,6 +184,25 @@ def test_all_profiles_are_cross_platform_and_use_conda():
     source = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "uv run" not in source and "uv sync" not in source
     assert "--name nanobot" in source
+
+
+def test_engineering_jobs_prepare_exact_mail_and_webui_dependencies():
+    workflow = _workflow()
+    ci = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    for job, suite_name in ((workflow["jobs"]["engineering"], "Lint and run the engineering suite"),
+                            (ci["jobs"]["test"], "Run tests")):
+        steps = job["steps"]
+        node = next(s for s in steps if s.get("uses", "").startswith("actions/setup-node@"))
+        assert node["uses"] == "actions/setup-node@v7"
+        assert node["with"]["node-version"] == "22.20.0"
+        assert node["with"]["cache-dependency-path"] == "webui/package-lock.json"
+        webui = next(s for s in steps if "npm ci --prefix webui" in s.get("run", ""))
+        encoder = _step(job, "Prepare the pinned mail encoder test fixture")
+        assert "conda run --no-capture-output --name nanobot npm ci" in webui["run"]
+        assert "--name nanobot python -m evals.mail_encoder_fixture --download-missing" in encoder["run"]
+        suite = _step(job, suite_name)
+        assert steps.index(node) < steps.index(webui) < steps.index(suite)
+        assert steps.index(encoder) < steps.index(suite)
 
 
 def test_real_plan_is_frozen_small_and_never_quality_eligible():

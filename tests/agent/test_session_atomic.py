@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from nanobot.session.manager import Session, SessionManager
 
 
@@ -43,6 +45,8 @@ class TestAtomicSave:
         tmp_path_file = path.with_suffix(".jsonl.tmp")
 
         path.parent.mkdir(parents=True, exist_ok=True)
+        original_session = b'{"existing":"session"}\n'
+        path.write_bytes(original_session)
         tmp_path_file.write_text("stale")
 
         class BadMessage:
@@ -64,12 +68,14 @@ class TestAtomicSave:
 
         import unittest.mock
         with unittest.mock.patch("nanobot.session.manager.json.dumps", side_effect=failing_dumps):
-            try:
+            with pytest.raises(OSError, match="simulated disk full"):
                 mgr.save(session)
-            except OSError:
-                pass
 
-        assert not tmp_path_file.exists()
+        assert path.read_bytes() == original_session
+        # A save now owns a unique temporary file; a pre-existing legacy temp
+        # path must not be mistaken for this attempt's file or deleted.
+        assert tmp_path_file.read_text(encoding="utf-8") == "stale"
+        assert list(path.parent.glob(".session-save-*.tmp")) == []
 
     def test_overwrite_preserves_latest_data(self, tmp_path: Path):
         mgr = SessionManager(tmp_path)

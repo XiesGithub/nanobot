@@ -49,12 +49,31 @@ EXPECTED = {
 V073_TIMING_SCRIPT = r"""(() => {
   const evidence = {click: null, final_dom: null};
   window.__nanobotV073Timing = evidence;
+    const diagnostics = {schema: 'V073-page-observation/1', limit: 256, counts: {}, ring: [], errors: []};
+    evidence.diagnostics = diagnostics;
+    function fingerprint(value) {
+      let hash = 2166136261;
+      for (let i = 0; i < value.length; i++) hash = Math.imul(hash ^ value.charCodeAt(i), 16777619);
+      return {length: value.length, fnv1a32: (hash >>> 0).toString(16).padStart(8, '0')};
+    }
+    function record(kind, details = {}) {
+      try {
+        diagnostics.counts[kind] = (diagnostics.counts[kind] || 0) + 1;
+        diagnostics.ring.push({kind, performance_ms: performance.now(), ...details});
+        if (diagnostics.ring.length > diagnostics.limit) diagnostics.ring.shift();
+      } catch (error) { diagnostics.errors.push(String(error)); }
+    }
+    function targetInfo(target) {
+      return {tag: target?.tagName || null, aria_label: target?.getAttribute?.('aria-label') || null,
+        disabled: typeof target?.disabled === 'boolean' ? target.disabled : null};
+    }
   let scheduled = false;
   let previous = null;
   let stable = 0;
   function sample(now) {
+      record('raf_callback', {callback_ms: now});
     scheduled = false;
-    if (!evidence.click || evidence.final_dom) return;
+      if (!evidence.click || evidence.final_dom) { record('sample_skipped', {click: !!evidence.click, final: !!evidence.final_dom}); return; }
     const main = document.querySelector('main');
     const copy = main?.querySelector('button[aria-label="Copy reply"], button[aria-label="Reply copied"]');
     const root = copy?.parentElement?.parentElement;
@@ -65,31 +84,56 @@ V073_TIMING_SCRIPT = r"""(() => {
     const text = content?.innerText?.trim() || '';
     const visible = !!rect && rect.width > 0 && rect.height > 0
       && getComputedStyle(content).visibility !== 'hidden';
+      record('sample_branch', {main: !!main, copy: !!copy, root: !!root, content: !!content,
+        input: !!input, stop: !!stop, rect: rect ? {width: rect.width, height: rect.height} : null,
+        visibility: content ? getComputedStyle(content).visibility : null, visible,
+        input_enabled: !!input && !input.disabled, text: fingerprint(text),
+        input_value: input ? fingerprint(input.value || '') : null, stable_before: stable,
+        same_previous_text: previous?.text === text});
     if (visible && text && input && !input.disabled && !stop) {
       if (previous?.text === text) stable += 1;
       else { previous = {text, performance_ms: now}; stable = 1; }
+        record('stable_progress', {stable});
       if (stable >= 2) {
         evidence.final_dom = {performance_ms: previous.performance_ms,
           confirmed_performance_ms: now, text, visible: true, stable_frames: stable};
+          record('final_dom_confirmed', {stable});
         return;
       }
-    } else { previous = null; stable = 0; }
+      } else { record('stable_reset', {stable_before: stable}); previous = null; stable = 0; }
     schedule();
   }
   function schedule() {
+      record('schedule', {scheduled, click: !!evidence.click, final: !!evidence.final_dom});
     if (!scheduled && evidence.click && !evidence.final_dom) {
       scheduled = true;
+        record('raf_requested');
       requestAnimationFrame(sample);
     }
   }
   document.addEventListener('click', event => {
+      record('click', {is_trusted: event.isTrusted, event_timestamp: event.timeStamp,
+        target: targetInfo(event.target), button: targetInfo(event.target.closest?.('button'))});
     const button = event.target.closest?.('button[aria-label="Send message"]');
     if (!button || evidence.click) return;
     evidence.click = {performance_ms: performance.now(), is_trusted: event.isTrusted,
       target: button.getAttribute('aria-label')};
     schedule();
   }, true);
-  new MutationObserver(schedule).observe(document, {subtree: true, childList: true, attributes: true, characterData: true});
+    for (const kind of ['beforeinput', 'input', 'change']) document.addEventListener(kind, event => {
+      record(kind, {is_trusted: event.isTrusted, target: targetInfo(event.target),
+        value: fingerprint(event.target?.value || ''), input_type: event.inputType || null});
+    }, true);
+    for (const kind of ['DOMContentLoaded', 'visibilitychange', 'freeze', 'resume'])
+      document.addEventListener(kind, () => record(kind, {visibility: document.visibilityState}));
+    for (const kind of ['pageshow', 'pagehide', 'load', 'beforeunload'])
+      window.addEventListener(kind, () => record(kind, {visibility: document.visibilityState}));
+    new MutationObserver(records => {
+      record('mutation', {count: records.length, types: records.reduce((counts, item) => {
+        counts[item.type] = (counts[item.type] || 0) + 1; return counts;
+      }, {}), attributes: [...new Set(records.map(item => item.attributeName).filter(Boolean))]});
+      schedule();
+    }).observe(document, {subtree: true, childList: true, attributes: true, characterData: true});
 })();"""
 
 

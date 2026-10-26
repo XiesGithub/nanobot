@@ -2,12 +2,11 @@
 
 import copy
 import multiprocessing as mp
-import uuid
 
 import numpy as np
 import pytest
 
-from evals.common import ROOT, digest, read
+from evals.common import digest, read
 from evals.mail_semantic_evidence import semantic_binding
 from evals.mail_task_cases import load_cases
 from evals.mail_task_semantic import build_plan
@@ -19,9 +18,8 @@ def _events(evidence, kind):
 
 
 @pytest.fixture(scope="module")
-def actual_encoder_trial():
-    parent = ROOT / "tmp" / ("mail-encoder-proof-" + uuid.uuid4().hex)
-    parent.mkdir(parents=True)
+def actual_encoder_trial(tmp_path_factory):
+    parent = tmp_path_factory.mktemp("mail-encoder-proof")
     case = next(row for row in load_cases() if row["case_id"] == "V085")
     directory = parent / "actual-D"
     (directory / "trials").mkdir(parents=True)
@@ -31,10 +29,13 @@ def actual_encoder_trial():
     try:
         result = run_trial(case, plan, directory, isolation, "D", mp.get_context("spawn"))
         assert result["status"] == "pass", result["reasons"]
+        assert result["cleanup"]["ok"]
+        assert not list(isolation.iterdir())
         evidence = read(directory / "trials" / plan["trial_id"] / "artifacts/evidence.json")
         yield case, evidence
     finally:
-        cleanup_instance(parent, ROOT / "tmp")
+        removed = cleanup_instance(parent, parent.parent)
+        assert removed
 
 
 def test_actual_pinned_encoder_rank_and_gold_read(actual_encoder_trial):

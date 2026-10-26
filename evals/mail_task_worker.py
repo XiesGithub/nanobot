@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import shutil
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -724,14 +725,74 @@ def _observe_mail_model_requests(provider):
     return provider
 
 
+async def _close_mail_resources(provider, service, primary_error=None):
+    """Attempt both closes while preserving task and cleanup exceptions."""
+    provider_error = None
+    if provider is not None:
+        try:
+            await _close_provider(provider)
+        except BaseException as exc:
+            provider_error = exc
+
+    service_error = None
+    try:
+        await service.close()
+    except BaseException as exc:
+        service_error = exc
+
+    cleanup_error = provider_error or service_error
+    if provider_error is not None and service_error is not None:
+        try:
+            raise service_error from provider_error
+        except BaseException as exc:
+            cleanup_error = exc
+
+    if primary_error is not None:
+        if cleanup_error is not None:
+            raise primary_error from cleanup_error
+        return
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+@asynccontextmanager
+async def _mail_resource_scope(service):
+    """Close resources on setup failures, early returns, and task failures."""
+    resources = {"provider": None}
+    try:
+        yield resources
+    except BaseException as primary_error:
+        await _close_mail_resources(resources["provider"], service, primary_error)
+        raise
+    else:
+        await _close_mail_resources(resources["provider"], service)
+
+
 async def _execute_task(connection, options, emit):
+    from nanobot.config.loader import set_config_path
+
+    fixture = options["mail_fixture"]
+    control = options.get("mail_control")
+    runtime = Path(options["runtime"])
+    set_config_path(runtime / "config.json")
+    encoder_pin = options.get("encoder_pin") or fixture.get("encoder_pin")
+    service, binding, prepare = _fixture_service(
+        runtime, fixture, encoder_pin=encoder_pin, control=control,
+        workspace=ROOT, emit=emit,
+    )
+    async with _mail_resource_scope(service) as resources:
+        await _execute_task_body(
+            connection, options, emit, service, binding, prepare, resources
+        )
+
+
+async def _execute_task_body(connection, options, emit, service, binding, prepare, resources):
     from evals.trace import EvalHook
     from nanobot.agent.hook import AgentHook
     from nanobot.agent.loop import AgentLoop
     from nanobot.agent.skills import BUILTIN_SKILLS_DIR
     from nanobot.bus.events import InboundMessage
     from nanobot.bus.queue import MessageBus
-    from nanobot.config.loader import set_config_path
     from nanobot.config.schema import ToolsConfig
     from nanobot.knowledge.mail.agent_bridge import MailTurnExtension
     from nanobot.knowledge.mail.contracts import GENERATION_MODEL, AccessContext
@@ -742,12 +803,7 @@ async def _execute_task(connection, options, emit):
     control = options.get("mail_control")
     runtime = Path(options["runtime"])
     workspace = Path(options["workspace"])
-    set_config_path(runtime / "config.json")
     encoder_pin = options.get("encoder_pin") or fixture.get("encoder_pin")
-    service, binding, prepare = _fixture_service(
-        runtime, fixture, encoder_pin=encoder_pin, control=control,
-        workspace=ROOT, emit=emit,
-    )
     await prepare()
     security = service.access.authenticate("cli", "fictional-principal-A", private_chat=True)
     if not security.authenticated or security.binding_id != binding.binding_id:
@@ -775,8 +831,10 @@ async def _execute_task(connection, options, emit):
 
     if options["mode"] == "D":
         provider = _scripted_mail_provider(case_id, {**fixture, "encoder_pin": encoder_pin}, document_artifacts, control, emit)
+        resources["provider"] = provider
     else:
         provider = real_provider(options["credentials"], emit)
+        resources["provider"] = provider
         _observe_mail_model_requests(provider)
 
     import nanobot.agent.context as context_module
@@ -853,7 +911,6 @@ async def _execute_task(connection, options, emit):
                 return
             entry_span = span("entry", entry="AgentLoop.process_direct", sender_id="eval")
             entry_span.__enter__()
-            entry_error = None
             try:
                 result = await loop.process_direct(
                     content=options["input"],
@@ -896,13 +953,10 @@ async def _execute_task(connection, options, emit):
                     _semantic_state(service, access, moment="after", pin=encoder_pin)
                 entry_span.close()
             except BaseException as exc:
-                entry_error = exc
                 entry_span.__exit__(type(exc), exc, exc.__traceback__)
-                if not isinstance(exc, (BudgetExceeded, Exception)):
-                    raise
-            finally:
-                await _close_provider(provider, entry_error)
-                await service.close()
+                raise
+            else:
+                entry_span.close()
     finally:
         service.search = original_search
         service.read_source = original_read

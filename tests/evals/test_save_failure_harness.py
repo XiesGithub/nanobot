@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from evals import daily, run
-from evals.common import ROOT, canonical, digest, load_cases, read
+from evals.common import canonical, digest, load_cases, read
 from evals.repeat import build_plan, record_trial
 from evals.scorer import score
 from evals.worker import _close_provider, _validate_fault_mode
@@ -66,8 +66,8 @@ def test_real_mode_rejects_save_fault_injection(fault):
         _validate_fault_mode("R", fault)
 
 
-def test_old_invalid_is_preserved():
-    path = ROOT / "docs/agent-evaluation-current-20261010/R-agent-2/executions/V004-1/trials/V004-1"
+def test_old_invalid_is_preserved(history_tree):
+    path = history_tree / "docs/agent-evaluation-current-20261010/R-agent-2/executions/V004-1/trials/V004-1"
     evidence = read(path / "artifacts" / "evidence.json")
     original = read(path / "verdicts" / "1.json")
     case = next(c for c in load_cases() if c["case_id"] == "V004")
